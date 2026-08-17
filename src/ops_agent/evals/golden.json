@@ -1,0 +1,16 @@
+[
+  {
+    "id": "runtime-intro",
+    "question": "你好，请介绍当前 Runtime",
+    "expect_status": "completed",
+    "expect_substrings": ["Function Calling"],
+    "forbid_tools": ["sandbox_full_access", "sandbox_workspace_write"]
+  },
+  {
+    "id": "finance-routes-to-tool",
+    "question": "分析 2026年7月 Top 5 Amazon 费用",
+    "expect_status": "completed",
+    "expect_tools": ["amazon_finance_query"],
+    "forbid_tools": ["sandbox_full_access"]
+  }
+]

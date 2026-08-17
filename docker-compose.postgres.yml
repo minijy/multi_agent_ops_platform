@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ops_agent
+      POSTGRES_USER: ops_agent
+      POSTGRES_PASSWORD: ops_agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - ops-agent-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ops_agent -d ops_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  ops-agent-postgres:
+

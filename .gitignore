@@ -1,0 +1,46 @@
+# ── Secrets & local env ──────────────────────────────────────
+.env
+.env.local
+.env.*.local
+!.env.example
+!.env.postgres.example
+
+# ── Python ───────────────────────────────────────────────────
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.so
+
+# ── Runtime data (SQLite, attachments, agent/model configs) ───
+data/
+backups/
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+
+# ── IDE & OS ─────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── Logs & temp ──────────────────────────────────────────────
+*.log
+tmp/
+temp/
+
+# ── Generated / stale artifacts ──────────────────────────────
+src/ops_agent/graph/
+fixtures/mock_data/

@@ -1,0 +1,218 @@
+from __future__ import annotations
+
+import json
+from functools import lru_cache
+from pathlib import Path
+from typing import Any, Literal
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+CONTEXT_WINDOW_API_TO_FIELD = {
+    "enabled": "context_window_enabled",
+    "keep_recent_user_turns": "context_keep_recent_user_turns",
+    "max_messages": "context_max_messages",
+    "max_chars": "context_max_chars",
+    "tool_max_rows": "context_tool_max_rows",
+    "tool_max_chars": "context_tool_max_chars",
+}
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", case_sensitive=False
+    )
+
+    app_env: str = "development"
+    app_host: str = "127.0.0.1"
+    app_port: int = 8100
+    log_level: str = "INFO"
+    app_api_key: str = ""
+
+    control_plane_backend: Literal["sqlite", "postgres"] = "sqlite"
+    session_event_backend: Literal["sqlite", "postgres"] = "sqlite"
+    platform_db_path: Path = Path("data/platform.sqlite3")
+    session_event_path: Path = Path("data/session_events.sqlite3")
+    runtime_governance_path: Path = Path("data/runtime_governance.sqlite3")
+    runtime_metrics_path: Path = Path("data/runtime_metrics.sqlite3")
+    runtime_overrides_path: Path = Path("data/runtime_overrides.json")
+    agent_definitions_path: Path = Path("data/agent_definitions.json")
+    model_definitions_path: Path = Path("data/model_definitions.json")
+    attachment_path: Path = Path("data/attachments")
+    attachment_max_image_bytes: int = Field(default=5 * 1024 * 1024, ge=1024)
+    attachment_max_images_per_message: int = Field(default=20, ge=1, le=100)
+    attachment_max_image_pixels: int = Field(default=40_000_000, ge=1_000_000)
+    skills_paths: str = "skills"
+    mcp_config_path: Path = Path("config/mcp_servers.json")
+    postgres_dsn: str = "postgresql://ops_agent:ops_agent@127.0.0.1:5432/ops_agent"
+    analytics_dsn: str = ""
+    analytics_statement_timeout_ms: int = Field(default=5000, ge=100, le=60_000)
+
+    model_provider: Literal["mock", "openai", "zhipu"] = "mock"
+    model_name: str = "gpt-5.6-sol"
+    openai_api_key: str = ""
+    model_temperature: float | None = None
+    model_request_timeout_seconds: float = Field(default=45, ge=5, le=300)
+    model_max_retries: int = Field(default=1, ge=0, le=5)
+    model_backoff_base_seconds: float = Field(default=1, ge=0.1, le=30)
+    model_rate_limit_cooldown_seconds: int = Field(default=30, ge=1, le=3600)
+    zai_api_key: str = ""
+    zhipu_base_url: str = "https://open.bigmodel.cn/api/paas/v4/"
+    zhipu_model_name: str = "glm-5.2"
+    zhipu_vision_model_name: str = "glm-4.6v-flash"
+
+    max_tool_steps: int = Field(default=8, ge=1, le=30)
+    run_token_budget: int = Field(default=30_000, ge=1000)
+    context_window_enabled: bool = True
+    context_keep_recent_user_turns: int = Field(default=16, ge=1, le=200)
+    context_max_messages: int = Field(default=64, ge=8, le=500)
+    context_max_chars: int = Field(default=80_000, ge=4_000, le=2_000_000)
+    context_tool_max_rows: int = Field(default=12, ge=1, le=200)
+    context_tool_max_chars: int = Field(default=4_000, ge=500, le=80_000)
+    subagent_queue_backend: Literal["inline", "db"] = "inline"
+    subagent_worker_count: int = Field(default=4, ge=1, le=32)
+    subagent_max_depth: int = Field(default=3, ge=0, le=8)
+    subagent_default_timeout_seconds: float = Field(default=120, ge=5, le=1800)
+    subagent_default_token_budget: int = Field(default=8000, ge=256)
+    subagent_lease_seconds: float = Field(default=30, ge=5, le=600)
+    subagent_lease_renew_seconds: float = Field(default=10, ge=0.1, le=300)
+    subagent_worker_poll_seconds: float = Field(default=0.5, ge=0.05, le=30)
+    subagent_max_attempts: int = Field(default=3, ge=1, le=20)
+    subagent_worker_id: str = ""
+    sandbox_workspace_root: Path = Path(".")
+    sandbox_timeout_seconds: float = Field(default=30, ge=1, le=600)
+    sandbox_max_output_bytes: int = Field(default=65536, ge=1024)
+    sandbox_full_access_enabled: bool = False
+
+    jwt_secret: str = ""
+    jwt_issuer: str = ""
+    jwt_audience: str = ""
+    jwt_required: bool = False
+    otel_service_name: str = "ops-agent"
+    otel_exporter: Literal["none", "console", "otlp"] = "none"
+    otel_exporter_otlp_endpoint: str = ""
+
+    knowledge_backend: Literal["mock", "qdrant"] = "mock"
+    qdrant_url: str = ""
+    qdrant_api_key: str = ""
+    qdrant_collection: str = "rag_chunks_multilingual_minilm_v1"
+    qdrant_tenant_id: str = ""
+    qdrant_knowledge_base_id: str = ""
+    embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    qdrant_top_k: int = Field(default=5, ge=1, le=50)
+
+    @field_validator(
+        "platform_db_path",
+        "session_event_path",
+        "runtime_governance_path",
+        "runtime_metrics_path",
+        "runtime_overrides_path",
+        "agent_definitions_path",
+        "model_definitions_path",
+        "attachment_path",
+        "mcp_config_path",
+        "sandbox_workspace_root",
+    )
+    @classmethod
+    def make_sqlite_path_absolute(cls, value: Path) -> Path:
+        return value.expanduser().resolve()
+
+    def validate_runtime(self) -> None:
+        if self.app_env == "production" and not self.app_api_key and not self.jwt_secret:
+            raise ValueError("APP_API_KEY or JWT_SECRET is required in production")
+        if self.jwt_required and not self.jwt_secret:
+            raise ValueError("JWT_SECRET is required when JWT_REQUIRED=true")
+        postgres_backends = (
+            self.control_plane_backend,
+            self.session_event_backend,
+        )
+        if "postgres" in postgres_backends and not self.postgres_dsn:
+            raise ValueError("POSTGRES_DSN is required for postgres persistence")
+        if self.model_provider == "openai" and not self.openai_api_key:
+            raise ValueError("OPENAI_API_KEY is required when MODEL_PROVIDER=openai")
+        if self.model_provider == "zhipu" and not self.zai_api_key:
+            raise ValueError("ZAI_API_KEY is required when MODEL_PROVIDER=zhipu")
+        if self.knowledge_backend == "qdrant":
+            missing = [
+                name for name, value in {
+                    "QDRANT_URL": self.qdrant_url,
+                    "QDRANT_API_KEY": self.qdrant_api_key,
+                    "QDRANT_TENANT_ID": self.qdrant_tenant_id,
+                    "QDRANT_KNOWLEDGE_BASE_ID": self.qdrant_knowledge_base_id,
+                }.items() if not value
+            ]
+            if missing:
+                raise ValueError(f"missing Qdrant settings: {', '.join(missing)}")
+
+
+def context_window_snapshot(settings: Settings) -> dict[str, Any]:
+    return {
+        api_name: getattr(settings, field)
+        for api_name, field in CONTEXT_WINDOW_API_TO_FIELD.items()
+    }
+
+
+def apply_runtime_overrides(settings: Settings) -> Settings:
+    path = settings.runtime_overrides_path
+    if not path.is_file():
+        return settings
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return settings
+    if not isinstance(payload, dict):
+        return settings
+    updates = {
+        field: payload[field]
+        for field in CONTEXT_WINDOW_API_TO_FIELD.values()
+        if field in payload
+    }
+    if not updates:
+        return settings
+    validated = Settings.model_validate({**settings.model_dump(), **updates})
+    for field in CONTEXT_WINDOW_API_TO_FIELD.values():
+        setattr(settings, field, getattr(validated, field))
+    return settings
+
+
+def update_context_window(
+    settings: Settings, updates: dict[str, Any]
+) -> dict[str, Any]:
+    mapped = {
+        CONTEXT_WINDOW_API_TO_FIELD[key]: value
+        for key, value in updates.items()
+        if key in CONTEXT_WINDOW_API_TO_FIELD and value is not None
+    }
+    if mapped:
+        validated = Settings.model_validate({**settings.model_dump(), **mapped})
+        for field in CONTEXT_WINDOW_API_TO_FIELD.values():
+            setattr(settings, field, getattr(validated, field))
+        path = settings.runtime_overrides_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing: dict[str, Any] = {}
+        if path.is_file():
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    existing = loaded
+            except (OSError, json.JSONDecodeError):
+                existing = {}
+        existing.update(
+            {
+                field: getattr(settings, field)
+                for field in CONTEXT_WINDOW_API_TO_FIELD.values()
+            }
+        )
+        path.write_text(
+            json.dumps(existing, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    return context_window_snapshot(settings)
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    settings = Settings()
+    apply_runtime_overrides(settings)
+    settings.validate_runtime()
+    return settings
