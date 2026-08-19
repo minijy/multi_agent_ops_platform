@@ -3494,6 +3494,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         def console() -> FileResponse:
             return FileResponse(frontend_dir / "index.html")
 
+        @application.get("/favicon.ico", include_in_schema=False)
+        def favicon() -> FileResponse:
+            ico = frontend_dir / "favicon.ico"
+            return FileResponse(ico if ico.exists() else frontend_dir / "favicon.svg")
+
     return application
 
 

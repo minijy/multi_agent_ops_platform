@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="ArkFlow">
+  <rect width="32" height="32" rx="8" fill="#F2B946"/>
+  <path fill="#102F31" d="M16 4.8 27.8 28h-5.6l-1.6-4H11.4l-1.6 4H4.2L16 4.8zm-3.2 14.6h6.4L16 12.4l-3.2 7z"/>
+  <path fill="none" stroke="#167262" stroke-width="2.15" stroke-linecap="round" d="M7.2 23.2c2.9-2.1 5.2 1.4 8.8-.5 3.6-1.9 5.8 1.6 8.8-.4"/>
+</svg>
