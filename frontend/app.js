@@ -178,7 +178,7 @@ function watchAgentTranscriptSize(){
 }
 const statusLabels={started:'已启动',queued:'队列中',running:'执行中',interrupt_requested:'中断中',interrupted:'已中断',cancel_requested:'取消中',cancelled:'已取消',timed_out:'已超时',failed:'失败',budget_exceeded:'预算耗尽',collecting_evidence:'收集证据',planning_action:'生成计划',waiting_approval:'等待审批',executing:'执行中',reviewing:'审核中',completed:'已完成',rejected:'已拒绝',review_failed:'审核失败',candidate:'待确认',conflicted:'有冲突',active:'已生效',superseded:'已替代',deleted:'已删除'};
 const agentLabels={supervisor:'Supervisor',knowledge_agent:'Knowledge Agent',telemetry_agent:'Telemetry Agent',diagnosis_agent:'Diagnosis Agent',action_agent:'Action Agent',approval_gate:'Approval Gate',reviewer_agent:'Reviewer',finalizer:'Finalizer'};
-function headers(){const value={'Content-Type':'application/json'};if(state.session.accessToken)value.Authorization=`Bearer ${state.session.accessToken}`;else{value['X-Tenant-ID']=state.session.tenant;value['X-User-ID']=state.session.userId;value['X-User-Role']=state.session.role}if(state.session.apiKey)value['X-API-Key']=state.session.apiKey;return value}
+function headers(body){const value={};if(!(body instanceof FormData))value['Content-Type']='application/json';if(state.session.accessToken)value.Authorization=`Bearer ${state.session.accessToken}`;else{value['X-Tenant-ID']=state.session.tenant;value['X-User-ID']=state.session.userId;value['X-User-Role']=state.session.role}if(state.session.apiKey)value['X-API-Key']=state.session.apiKey;return value}
 async function parseApiResponse(response){if(!response.ok){let payload={};try{payload=await response.json()}catch{}const detail=payload.detail;const message=typeof detail==='object'&&detail?[detail.message,detail.hint].filter(Boolean).join('\n'):(detail||`请求失败 (${response.status})`);const error=new Error(message);error.status=response.status;if(typeof detail==='object'&&detail){error.code=detail.code;error.retryAfterSeconds=detail.retry_after_seconds;error.provider=detail.provider;error.hint=detail.hint}throw error}if(response.status===204)return null;return response.json()}
 let accountRefreshInFlight=null;
 function authRefreshExempt(path){
@@ -221,7 +221,7 @@ async function refreshAccountSession(){
   return accountRefreshInFlight;
 }
 async function authFetch(path,options={}){
-  const send=()=>fetch(path,{...options,headers:{...headers(),...(options.headers||{})}});
+  const send=()=>fetch(path,{...options,headers:{...headers(options.body),...(options.headers||{})}});
   let response=await send();
   if(response.status!==401||authRefreshExempt(path)||!(state.session.refreshToken||localStorage.getItem('arkflow.refreshToken')))return response;
   try{
@@ -536,59 +536,169 @@ async function deleteConnectionEditor(){const editing=state.editingConnection;if
 async function loadAgentsPage(){const [agents,configuration]=await Promise.all([api('/v1/agents'),api('/v1/configuration')]);state.agents=agents.items;state.configuration=configuration;$('#analyst-mode-select').value=configuration.analyst_runtime?.mode||'general';renderAgentCards(agents.items)}
 async function loadToolsPage(){const [agents,catalog]=await Promise.all([api('/v1/agents'),api('/v1/catalog')]);state.agents=agents.items;state.catalog=catalog;await loadCatalog()}
 async function loadConnectorsPage(){const [connections,catalog]=await Promise.all([api('/v1/connections'),state.catalog?Promise.resolve(state.catalog):api('/v1/catalog')]);state.catalog=catalog;renderConnectionCards(connections.items)}
-function renderKnowledgeSpaces(spaces){
-  const root=$('#knowledge-settings');if(!root)return;state.knowledgeSpaces=spaces;
-  root.innerHTML=spaces.length?spaces.map(item=>`<article class="agent-card ${item.enabled?'':'disabled'}"><div class="agent-card-head">${connectorIconMarkup(item.connector_type||'qdrant')}${agentStatusChip(item.enabled?'active':'disabled')}</div><h3>${escapeHTML(item.name)}</h3><p class="agent-role">${escapeHTML(connectorLabel(item.connector_type||'qdrant'))} · ${escapeHTML(item.connection_name||'')}</p><p class="form-hint"><span class="mono">${escapeHTML(item.collection_name)}</span></p><div class="agent-tags">${agentTagMarkup('source-db',`${item.vector_dimension} 维`)}${agentTagMarkup('runtime',`Top K ${item.top_k}`)}</div><p class="form-hint">${escapeHTML(item.embedding_model)}</p><div class="agent-card-actions"><button class="primary small" data-view-knowledge="${escapeHTML(item.id)}">查看内容</button><button class="secondary" data-test-knowledge="${escapeHTML(item.id)}">测试连接</button><button class="secondary" data-edit-knowledge="${escapeHTML(item.id)}">编辑配置</button></div></article>`).join(''):'<article class="panel empty"><b>尚未配置知识空间</b><span>先创建 Qdrant 或 Milvus 连接，再点击「添加知识空间」。</span></article>';
-  $$('[data-view-knowledge]',root).forEach(button=>button.addEventListener('click',()=>openKnowledgeContents(button.dataset.viewKnowledge)));
-  $$('[data-edit-knowledge]',root).forEach(button=>button.addEventListener('click',()=>openKnowledgeEditor(button.dataset.editKnowledge)));
-  $$('[data-test-knowledge]',root).forEach(button=>button.addEventListener('click',()=>testKnowledgeSpace(button.dataset.testKnowledge,button)));
+function knowledgeStatusChip(item){return `<span class="status-chip ${escapeHTML(item?.code||'')}">${escapeHTML(item?.label||'')}</span>`}
+function knowledgeLibrary(){return state.knowledgeLibrary||{spaces:[],spaceId:'',categoryId:'',tree:[],documents:[],hits:[]}}
+function renderKnowledgeTree(tree){
+  const selected=knowledgeLibrary().categoryId||'';
+  const walk=(nodes,depth)=>nodes.map(node=>{
+    const active=selected===node.id?' active':'';
+    const child=depth>0?' child':'';
+    const virtual=node.virtual?' virtual':'';
+    return `<button class="tree-item${active}${child}${virtual}" type="button" data-knowledge-category="${escapeHTML(node.id)}"><span>${escapeHTML(node.name)}</span><small>${node.document_count||0}</small></button>${walk(node.children||[],depth+1)}`;
+  }).join('');
+  $('#knowledge-tree').innerHTML=walk(tree||[],0);
+  const parent=$('#knowledge-category-parent');
+  const upload=$('#knowledge-upload-category');
+  const options=[];
+  const collect=(nodes,prefix)=>{nodes.forEach(node=>{if(node.virtual)return;options.push({id:node.id,name:`${prefix}${node.name}`});collect(node.children||[],`${prefix}${node.name} / `)})};
+  collect(tree||[],'');
+  const html=`<option value="">作为一级分类</option>${options.map(item=>`<option value="${escapeHTML(item.id)}">${escapeHTML(item.name)}</option>`).join('')}`;
+  if(parent)parent.innerHTML=html;
+  if(upload)upload.innerHTML=`<option value="">未分类</option>${options.map(item=>`<option value="${escapeHTML(item.id)}">${escapeHTML(item.name)}</option>`).join('')}`;
+  $$('[data-knowledge-category]',$('#knowledge-tree')).forEach(button=>button.addEventListener('click',()=>{state.knowledgeLibrary.categoryId=button.dataset.knowledgeCategory||'';loadKnowledgeDocuments()}));
+}
+function renderKnowledgeDocuments(items){
+  const empty=$('#knowledge-docs-empty');
+  const body=$('#knowledge-docs');
+  empty.hidden=items.length>0;
+  body.innerHTML=items.map(doc=>`<tr data-knowledge-document="${escapeHTML(doc.id)}"><td><b>${escapeHTML(doc.title)}</b><small>${escapeHTML(doc.filename||'')}</small></td><td>${escapeHTML(doc.document_type_label||'')}</td><td>${escapeHTML(doc.category_name||'未分类')}</td><td>v${doc.version||1}</td><td>${knowledgeStatusChip(doc.parse_status)}</td><td>${knowledgeStatusChip(doc.index_status)}</td><td>${doc.chunk_count||'—'}</td></tr>`).join('');
+  $$('[data-knowledge-document]',body).forEach(row=>row.addEventListener('click',()=>openKnowledgeDocument(row.dataset.knowledgeDocument)));
+}
+async function loadKnowledgeDocuments(){
+  const lib=knowledgeLibrary();
+  if(!lib.spaceId)return;
+  const query=lib.categoryId?`?category_id=${encodeURIComponent(lib.categoryId)}`:'';
+  const [categories,documents]=await Promise.all([
+    api(`/v1/knowledge/library/spaces/${encodeURIComponent(lib.spaceId)}/categories`),
+    api(`/v1/knowledge/library/spaces/${encodeURIComponent(lib.spaceId)}/documents${query}`),
+  ]);
+  lib.tree=categories.tree||[];
+  lib.documents=documents.items||[];
+  renderKnowledgeTree(lib.tree);
+  renderKnowledgeDocuments(lib.documents);
+  $('#knowledge-search-results').hidden=true;
+  $('#knowledge-docs-wrap').hidden=false;
 }
 async function loadKnowledgePage(){
-  const [spaces,connections]=await Promise.all([api('/v1/knowledge/spaces'),api('/v1/connections')]);
-  state.connections=connections.items;
-  renderKnowledgeSpaces(spaces.items);
+  const status=await api('/v1/knowledge/library/status');
+  const unconfigured=$('#knowledge-unconfigured');
+  const library=$('#knowledge-library');
+  const upload=$('#knowledge-upload-button');
+  const createSpace=$('#knowledge-create-space-button');
+  if(!status.configured){
+    unconfigured.hidden=false;
+    library.hidden=true;
+    if(upload)upload.hidden=true;
+    if(createSpace)createSpace.hidden=true;
+    return;
+  }
+  unconfigured.hidden=true;
+  library.hidden=false;
+  if(upload)upload.hidden=false;
+  if(createSpace)createSpace.hidden=false;
+  const listed=await api('/v1/knowledge/library/spaces');
+  const spaces=listed.items||[];
+  const stored=localStorage.getItem('arkflow.knowledgeSpaceId')||'';
+  const spaceId=spaces.some(item=>item.id===stored)?stored:(spaces[0]?.id||'');
+  state.knowledgeLibrary={spaces,spaceId,categoryId:'',tree:[],documents:[],hits:[]};
+  fillKnowledgeSpaceSelect(spaces,spaceId);
+  if(spaceId)await loadKnowledgeDocuments();
+  else{$('#knowledge-tree').innerHTML='';renderKnowledgeDocuments([])}
 }
-function vectorConnections(){return state.connections.filter(item=>['qdrant','milvus'].includes(item.connector_type)&&item.enabled&&item.health?.state==='ready')}
-function fillKnowledgeConnectionOptions(selected=''){
-  const options=vectorConnections();const select=$('#knowledge-edit-connection');
-  select.innerHTML=`<option value="">选择向量数据库连接</option>${options.map(item=>`<option value="${escapeHTML(item.id)}">${escapeHTML(item.name)} · ${escapeHTML(connectorLabel(item.connector_type))}</option>`).join('')}`;
-  select.value=selected;
+function fillKnowledgeSpaceSelect(spaces,spaceId){
+  const select=$('#knowledge-space-select');
+  if(!select)return;
+  select.innerHTML=spaces.length?spaces.map(item=>`<option value="${escapeHTML(item.id)}">${escapeHTML(item.name)} · ${item.document_count||0} 篇</option>`).join(''):'<option value="">请选择或新建知识空间</option>';
+  select.value=spaceId||'';
 }
-function openKnowledgeEditor(spaceId){
-  const item=spaceId?state.knowledgeSpaces.find(value=>value.id===spaceId):null;
-  if(spaceId&&!item){toast('知识空间不存在','error');return}
-  state.editingKnowledgeSpace=item?{...item,isNew:false}:{name:'',connection_id:'',collection_name:'',embedding_model:'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2',vector_dimension:384,top_k:5,vector_field:'',text_field:'text',category_field:'category',tenant_field:'tenant_id',knowledge_base_field:'knowledge_base_id',knowledge_base_id:'default',enabled:true,isNew:true};
-  const value=state.editingKnowledgeSpace;$('#knowledge-editor-title').textContent=value.isNew?'添加知识空间':value.name;fillKnowledgeConnectionOptions(value.connection_id);$('#knowledge-edit-name').value=value.name||'';$('#knowledge-edit-collection').value=value.collection_name||'';$('#knowledge-edit-embedding').value=value.embedding_model||'';$('#knowledge-edit-dimension').value=value.vector_dimension||384;$('#knowledge-edit-top-k').value=value.top_k||5;$('#knowledge-edit-vector-field').value=value.vector_field||'';$('#knowledge-edit-text-field').value=value.text_field||'text';$('#knowledge-edit-category-field').value=value.category_field||'category';$('#knowledge-edit-tenant-field').value=value.tenant_field||'';$('#knowledge-edit-kb-field').value=value.knowledge_base_field||'';$('#knowledge-edit-kb-id').value=value.knowledge_base_id||'';$('#knowledge-edit-enabled').checked=value.enabled!==false;$('#knowledge-edit-delete').hidden=value.isNew;$('#knowledge-editor-drawer').classList.add('open');
+async function openKnowledgeSpaceDrawer(){
+  $('#knowledge-space-form').reset();
+  const catalog=await api('/v1/knowledge/library/catalog');
+  const select=$('#knowledge-space-embedding');
+  const models=catalog.embedding_models||[];
+  const selected=catalog.default_embedding_model||'';
+  select.innerHTML=models.map(item=>`<option value="${escapeHTML(item.id)}"${item.id===selected?' selected':''}>${escapeHTML(item.label)} · ${item.vector_size} 维</option>`).join('');
+  $('#knowledge-space-drawer').classList.add('open');
 }
-function knowledgeEditorPayload(){return{name:$('#knowledge-edit-name').value.trim(),connection_id:$('#knowledge-edit-connection').value,collection_name:$('#knowledge-edit-collection').value.trim(),embedding_model:$('#knowledge-edit-embedding').value.trim(),vector_dimension:Number($('#knowledge-edit-dimension').value)||384,top_k:Number($('#knowledge-edit-top-k').value)||5,vector_field:$('#knowledge-edit-vector-field').value.trim(),text_field:$('#knowledge-edit-text-field').value.trim(),category_field:$('#knowledge-edit-category-field').value.trim()||'category',tenant_field:$('#knowledge-edit-tenant-field').value.trim(),knowledge_base_field:$('#knowledge-edit-kb-field').value.trim(),knowledge_base_id:$('#knowledge-edit-kb-id').value.trim(),enabled:$('#knowledge-edit-enabled').checked}}
-async function saveKnowledgeSpace(event){event.preventDefault();const editing=state.editingKnowledgeSpace;if(!editing)return;const submit=$('#knowledge-edit-save');submit.disabled=true;try{const payload=knowledgeEditorPayload();if(editing.isNew)await api('/v1/knowledge/spaces',{method:'POST',body:JSON.stringify(payload)});else await api(`/v1/knowledge/spaces/${encodeURIComponent(editing.id)}`,{method:'PATCH',body:JSON.stringify(payload)});toast(editing.isNew?'知识空间已创建':'知识空间已更新','success');$('#knowledge-editor-drawer').classList.remove('open');await loadKnowledgePage()}catch(error){toast(error.message,'error')}finally{submit.disabled=false}}
-async function deleteKnowledgeSpace(){const item=state.editingKnowledgeSpace;if(!item||item.isNew)return;if(!window.confirm(`确定删除知识空间「${item.name}」？`))return;try{await api(`/v1/knowledge/spaces/${encodeURIComponent(item.id)}`,{method:'DELETE'});toast('知识空间已删除','success');$('#knowledge-editor-drawer').classList.remove('open');await loadKnowledgePage()}catch(error){toast(error.message,'error')}}
-async function testKnowledgeSpace(id,button){button.disabled=true;try{const result=await api(`/v1/knowledge/spaces/${encodeURIComponent(id)}/test`,{method:'POST'});toast(`连接正常，Collection ${result.collection} 可用`,'success')}catch(error){toast(error.message,'error')}finally{button.disabled=false}}
-function renderKnowledgeContents(){
-  const viewer=state.knowledgeContent;const list=$('#knowledge-content-list');const category=viewer.category;
-  const visible=category?viewer.items.filter(item=>item.category===category):viewer.items;
-  $('#knowledge-content-summary').textContent=`Collection 共 ${viewer.total} 个知识片段，已加载 ${viewer.items.length} 个`;
-  const categories=[...new Set(viewer.items.map(item=>item.category||'未分类'))].sort();viewer.categories=categories;
-  $('#knowledge-category-bar').innerHTML=`<button class="knowledge-category ${category?'':'active'}" data-knowledge-category="">全部 <span>${viewer.items.length}</span></button>${categories.map(name=>`<button class="knowledge-category ${category===name?'active':''}" data-knowledge-category="${escapeHTML(name)}">${escapeHTML(name)} <span>${viewer.items.filter(item=>item.category===name).length}</span></button>`).join('')}`;
-  list.innerHTML=visible.length?visible.map(item=>{const metadata=Object.entries(item.metadata||{}).map(([key,value])=>`<span><b>${escapeHTML(key)}</b> ${escapeHTML(Array.isArray(value)?value.join(', '):value)}</span>`).join('');return`<article class="knowledge-content-item"><div class="knowledge-content-head"><span class="status-chip completed">${escapeHTML(item.category||'未分类')}</span><code>${escapeHTML(item.id)}</code></div><p>${escapeHTML(item.content||'该记录在配置的文本字段中没有内容')}</p>${metadata?`<div class="knowledge-content-meta">${metadata}</div>`:''}</article>`}).join(''):'<article class="empty"><b>没有匹配的知识内容</b><span>请检查 Collection 的文本字段和分类字段配置。</span></article>';
-  $$('[data-knowledge-category]',$('#knowledge-category-bar')).forEach(button=>button.addEventListener('click',()=>{viewer.category=button.dataset.knowledgeCategory||'';renderKnowledgeContents()}));
-  $('#knowledge-content-more').hidden=!viewer.cursor;
+function closeKnowledgeSpaceDrawer(){$('#knowledge-space-drawer').classList.remove('open')}
+async function createKnowledgeSpace(event){
+  event.preventDefault();
+  const created=await api('/v1/knowledge/library/spaces',{method:'POST',body:JSON.stringify({name:$('#knowledge-space-name').value.trim(),description:$('#knowledge-space-description').value.trim(),embedding_model:$('#knowledge-space-embedding').value})});
+  localStorage.setItem('arkflow.knowledgeSpaceId',created.id);
+  closeKnowledgeSpaceDrawer();
+  toast('空间已创建并完成对接','success');
+  await loadKnowledgePage();
 }
-async function loadKnowledgeContents(append=false){
-  const viewer=state.knowledgeContent;if(!viewer.spaceId)return;const query=new URLSearchParams({limit:'50'});if(append&&viewer.cursor)query.set('cursor',viewer.cursor);
-  const result=await api(`/v1/knowledge/spaces/${encodeURIComponent(viewer.spaceId)}/contents?${query}`);viewer.items=append?[...viewer.items,...result.items]:result.items;viewer.cursor=result.next_cursor;viewer.total=result.total;$('#knowledge-content-title').textContent=result.space_name;renderKnowledgeContents();
+async function createKnowledgeCategory(event){
+  event.preventDefault();
+  const lib=knowledgeLibrary();
+  if(!lib.spaceId)return;
+  await api(`/v1/knowledge/library/spaces/${encodeURIComponent(lib.spaceId)}/categories`,{method:'POST',body:JSON.stringify({name:$('#knowledge-category-name').value.trim(),parent_id:$('#knowledge-category-parent').value||null})});
+  $('#knowledge-category-name').value='';
+  toast('分类已创建','success');
+  await loadKnowledgeDocuments();
 }
-async function openKnowledgeContents(spaceId){state.knowledgeContent={spaceId,items:[],categories:[],category:'',cursor:null,total:0};$('#knowledge-content-drawer').classList.add('open');$('#knowledge-content-list').innerHTML='<article class="empty"><b>正在读取知识内容…</b></article>';try{await loadKnowledgeContents()}catch(error){$('#knowledge-content-list').innerHTML=`<article class="empty"><b>读取失败</b><span>${escapeHTML(error.message)}</span></article>`;toast(error.message,'error')}}
+async function searchKnowledgeLibrary(event){
+  event.preventDefault();
+  const lib=knowledgeLibrary();
+  const query=$('#knowledge-search-query').value.trim();
+  if(!lib.spaceId||!query)return;
+  const result=await api(`/v1/knowledge/library/spaces/${encodeURIComponent(lib.spaceId)}/search`,{method:'POST',body:JSON.stringify({query,top_k:8,category_ids:lib.categoryId?[lib.categoryId]:[]})});
+  const items=result.items||[];
+  $('#knowledge-docs-wrap').hidden=true;
+  const root=$('#knowledge-search-results');
+  root.hidden=false;
+  root.innerHTML=items.length?items.map(item=>`<article class="knowledge-content-item"><div class="knowledge-content-head"><span class="status-chip completed">${escapeHTML(item.title||'未命名')}</span><code>${Number(item.score||0).toFixed(4)}</code></div><p>${escapeHTML(item.text||'')}</p><div class="knowledge-content-meta">${item.page?`<span><b>页</b> ${item.page}</span>`:''}${item.category_id?`<span><b>分类</b> ${escapeHTML(item.category_id)}</span>`:''}</div></article>`).join(''):'<article class="empty"><b>没有命中切片</b><span>请确认文枢已按新 payload 重建向量，且租户为 tenant-a。</span></article>';
+}
+async function openKnowledgeDocument(documentId){
+  $('#knowledge-content-drawer').classList.add('open');
+  $('#knowledge-content-list').innerHTML='<article class="empty"><b>正在读取文档…</b></article>';
+  try{
+    const [doc,chunks]=await Promise.all([
+      api(`/v1/knowledge/library/documents/${encodeURIComponent(documentId)}`),
+      api(`/v1/knowledge/library/documents/${encodeURIComponent(documentId)}/chunks?limit=20`),
+    ]);
+    $('#knowledge-content-title').textContent=doc.title||'文档';
+    $('#knowledge-content-summary').textContent=`${doc.filename||''} · ${doc.status_label||doc.status||''} · ${chunks.total||0} 个切片`;
+    const jobs=(doc.jobs||[]).map(job=>`<span><b>${escapeHTML(job.job_type_label||job.job_type)}</b> ${escapeHTML(job.status_label||job.status)}</span>`).join('');
+    const chunkHtml=(chunks.items||[]).map(chunk=>`<article class="knowledge-content-item"><div class="knowledge-content-head"><span class="status-chip completed">#${String((chunk.chunk_index||0)+1).padStart(3,'0')}</span>${chunk.page_start?`<code>第 ${chunk.page_start} 页</code>`:''}</div><p>${escapeHTML(chunk.text||'')}</p></article>`).join('');
+    $('#knowledge-content-list').innerHTML=`<div class="knowledge-content-meta">${jobs}</div><div class="drawer-actions"><button class="secondary small" type="button" data-knowledge-reparse="${escapeHTML(doc.id)}">重新解析</button><button class="secondary small" type="button" data-knowledge-reindex="${escapeHTML(doc.id)}">重新向量化</button><button class="danger-button small" type="button" data-knowledge-delete="${escapeHTML(doc.id)}">删除</button></div>${chunkHtml||'<article class="empty"><b>还没有切片</b></article>'}`;
+    $('[data-knowledge-reparse]')?.addEventListener('click',async()=>{await api(`/v1/knowledge/library/documents/${encodeURIComponent(doc.id)}/reparse`,{method:'POST'});toast('已提交重新解析','success');await openKnowledgeDocument(doc.id)});
+    $('[data-knowledge-reindex]')?.addEventListener('click',async()=>{await api(`/v1/knowledge/library/documents/${encodeURIComponent(doc.id)}/reindex`,{method:'POST'});toast('已提交重新向量化','success');await openKnowledgeDocument(doc.id)});
+    $('[data-knowledge-delete]')?.addEventListener('click',async()=>{if(!window.confirm(`确定删除「${doc.title}」？`))return;await api(`/v1/knowledge/library/documents/${encodeURIComponent(doc.id)}`,{method:'DELETE'});toast('文档已删除','success');$('#knowledge-content-drawer').classList.remove('open');await loadKnowledgeDocuments()});
+  }catch(error){
+    $('#knowledge-content-list').innerHTML=`<article class="empty"><b>读取失败</b><span>${escapeHTML(error.message)}</span></article>`;
+    toast(error.message,'error');
+  }
+}
+async function uploadKnowledgeDocument(event){
+  event.preventDefault();
+  const lib=knowledgeLibrary();
+  const file=$('#knowledge-upload-file').files[0];
+  if(!lib.spaceId||!file)return;
+  const body=new FormData();
+  body.append('file',file);
+  body.append('title',$('#knowledge-upload-title').value.trim());
+  body.append('document_type',$('#knowledge-upload-type').value);
+  body.append('tags',$('#knowledge-upload-tags').value.trim());
+  body.append('category_id',$('#knowledge-upload-category').value);
+  const submit=$('#knowledge-upload-save');
+  submit.disabled=true;
+  try{
+    const result=await api(`/v1/knowledge/library/spaces/${encodeURIComponent(lib.spaceId)}/documents`,{method:'POST',body});
+    toast(result.skipped?'检测到相同内容，已跳过':'文件已上传，正在处理','success');
+    $('#knowledge-upload-drawer').classList.remove('open');
+    $('#knowledge-upload-form').reset();
+    await loadKnowledgeDocuments();
+  }catch(error){toast(error.message,'error')}
+  finally{submit.disabled=false}
+}
 async function openAgentEditor(agentId){try{const agent=await api(`/v1/agents/${agentId}`);state.editingAgent=agent;$('#agent-editor-title').textContent=agent.name;$('#agent-editor-subtitle').textContent=`${agent.id} · ${agent.kind}`;$('#agent-edit-name').value=agent.name;$('#agent-edit-role').value=agent.role;$('#agent-edit-description').value=agent.description||'';$('#agent-edit-enabled').checked=!!agent.enabled;$('#agent-edit-system-prompt').value=agent.system_prompt||'';const toolsWrap=$('#agent-edit-tools-wrap');if(agent.id==='function-calling-runtime'||agent.kind==='role'){toolsWrap.hidden=false;const roleTools=agent.role_tools||agent.allowed_tools||[];renderBuiltinToolChips(roleTools,agent.tool_catalog);const optional=document.getElementById('agent-optional-tools');if(optional&&optional.parentElement)optional.parentElement.hidden=true;const add=document.getElementById('agent-add-tool-button');if(add&&add.parentElement)add.parentElement.hidden=true;const hint=toolsWrap.querySelector('.form-hint');if(hint)hint.textContent=agent.kind==='role'?'Analyst 使用独立严格工具白名单，不能继续委派。':'Coordinator 只保留委派工具；查数由当前模式允许的 Analyst 执行。';state.editingOptionalTools=[]}else{toolsWrap.hidden=true;state.editingOptionalTools=[]}$('#agent-editor-drawer').classList.add('open')}catch(error){toast(error.message)}}
 async function saveAnalystMode(event){event.preventDefault();const mode=$('#analyst-mode-select').value;try{const result=await api('/v1/configuration/analyst-runtime',{method:'PATCH',body:JSON.stringify({mode})});if(state.configuration)state.configuration.analyst_runtime=result.analyst_runtime;toast(mode==='general'?'已切换为通用 Analyst':'已切换为并行专业 Analyst','success');await loadAgentsPage()}catch(error){toast(error.message,'error')}}
 async function saveAgentEditor(event){event.preventDefault();const agent=state.editingAgent;if(!agent)return;const payload={name:$('#agent-edit-name').value.trim(),role:$('#agent-edit-role').value.trim(),description:$('#agent-edit-description').value.trim(),enabled:$('#agent-edit-enabled').checked,system_prompt:$('#agent-edit-system-prompt').value};const submit=$('#agent-edit-save');submit.disabled=true;try{await api(`/v1/agents/${agent.id}`,{method:'PATCH',body:JSON.stringify(payload)});toast('Agent 配置已保存');$('#agent-editor-drawer').classList.remove('open');closeToolMenu();await loadAgentsPage()}catch(error){toast(error.message)}finally{submit.disabled=false}}
 async function loadConfiguration(){
   state.configuration=await api('/v1/configuration');
   const c=state.configuration;
-  const knowledge=$('#knowledge-settings');
-  if(knowledge){
-    renderKnowledgeSpaces(c.knowledge.spaces||[]);
-  }
   const system=$('#system-settings');
   if(system){
     const defaultModel=c.models?.items?.find(item=>item.is_default)||c.models?.items?.[0];
@@ -1536,7 +1646,7 @@ function saveAccountSession(result){
   renderCurrentAccount();
 }
 function clearAccountSession(){state.session.accessToken='';state.session.refreshToken='';state.session.account=null;state.agentChat.sessionId=null;state.agentChat.sessions=[];state.agentChat.events=[];state.agentChat.subagents=[];state.agentChat.stream=null;localStorage.removeItem('arkflow.accessToken');localStorage.removeItem('arkflow.refreshToken')}
-function roleCanAccessPage(page){const role=state.session.role;const restricted={dashboard:['admin'],approvals:['admin','approver'],connectors:['admin'],memory:['admin'],access:['admin'],audit:['admin'],settings:['admin']};return !restricted[page]||restricted[page].includes(role)}
+function roleCanAccessPage(page){const role=state.session.role;const restricted={dashboard:['admin'],approvals:['admin','approver'],connectors:['admin'],knowledge:['admin'],memory:['admin'],access:['admin'],audit:['admin'],settings:['admin']};return !restricted[page]||restricted[page].includes(role)}
 function applyRoleVisibility(){const role=state.session.role;$$('[data-role-allow]').forEach(element=>{element.hidden=!String(element.dataset.roleAllow||'').split(/\s+/).includes(role)});$$('[data-go="connectors"]').forEach(element=>{element.hidden=role!=='admin'})}
 function renderCurrentAccount(){applyRoleVisibility();const account=state.session.account;if(!account)return;$('#account-name').textContent=account.display_name||account.user_id;$('#account-meta').textContent=`${account.tenant_id} · ${String(account.role).toUpperCase()}`;$('#account-avatar').textContent=String(account.display_name||account.user_id).slice(0,2).toUpperCase()}
 function setAuthRestoring(on){document.documentElement.classList.toggle('auth-restoring',!!on)}
@@ -1591,12 +1701,19 @@ $('#result-viewer-prev')?.addEventListener('click',()=>moveResultPage(-1));
 $('#result-viewer-next')?.addEventListener('click',()=>moveResultPage(1));
 $$('[data-close-result-viewer]').forEach(button=>button.addEventListener('click',()=>$('#result-viewer-drawer').classList.remove('open')));
 $('#result-viewer-drawer')?.addEventListener('click',event=>{if(event.target.id==='result-viewer-drawer')event.currentTarget.classList.remove('open')});
-$('#knowledge-add-button')?.addEventListener('click',()=>openKnowledgeEditor());
-$('#knowledge-editor-form')?.addEventListener('submit',saveKnowledgeSpace);
-$('#knowledge-edit-delete')?.addEventListener('click',deleteKnowledgeSpace);
-$$('[data-close-knowledge-editor]').forEach(button=>button.addEventListener('click',()=>$('#knowledge-editor-drawer').classList.remove('open')));
-$('#knowledge-editor-drawer')?.addEventListener('click',event=>{if(event.target.id==='knowledge-editor-drawer')event.currentTarget.classList.remove('open')});
-$('#knowledge-content-more')?.addEventListener('click',async event=>{event.currentTarget.disabled=true;try{await loadKnowledgeContents(true)}catch(error){toast(error.message,'error')}finally{event.currentTarget.disabled=false}});
+$('#knowledge-upload-button')?.addEventListener('click',()=>$('#knowledge-upload-drawer').classList.add('open'));
+$('#knowledge-upload-form')?.addEventListener('submit',uploadKnowledgeDocument);
+$$('[data-close-knowledge-upload]').forEach(button=>button.addEventListener('click',()=>$('#knowledge-upload-drawer').classList.remove('open')));
+$('#knowledge-upload-drawer')?.addEventListener('click',event=>{if(event.target.id==='knowledge-upload-drawer')event.currentTarget.classList.remove('open')});
+$('#knowledge-category-form')?.addEventListener('submit',event=>createKnowledgeCategory(event).catch(error=>toast(error.message,'error')));
+$('#knowledge-search-form')?.addEventListener('submit',event=>searchKnowledgeLibrary(event).catch(error=>toast(error.message,'error')));
+$('#knowledge-search-clear')?.addEventListener('click',()=>loadKnowledgeDocuments().catch(error=>toast(error.message,'error')));
+$('#knowledge-space-select')?.addEventListener('change',event=>{if(!state.knowledgeLibrary)return;state.knowledgeLibrary.spaceId=event.target.value;state.knowledgeLibrary.categoryId='';if(event.target.value)localStorage.setItem('arkflow.knowledgeSpaceId',event.target.value);loadKnowledgeDocuments().catch(error=>toast(error.message,'error'))});
+$('#knowledge-create-space-button')?.addEventListener('click',()=>openKnowledgeSpaceDrawer().catch(error=>toast(error.message,'error')));
+$('#knowledge-space-form')?.addEventListener('submit',event=>createKnowledgeSpace(event).catch(error=>toast(error.message,'error')));
+$$('[data-close-knowledge-space]').forEach(button=>button.addEventListener('click',closeKnowledgeSpaceDrawer));
+$('#knowledge-space-drawer')?.addEventListener('click',event=>{if(event.target.id==='knowledge-space-drawer')closeKnowledgeSpaceDrawer()});
+$('#knowledge-reindex-button')?.addEventListener('click',async()=>{const lib=knowledgeLibrary();if(!lib.spaceId)return;if(!window.confirm('将按新 payload 重建当前空间已有切片的向量，可能需要几分钟。继续？'))return;try{const result=await api(`/v1/knowledge/library/spaces/${encodeURIComponent(lib.spaceId)}/reindex`,{method:'POST'});toast(`已排队 ${result.queued||0} 个向量任务`,'success')}catch(error){toast(error.message,'error')}});
 $$('[data-close-knowledge-content]').forEach(button=>button.addEventListener('click',()=>$('#knowledge-content-drawer').classList.remove('open')));
 $('#knowledge-content-drawer')?.addEventListener('click',event=>{if(event.target.id==='knowledge-content-drawer')event.currentTarget.classList.remove('open')});
 function handleAgentQuestionKeydown(event){

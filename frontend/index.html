@@ -226,7 +226,7 @@
           </article>
           <article class="setting-card">
             <h3>Qdrant / Milvus</h3>
-            <p>配置向量数据库地址和访问凭证，然后在「知识库」中创建知识空间。</p>
+            <p>仅用于 Agent 个人记忆等向量后端。知识文档的解析和检索走文枢，不在这里对接 Collection。</p>
           </article>
         </div>
         <div class="agent-grid" id="connection-grid"></div>
@@ -377,30 +377,66 @@
       </div>
 
       <section class="page" id="page-knowledge">
-        <div class="page-heading"><div><p class="eyebrow">GROUNDING</p><h1>知识库</h1><p>为每个知识空间选择向量数据库，并配置集合与检索参数。</p></div><button class="primary small" id="knowledge-add-button" type="button">＋ 添加知识空间</button></div>
-        <article class="info-banner"><b>配置顺序</b><span>先在「连接器」中创建 Qdrant 或 Milvus 连接，再在这里绑定 Collection 和 Embedding 参数。</span></article>
-        <h2 class="section-title">知识空间</h2>
-        <div class="agent-grid" id="knowledge-settings"></div>
+        <div class="page-heading"><div><p class="eyebrow">GROUNDING</p><h1>知识库</h1><p>从下拉框选择文枢空间即可对接；解析仍由文枢完成。</p></div><div class="page-heading-actions"><button class="secondary small" id="knowledge-create-space-button" type="button">新建空间</button><button class="primary small" id="knowledge-upload-button" type="button">上传文档</button></div></div>
+        <article class="info-banner" id="knowledge-setup-banner"><b>文枢知识库</b><span>运营平台通过知识管理 API 展示文档。完整解析工作台仍在文枢。</span></article>
+        <div id="knowledge-unconfigured" class="panel empty" hidden><b>尚未连接文枢</b><span>在运营平台 .env 设置 KNOWLEDGE_API_URL（例如 http://127.0.0.1:8000）和 KNOWLEDGE_API_TOKEN，并与文枢相同令牌后重启两边服务。</span></div>
+        <div class="knowledge-library" id="knowledge-library" hidden>
+          <aside class="knowledge-library-nav">
+            <label>对接知识空间<select id="knowledge-space-select"></select></label>
+            <div class="knowledge-tree" id="knowledge-tree"></div>
+            <form id="knowledge-category-form" class="knowledge-category-form">
+              <label>新建分类<input id="knowledge-category-name" maxlength="80" required placeholder="例如 财务制度"></label>
+              <label>父分类<select id="knowledge-category-parent"><option value="">作为一级分类</option></select></label>
+              <button class="secondary small" type="submit">添加分类</button>
+            </form>
+            <button class="secondary small" id="knowledge-reindex-button" type="button">按新 payload 重建向量</button>
+          </aside>
+          <div class="knowledge-library-main">
+            <form id="knowledge-search-form" class="knowledge-search-form">
+              <input id="knowledge-search-query" maxlength="1000" placeholder="在当前空间检索切片，例如 AUTH-1003">
+              <button class="primary small" type="submit">检索</button>
+              <button class="secondary small" id="knowledge-search-clear" type="button">返回文档</button>
+            </form>
+            <div id="knowledge-search-results" class="knowledge-search-results" hidden></div>
+            <div class="table-wrap" id="knowledge-docs-wrap">
+              <table>
+                <thead><tr><th>文档</th><th>类型</th><th>分类</th><th>版本</th><th>解析</th><th>索引</th><th>切片</th></tr></thead>
+                <tbody id="knowledge-docs"></tbody>
+              </table>
+              <article class="empty" id="knowledge-docs-empty" hidden><b>这个分类还没有文档</b><span>点击右上角上传，或到文枢工作台导入。</span></article>
+            </div>
+          </div>
+        </div>
       </section>
 
-      <div class="drawer-backdrop" id="knowledge-editor-drawer">
+      <div class="drawer-backdrop" id="knowledge-space-drawer">
         <aside class="drawer access-editor">
-          <button class="modal-close" data-close-knowledge-editor type="button">×</button>
-          <p class="eyebrow">KNOWLEDGE SPACE</p>
-          <h2 id="knowledge-editor-title">添加知识空间</h2>
-          <p>选择向量数据库连接和已存在的 Collection。</p>
-          <form id="knowledge-editor-form">
-            <label>空间名称<input id="knowledge-edit-name" required maxlength="120" placeholder="例如 运营制度库"></label>
-            <label>向量数据库<select id="knowledge-edit-connection" required></select></label>
-            <label>Collection<input id="knowledge-edit-collection" required maxlength="255" placeholder="knowledge_chunks"></label>
-            <label>Embedding 模型<input id="knowledge-edit-embedding" required maxlength="255" value="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"></label>
-            <div class="form-row"><label>向量维度<input id="knowledge-edit-dimension" type="number" min="1" max="65536" value="384"></label><label>Top K<input id="knowledge-edit-top-k" type="number" min="1" max="100" value="5"></label></div>
-            <label>向量字段（可选）<input id="knowledge-edit-vector-field" maxlength="128" placeholder="Qdrant 默认向量可留空"></label>
-            <div class="form-row"><label>文本字段<input id="knowledge-edit-text-field" required maxlength="128" value="text"></label><label>分类字段<input id="knowledge-edit-category-field" required maxlength="128" value="category"></label></div>
-            <div class="form-row"><label>租户过滤字段<input id="knowledge-edit-tenant-field" maxlength="128" value="tenant_id"></label><label>知识库过滤字段<input id="knowledge-edit-kb-field" maxlength="128" value="knowledge_base_id"></label></div>
-            <label>知识库 ID<input id="knowledge-edit-kb-id" maxlength="160" value="default"></label>
-            <label class="context-toggle"><input id="knowledge-edit-enabled" type="checkbox" checked>启用此知识空间</label>
-            <div class="modal-actions"><button type="button" class="danger-button" id="knowledge-edit-delete" hidden>删除</button><button type="button" class="secondary" data-close-knowledge-editor>取消</button><button type="submit" class="primary" id="knowledge-edit-save">保存配置</button></div>
+          <button class="modal-close" data-close-knowledge-space type="button">×</button>
+          <p class="eyebrow">SPACE</p>
+          <h2>新建知识空间</h2>
+          <p>只需名称和 Embedding 模型。Qdrant Collection 由文枢自动创建，不必手工对接。</p>
+          <form id="knowledge-space-form">
+            <label>名称<input id="knowledge-space-name" maxlength="80" required placeholder="例如 售后手册"></label>
+            <label>描述<textarea id="knowledge-space-description" rows="2" maxlength="500"></textarea></label>
+            <label>Embedding 模型<select id="knowledge-space-embedding" required></select></label>
+            <div class="modal-actions"><button type="button" class="secondary" data-close-knowledge-space>取消</button><button class="primary" type="submit">创建并对接</button></div>
+          </form>
+        </aside>
+      </div>
+
+      <div class="drawer-backdrop" id="knowledge-upload-drawer">
+        <aside class="drawer access-editor">
+          <button class="modal-close" data-close-knowledge-upload type="button">×</button>
+          <p class="eyebrow">UPLOAD</p>
+          <h2>上传文档</h2>
+          <p>文件会保存到文枢对象存储，并排队解析、向量化。</p>
+          <form id="knowledge-upload-form">
+            <label>文件<input id="knowledge-upload-file" type="file" required></label>
+            <label>标题<input id="knowledge-upload-title" maxlength="200" placeholder="默认使用文件名"></label>
+            <label>类型<select id="knowledge-upload-type"><option value="manual">手册</option><option value="policy">制度</option><option value="faq">FAQ</option><option value="other">其他</option></select></label>
+            <label>分类<select id="knowledge-upload-category"><option value="">未分类</option></select></label>
+            <label>标签<input id="knowledge-upload-tags" placeholder="逗号分隔"></label>
+            <div class="modal-actions"><button type="button" class="secondary" data-close-knowledge-upload>取消</button><button type="submit" class="primary" id="knowledge-upload-save">开始入库</button></div>
           </form>
         </aside>
       </div>
@@ -408,12 +444,10 @@
       <div class="drawer-backdrop" id="knowledge-content-drawer">
         <aside class="drawer knowledge-content-drawer">
           <button class="modal-close" data-close-knowledge-content type="button">×</button>
-          <p class="eyebrow">KNOWLEDGE CONTENT</p>
-          <h2 id="knowledge-content-title">知识库内容</h2>
+          <p class="eyebrow">DOCUMENT</p>
+          <h2 id="knowledge-content-title">文档</h2>
           <p id="knowledge-content-summary" class="form-hint"></p>
-          <div class="knowledge-category-bar" id="knowledge-category-bar"></div>
           <div class="knowledge-content-list" id="knowledge-content-list"></div>
-          <div class="knowledge-content-actions"><button class="secondary" id="knowledge-content-more" type="button" hidden>加载更多</button></div>
         </aside>
       </div>
 

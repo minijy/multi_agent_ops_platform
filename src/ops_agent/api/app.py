@@ -49,6 +49,7 @@ from ..config import (
 from ..domain import ApprovalRequest
 from ..infrastructure.platform_store import PlatformStore, create_platform_store
 from ..model_gateway import create_model_gateway
+from ..knowledge_gateway import KnowledgeGateway, register_knowledge_library_routes
 from ..knowledge_spaces import KnowledgeSpaceCreate, KnowledgeSpaceUpdate
 from ..model_registry import (
     ModelCreateRequest,
@@ -308,6 +309,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             application.state.result_store = stack.result_store
             application.state.memory_service = stack.memory_service
             application.state.knowledge_spaces = stack.knowledge_spaces
+            application.state.knowledge_gateway = KnowledgeGateway.from_settings(
+                runtime_settings
+            )
             application.state.runtime_tool_registry = stack.tool_registry
             application.state.runtime_tool_executor = stack.agent_runtime.executor
             _sync_amazon_finance_agent(
@@ -3288,8 +3292,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
             "knowledge": {
                 "configured": bool(
-                    request.app.state.knowledge_spaces.list(principal.tenant_id)
+                    request.app.state.knowledge_gateway.configured
+                    or request.app.state.knowledge_spaces.list(principal.tenant_id)
                 ),
+                "library": request.app.state.knowledge_gateway.status(),
                 "spaces": [
                     item.model_dump(mode="json")
                     for item in request.app.state.knowledge_spaces.list(
@@ -3477,6 +3483,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             tenant_id=principal.tenant_id, limit=limit
         )
         return {"items": items, "count": len(items)}
+
+    register_knowledge_library_routes(application, principal_from_headers)
 
     frontend_dir = Path(__file__).resolve().parents[3] / "frontend"
     if frontend_dir.exists():

@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     connection_secrets_path: Path = Path("data/connection_secrets.json")
     tool_bindings_path: Path = Path("data/tool_bindings.json")
     knowledge_spaces_path: Path = Path("data/knowledge_spaces.json")
+    knowledge_api_url: str = ""
+    knowledge_api_token: str = ""
     default_tenant_id: str = "tenant-a"
     model_definitions_path: Path = Path("data/model_definitions.json")
     attachment_path: Path = Path("data/attachments")
@@ -172,8 +174,8 @@ class Settings(BaseSettings):
             raise ValueError("DASHSCOPE_API_KEY is required when MODEL_PROVIDER=qwen")
         if self.model_provider == "deepseek" and not self.deepseek_api_key:
             raise ValueError("DEEPSEEK_API_KEY is required when MODEL_PROVIDER=deepseek")
-        # Knowledge vector stores are tenant-scoped control-plane connections.
-        # Legacy QDRANT_* environment fields are retained only for migrations.
+        # Knowledge documents are managed by 文枢 (KNOWLEDGE_API_URL).
+        # Legacy QDRANT_* environment fields are retained only for memory search.
 
 
 def context_window_snapshot(settings: Settings) -> dict[str, Any]:

@@ -195,8 +195,10 @@ def _migrate_coordinator_override(
 ) -> dict[str, Any]:
     migrated = dict(override)
     migrated.setdefault("strict_tool_allowlist", True)
-    if not migrated.get("allowed_tools"):
-        migrated["allowed_tools"] = list(default.allowed_tools)
+    tools = list(migrated.get("allowed_tools") or default.allowed_tools)
+    if "search_knowledge" not in tools:
+        tools.append("search_knowledge")
+    migrated["allowed_tools"] = tools
     prompt = str(migrated.get("system_prompt") or "")
     if (
         not prompt.strip()

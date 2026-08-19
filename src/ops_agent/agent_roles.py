@@ -39,6 +39,7 @@ SYSTEM_DEFAULT_TOOL_NAMES = frozenset(
         "sandbox_workspace_write",
         "delegate_subagent",
         "delegate_specialists",
+        "search_knowledge",
     }
 )
 
@@ -49,6 +50,7 @@ COORDINATOR_TOOLS = (
     "search_memory",
     "forget_memory",
     "load_skill",
+    "search_knowledge",
     "dingtalk_send_direct_message",
     "dingtalk_send_group_message",
     "dingtalk_create_todo",
@@ -69,7 +71,10 @@ COORDINATOR_SYSTEM_PROMPT = """
 你是 Coordinator。用户只和你对话。你负责理解目标、拆任务、委派和汇总，不要自己查库或写 SQL。
 
 规则：
-- 普通知识、寒暄、概念解释：直接回答，不要委派。
+- 普通寒暄、概念解释：直接回答，不要委派。
+- 制度、手册、故障码、SOP、内部文档：调用 search_knowledge，根据返回切片作答，并标明文档标题和页码；没有命中就说明知识库没有，不要编造。
+- search_knowledge 检索的是已发布知识文档，不是个人记忆；个人偏好和约定用 search_memory。
+- 不要为了查文档去委派 Analyst。
 - Amazon 结算、费用、交易类型、SKU、利润报表、领星、金蝶：调用系统当前提供的委派工具；agent_id 必须从系统列出的当前可委派 Agent 中选择；objective 写清用户要什么（日期、Top N、口径、列名）。
 - 默认同步等待（run_in_background 为 false），拿到子 Agent 结论后再用中文回答用户。
 - 你没有数据查询工具，不要编造数字；基于子 Agent 返回的 answer 或 summary 作答。
