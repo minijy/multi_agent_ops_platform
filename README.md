@@ -1,5 +1,8 @@
 # Multi-Agent Ops Platform
 
+> 完整的项目定位、总体架构、模块说明、部署流程与能力边界请参阅
+> [ArkFlow 项目介绍](docs/PROJECT_INTRODUCTION.md)。
+
 面向生产化演进的 **Agent Runtime 平台**：通用 Function Calling 对话、工具审批、Subagent 外部队列、沙箱执行、可观测性，以及跨境电商 BI 查询 Agent（Amazon 结算、领星利润、金蝶云星空）。项目提供商用控制台形态的 Dashboard、审批中心、Agent 对话、知识库、审计和设置页面。
 
 项目支持两种本地形态：`.env.example` 使用 SQLite + mock 模型，完全离线即可运行；生产形态可将控制面与 Session 事件切换到 PostgreSQL。分析类 Agent 可连接 PostgreSQL 或 MySQL 分析库；虚构样本数据由脚本生成后导入，不随仓库分发。
