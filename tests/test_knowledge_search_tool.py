@@ -107,6 +107,7 @@ def test_coordinator_allowlist_includes_search_knowledge(tmp_path):
         "search_memory",
         "remember_fact",
         "forget_memory",
+        "web_search",
     ):
         registry.register(
             ToolDefinition(
@@ -121,6 +122,12 @@ def test_coordinator_allowlist_includes_search_knowledge(tmp_path):
         agents.runtime_config(), agents, settings, registry
     )
     assert "search_knowledge" in allowed
+    definition = registry.get("search_knowledge")
+    assert "寒暄" in definition.description
+    assert "VAT" in definition.description
+    assert "独立完整" in definition.description
+    assert "系统不会预先检索知识库" in agents.runtime_config().system_prompt
+    assert "即使问「是什么意思」" in agents.runtime_config().system_prompt
     analyst = resolve_agent_tool_allowlist(
         agents.analyst_config(), agents, settings, registry
     )

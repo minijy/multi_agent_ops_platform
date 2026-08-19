@@ -3,7 +3,7 @@
 > 完整的项目定位、总体架构、模块说明、部署流程与能力边界请参阅
 > [ArkFlow 项目介绍](docs/PROJECT_INTRODUCTION.md)。
 
-面向生产化演进的 **Agent Runtime 平台**：通用 Function Calling 对话、工具审批、Subagent 外部队列、沙箱执行、可观测性，以及跨境电商 BI 查询 Agent（Amazon 结算、领星利润、金蝶云星空）。项目提供商用控制台形态的 Dashboard、审批中心、Agent 对话、知识库、审计和设置页面。
+面向生产化演进的 **Agent Runtime 平台**：通用 Function Calling 对话、工具审批、Subagent 外部队列、沙箱执行、可观测性，跨境电商 BI 查询 Agent（Amazon 结算、领星利润、金蝶云星空），以及 Coordinator 的知识库检索与公开网页搜索（Tavily）。项目提供商用控制台形态的 Dashboard、审批中心、Agent 对话、知识库、审计和设置页面。
 
 项目支持两种本地形态：`.env.example` 使用 SQLite + mock 模型，完全离线即可运行；生产形态可将控制面与 Session 事件切换到 PostgreSQL。分析类 Agent 可连接 PostgreSQL 或 MySQL 分析库；虚构样本数据由脚本生成后导入，不随仓库分发。
 
@@ -47,7 +47,7 @@ PostgreSQL。删除 Session 时会同步删除父、子 Session 对应的物化�
 
 | Agent ID | 说明 | 默认状态 |
 |---|---|---|
-| `function-calling-runtime` | 通用 Function Calling Runtime | 启用 |
+| `function-calling-runtime` | Coordinator：拆任务、委派 Analyst、检索知识库、公开网页搜索 | 启用 |
 | `amazon-finance-query` | Amazon 结算只读查询 | 需在连接器页配置 PostgreSQL 或 MySQL 并绑定工具 |
 | `lingxing-profit-report` | 领星 OpenAPI 利润报表 | 需配置领星凭证 |
 | `profit-report-query` | 已导入分析数据库的领星利润表查询 | 需在连接器页配置 PostgreSQL 或 MySQL 并绑定工具 |
@@ -285,11 +285,25 @@ docker compose -f docker-compose.postgres.yml up -d
 钉钉开放平台侧还需完成：发布企业内部应用机器人、授予机器人主动发送单聊/群聊消息权限、
 将机器人加入目标群，以及授予待办应用读写权限。
 
+### Tavily 网页搜索
+
+Coordinator 通过内置工具 `web_search` 检索公开互联网（新闻、官网、公开政策）。
+内部制度、手册、SOP 仍走 `search_knowledge`（文枢知识库），不要把网页结果写成公司文档。
+
+管理员在「连接器」页创建「Tavily 网页搜索」连接，填写 Tavily API Key。
+Key 只写入独立 Secret Store，接口和页面只显示 `********`；不要把 Key 写进 `.env`。
+API Base URL 固定为 `https://api.tavily.com`。保存后到「工具」页把 `web_search`
+绑到该连接。租户只有一条 Tavily 连接时，未显式绑定也会使用该默认连接。
+
+`web_search` 是 Coordinator 只读工具，不进入人工审批，Analyst 不能调用。
+未配置时工具返回中文提示，不会用模型训练知识冒充实时网页。用户明确要求
+「网页搜索」或「最新新闻」时，Runtime 会确保调用 `web_search`。
+
 - `GET /v1/connections` — 列出当前 tenant 的脱敏 Connection。
 - `POST /v1/connections` — 创建独立连接；同一连接类型可创建多个实例。
 - `PATCH/DELETE /v1/connections/{connection_id}` — 更新或删除独立 Connection。
 - `GET /v1/connections/health` — 查看连接的就绪、失败与熔断状态。
-- `PUT /v1/connections/{analytics|lingxing|kingdee}` — 管理员更新连接、凭证和 `resource_scopes`。
+- `PUT /v1/connections/{analytics|lingxing|kingdee|dingtalk|tavily|qdrant|milvus}` — 管理员更新连接、凭证和 `resource_scopes`。
 - `GET /v1/tool-bindings` — 查看每个 Connector Tool 可选及当前选中的 Connection。
 - `PUT /v1/tools/{tool_name}/connection` — 为 Tool 选择具体 Connection。
 - `store_names` / `sids` 范围在 Tool 执行前强制校验；Amazon 查询以绑定的
@@ -302,7 +316,8 @@ docker compose -f docker-compose.postgres.yml up -d
 operation、资源范围和所选 Connection 的映射。绑定配置独立持久化在
 `TOOL_BINDINGS_PATH`，未显式绑定的旧 Tool 会继续使用对应类型的默认连接。
 
-Coordinator 委派任务时会把当时可见的 `connection_ids` 和
+Coordinator 顶层会话每轮会并入当前已配置且就绪的 Connection（例如会话开始后才添加的 Tavily），
+以便新连接立即生效。Coordinator 委派任务时会把当时可见的 `connection_ids` 和
 `resource_scope` 固化到子任务及子 Session。Analyst 执行 Connector Tool 时，
 `ConnectorAccessGuard` 会校验 Connection 是否属于该权限快照；具体资源范围
 同时取“当前 Connection 权限”和“委派快照”的交集，避免委派后权限扩大。
@@ -335,9 +350,10 @@ Agent，任务并发执行并在同一调用中返回精简结论。Runtime 还�
 `group_id`，移动规则会自动解除其原权限组归属。删除权限组会级联删除组内规则。
 权限组与业务 Tool 是多对多：在权限组上直接多选并保存 Tool 权限，同一 Tool 可出现在多个权限组中；同一租户、同一权限组内的 Tool 不会重复。规则明细仅用于只读展示，不在明细上移动或改变归属；
 创建规则时控制台只显示尚未分配的 Tool，API 和数据库唯一约束会拒绝重复归属。
-`remember_fact`、`search_memory`、`forget_memory`、`load_skill`、沙箱工具和
-子 Agent 委派工具是 Runtime 基础能力，自动授予所有已登记且启用的用户，
+`remember_fact`、`search_memory`、`forget_memory`、`search_knowledge`、`web_search`、
+`load_skill`、沙箱工具和子 Agent 委派工具是 Runtime 基础能力，自动授予所有已登记且启用的用户，
 不进入权限规则候选；Agent 职责白名单与沙箱策略仍会限制其实际使用范围。
+`search_knowledge` 与 `web_search` 仅 Coordinator 可调用。
 
 控制台同时提供 tenant 级账户认证。首次进入可在注册页创建账户；租户的
 第一个注册账户自动成为 `admin`；已初始化的租户关闭公开注册，新用户由管理员在
@@ -421,7 +437,8 @@ multi_agent_ops_platform/
 │   │   ├── lingxing_profit/   # 领星 OpenAPI
 │   │   ├── profit_report/     # 领星利润表 SQL 查询
 │   │   └── kingdee_cloud/     # 金蝶云星空
-│   └── integrations/kingdee/  # 金蝶 WebAPI 客户端
+│   ├── integrations/kingdee/  # 金蝶 WebAPI 客户端
+│   └── integrations/tavily/   # Tavily 网页搜索客户端
 ├── frontend/                  # 无构建依赖的管理控制台
 ├── skills/                    # Agent Skills（按需加载）
 ├── config/mcp_servers.json    # MCP Server 配置

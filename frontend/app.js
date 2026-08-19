@@ -179,7 +179,21 @@ function watchAgentTranscriptSize(){
 const statusLabels={started:'已启动',queued:'队列中',running:'执行中',interrupt_requested:'中断中',interrupted:'已中断',cancel_requested:'取消中',cancelled:'已取消',timed_out:'已超时',failed:'失败',budget_exceeded:'预算耗尽',collecting_evidence:'收集证据',planning_action:'生成计划',waiting_approval:'等待审批',executing:'执行中',reviewing:'审核中',completed:'已完成',rejected:'已拒绝',review_failed:'审核失败',candidate:'待确认',conflicted:'有冲突',active:'已生效',superseded:'已替代',deleted:'已删除'};
 const agentLabels={supervisor:'Supervisor',knowledge_agent:'Knowledge Agent',telemetry_agent:'Telemetry Agent',diagnosis_agent:'Diagnosis Agent',action_agent:'Action Agent',approval_gate:'Approval Gate',reviewer_agent:'Reviewer',finalizer:'Finalizer'};
 function headers(body){const value={};if(!(body instanceof FormData))value['Content-Type']='application/json';if(state.session.accessToken)value.Authorization=`Bearer ${state.session.accessToken}`;else{value['X-Tenant-ID']=state.session.tenant;value['X-User-ID']=state.session.userId;value['X-User-Role']=state.session.role}if(state.session.apiKey)value['X-API-Key']=state.session.apiKey;return value}
-async function parseApiResponse(response){if(!response.ok){let payload={};try{payload=await response.json()}catch{}const detail=payload.detail;const message=typeof detail==='object'&&detail?[detail.message,detail.hint].filter(Boolean).join('\n'):(detail||`请求失败 (${response.status})`);const error=new Error(message);error.status=response.status;if(typeof detail==='object'&&detail){error.code=detail.code;error.retryAfterSeconds=detail.retry_after_seconds;error.provider=detail.provider;error.hint=detail.hint}throw error}if(response.status===204)return null;return response.json()}
+function formatApiDetail(detail,status){
+  if(typeof detail==='string'&&detail.trim())return detail;
+  if(Array.isArray(detail)){
+    const text=detail.map(item=>{
+      const loc=(item.loc||[]).filter(part=>part!=='body').join('.');
+      return [loc,item.msg].filter(Boolean).join('：');
+    }).filter(Boolean).join('；');
+    return text||`请求失败 (${status})`;
+  }
+  if(detail&&typeof detail==='object'){
+    return [detail.message,detail.hint].filter(Boolean).join('\n')||`请求失败 (${status})`;
+  }
+  return `请求失败 (${status})`;
+}
+async function parseApiResponse(response){if(!response.ok){let payload={};try{payload=await response.json()}catch{}const detail=payload.detail;const error=new Error(formatApiDetail(detail,response.status));error.status=response.status;if(detail&&typeof detail==='object'&&!Array.isArray(detail)){error.code=detail.code;error.retryAfterSeconds=detail.retry_after_seconds;error.provider=detail.provider;error.hint=detail.hint}throw error}if(response.status===204)return null;return response.json()}
 let accountRefreshInFlight=null;
 function authRefreshExempt(path){
   return /^\/v1\/auth\/(login|register|refresh|logout)(?:\?|$)/.test(String(path||''));
@@ -468,7 +482,7 @@ function renderAgentCards(agents){
   root.innerHTML=`<div class="agent-section"><h2 class="section-title">协调与通用分析</h2><div class="agent-grid agent-grid-core">${[coordinator,general].filter(Boolean).map(agent=>renderAgentCard(agent,effectiveStatus(agent))).join('')}</div></div>${specialistSection}`;
   $$('[data-edit-agent]',root).forEach(button=>button.addEventListener('click',()=>openAgentEditor(button.dataset.editAgent)));
 }
-function connectorLabel(type,databaseType='postgresql'){if(type==='analytics')return databaseType==='mysql'?'MySQL 数据库':'PostgreSQL 数据库';return({lingxing:'领星 OpenAPI',kingdee:'金蝶云星空',dingtalk:'钉钉 OpenAPI',qdrant:'Qdrant 向量数据库',milvus:'Milvus 向量数据库'})[type]||type}
+function connectorLabel(type,databaseType='postgresql'){if(type==='analytics')return databaseType==='mysql'?'MySQL 数据库':'PostgreSQL 数据库';return({lingxing:'领星 OpenAPI',kingdee:'金蝶云星空',dingtalk:'钉钉 OpenAPI',qdrant:'Qdrant 向量数据库',milvus:'Milvus 向量数据库',tavily:'Tavily 网页搜索'})[type]||type}
 function connectorIconMarkup(type){
   const icons={
     analytics:{cls:'database',svg:'<svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6.5" rx="7" ry="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M5 6.5v4c0 1.66 3.13 3 7 3s7-1.34 7-3v-4M5 10.5v4c0 1.66 3.13 3 7 3s7-1.34 7-3v-4M5 14.5v4c0 1.66 3.13 3 7 3s7-1.34 7-3v-4" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>'},
@@ -476,7 +490,8 @@ function connectorIconMarkup(type){
     kingdee:{cls:'erp',svg:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v14H5z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 9h8M8 13h5M8 17h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>'},
     dingtalk:{cls:'api',svg:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 5 13 2-4 3 3 1-8 8 2-6-4-1 4-3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>'},
     qdrant:{cls:'database',svg:'<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="9" cy="10" r="1.5"/><circle cx="15" cy="8" r="1.5"/><circle cx="14" cy="15" r="1.5"/><path d="m10 10 4-2m-4 3 3 4" stroke="currentColor" stroke-width="1.4"/></svg>'},
-    milvus:{cls:'database',svg:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7 12 3l7 4v10l-7 4-7-4z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m5 7 7 4 7-4M12 11v10" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>'}
+    milvus:{cls:'database',svg:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7 12 3l7 4v10l-7 4-7-4z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m5 7 7 4 7-4M12 11v10" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>'},
+    tavily:{cls:'api',svg:'<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M4 12h16M12 4c2.5 2.8 2.5 13.2 0 16M12 4c-2.5 2.8-2.5 13.2 0 16" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>'}
   };
   const item=icons[type]||icons.analytics;
   return `<div class="agent-icon agent-icon-${item.cls}">${item.svg}</div>`;
@@ -499,7 +514,7 @@ function renderConnectionCards(connections){
 }
 function csvValues(value){return String(value||'').split(',').map(item=>item.trim()).filter(Boolean)}
 function updateAnalyticsDatabaseFields(){const databaseType=$('#connection-edit-database-type')?.value||'postgresql';const mysql=databaseType==='mysql';$('#connection-edit-dsn-label').textContent=mysql?'MySQL DSN':'PostgreSQL DSN';const dsn=$('#connection-edit-dsn');if(dsn&&!dsn.value&&!dsn.placeholder.startsWith('已配置'))dsn.placeholder=mysql?'mysql://user:password@host:3306/database':'postgresql://user:password@host/db'}
-function updateConnectionFields(){const type=$('#connection-edit-type').value;$('#connection-fields-analytics').hidden=type!=='analytics';$('#connection-fields-lingxing').hidden=type!=='lingxing';$('#connection-fields-kingdee').hidden=type!=='kingdee';$('#connection-fields-dingtalk').hidden=type!=='dingtalk';$('#connection-fields-qdrant').hidden=type!=='qdrant';$('#connection-fields-milvus').hidden=type!=='milvus';$('#connection-scopes-data').hidden=['dingtalk','qdrant','milvus'].includes(type);$('#connection-scopes-dingtalk').hidden=type!=='dingtalk';updateAnalyticsDatabaseFields()}
+function updateConnectionFields(){const type=$('#connection-edit-type').value;$('#connection-fields-analytics').hidden=type!=='analytics';$('#connection-fields-lingxing').hidden=type!=='lingxing';$('#connection-fields-kingdee').hidden=type!=='kingdee';$('#connection-fields-dingtalk').hidden=type!=='dingtalk';$('#connection-fields-qdrant').hidden=type!=='qdrant';$('#connection-fields-milvus').hidden=type!=='milvus';$('#connection-fields-tavily').hidden=type!=='tavily';$('#connection-scopes-data').hidden=['dingtalk','qdrant','milvus','tavily'].includes(type);$('#connection-scopes-dingtalk').hidden=type!=='dingtalk';updateAnalyticsDatabaseFields()}
 function openConnectionEditor(connectionId){
   const connection=connectionId?state.connections.find(item=>item.id===connectionId):null;
   if(connectionId&&!connection){toast('连接器不存在','error');return}
@@ -515,6 +530,7 @@ function openConnectionEditor(connectionId){
   $('#connection-edit-dingtalk-app-key').value=item.connector_type==='dingtalk'?(item.app_key||''):'';$('#connection-edit-dingtalk-secret').value='';$('#connection-edit-dingtalk-secret').placeholder=item.connector_type==='dingtalk'&&item.app_secret_configured?'已配置，留空保持不变':'填写 AppSecret';$('#connection-edit-dingtalk-robot-code').value=item.robot_code||'';$('#connection-edit-dingtalk-owner').value=item.default_todo_owner_union_id||'';$('#connection-edit-dingtalk-url').value=item.connector_type==='dingtalk'?(item.base_url||'https://api.dingtalk.com'):'https://api.dingtalk.com';
   $('#connection-edit-qdrant-url').value=item.connector_type==='qdrant'?(item.url||''):'';$('#connection-edit-qdrant-key').value='';$('#connection-edit-qdrant-key').placeholder=item.connector_type==='qdrant'&&item.api_key_configured?'已配置，留空保持不变':'本地无鉴权实例可留空';
   $('#connection-edit-milvus-uri').value=item.connector_type==='milvus'?(item.uri||''):'';$('#connection-edit-milvus-token').value='';$('#connection-edit-milvus-token').placeholder=item.connector_type==='milvus'&&item.token_configured?'已配置，留空保持不变':'无鉴权实例可留空';$('#connection-edit-milvus-database').value=item.connector_type==='milvus'?(item.db_name||'default'):'default';
+  $('#connection-edit-tavily-key').value='';$('#connection-edit-tavily-key').placeholder=item.connector_type==='tavily'&&item.api_key_configured?'已配置，留空保持不变':'填写 Tavily API Key';$('#connection-edit-tavily-url').value=item.connector_type==='tavily'?(item.base_url||'https://api.tavily.com'):'https://api.tavily.com';
   const scopes=item.resource_scopes||{};$('#connection-edit-stores').value=(scopes.store_names||[]).join(', ');$('#connection-edit-sids').value=(scopes.sids||[]).join(', ');$('#connection-edit-dingtalk-user-ids').value=(scopes.dingtalk_user_ids||[]).join(', ');$('#connection-edit-dingtalk-conversation-ids').value=(scopes.dingtalk_conversation_ids||[]).join(', ');$('#connection-edit-dingtalk-union-ids').value=(scopes.dingtalk_union_ids||[]).join(', ');
   $('#connection-edit-delete').hidden=item.isNew;updateConnectionFields();$('#connection-editor-drawer').classList.add('open');
 }
@@ -525,10 +541,11 @@ function connectionEditorPayload(){
   else if(type==='kingdee'){config.server_url=$('#connection-edit-kingdee-url').value.trim();config.acct_id=$('#connection-edit-kingdee-acct').value.trim();config.app_id=$('#connection-edit-kingdee-app-id').value.trim();config.username=$('#connection-edit-kingdee-user').value.trim();config.lcid=Number($('#connection-edit-kingdee-lcid').value)||2052;const secret=$('#connection-edit-kingdee-secret').value.trim();if(secret)credentials.app_secret=secret}
   else if(type==='dingtalk'){config.app_key=$('#connection-edit-dingtalk-app-key').value.trim();config.robot_code=$('#connection-edit-dingtalk-robot-code').value.trim()||config.app_key;config.default_todo_owner_union_id=$('#connection-edit-dingtalk-owner').value.trim();config.base_url=$('#connection-edit-dingtalk-url').value.trim()||'https://api.dingtalk.com';const secret=$('#connection-edit-dingtalk-secret').value.trim();if(secret)credentials.app_secret=secret}
   else if(type==='qdrant'){config.url=$('#connection-edit-qdrant-url').value.trim();const apiKey=$('#connection-edit-qdrant-key').value.trim();if(apiKey)credentials.api_key=apiKey}
+  else if(type==='tavily'){config.base_url=$('#connection-edit-tavily-url').value.trim()||'https://api.tavily.com';const apiKey=$('#connection-edit-tavily-key').value.trim();if(apiKey)credentials.api_key=apiKey}
   else{config.uri=$('#connection-edit-milvus-uri').value.trim();config.db_name=$('#connection-edit-milvus-database').value.trim()||'default';const token=$('#connection-edit-milvus-token').value.trim();if(token)credentials.token=token}
   const resource_scopes={};
   if(type==='dingtalk'){const users=csvValues($('#connection-edit-dingtalk-user-ids').value);const groups=csvValues($('#connection-edit-dingtalk-conversation-ids').value);const unions=csvValues($('#connection-edit-dingtalk-union-ids').value);if(users.length)resource_scopes.dingtalk_user_ids=users;if(groups.length)resource_scopes.dingtalk_conversation_ids=groups;if(unions.length)resource_scopes.dingtalk_union_ids=unions}
-  else if(!['qdrant','milvus'].includes(type)){const stores=csvValues($('#connection-edit-stores').value);const sids=csvValues($('#connection-edit-sids').value);if(stores.length)resource_scopes.store_names=stores;if(sids.length)resource_scopes.sids=sids}
+  else if(!['qdrant','milvus','tavily'].includes(type)){const stores=csvValues($('#connection-edit-stores').value);const sids=csvValues($('#connection-edit-sids').value);if(stores.length)resource_scopes.store_names=stores;if(sids.length)resource_scopes.sids=sids}
   return{connector_type:type,name:$('#connection-edit-name').value.trim(),enabled:$('#connection-edit-enabled').checked,config,credentials,resource_scopes};
 }
 async function saveConnectionEditor(event){event.preventDefault();const editing=state.editingConnection;if(!editing)return;const payload=connectionEditorPayload();const submit=$('#connection-edit-save');submit.disabled=true;try{if(editing.isNew)await api('/v1/connections',{method:'POST',body:JSON.stringify(payload)});else{delete payload.connector_type;await api(`/v1/connections/${encodeURIComponent(editing.id)}`,{method:'PATCH',body:JSON.stringify(payload)})}toast(editing.isNew?'连接器已创建':'连接器已更新','success');$('#connection-editor-drawer').classList.remove('open');state.catalog=null;await loadConnectorsPage()}catch(error){toast(error.message,'error')}finally{submit.disabled=false}}
@@ -1115,6 +1132,8 @@ function toolDisplayName(name){
     lingxing_profit_query:'领星开放平台 API',
     profit_report_query:'利润报表 PostgreSQL',
     kingdee_cloud_query:'金蝶云星空 WebAPI',
+    search_knowledge:'检索知识库',
+    web_search:'网页搜索',
     dingtalk_send_direct_message:'发送钉钉单聊',
     dingtalk_send_group_message:'发送钉钉群聊',
     dingtalk_create_todo:'创建钉钉待办',
@@ -1157,6 +1176,8 @@ function summarizeTool(name,args={},output){
   if(name==='dingtalk_send_direct_message')return `向 ${args.user_id||'未知用户'} 发送单聊：${String(args.content||'').slice(0,120)}`;
   if(name==='dingtalk_send_group_message')return `向群 ${args.open_conversation_id||'未知群'} 发送消息：${String(args.content||'').slice(0,120)}`;
   if(name==='dingtalk_create_todo')return `创建待办「${args.subject||'未填写标题'}」，执行人：${(args.executor_union_ids||[]).join('、')||'未指定'}`;
+  if(name==='web_search')return output?.summary||`检索网页「${args.query||''}」`;
+  if(name==='search_knowledge')return output?.summary||`检索知识库「${args.query||''}」`;
   if(output?.summary)return output.summary;
   return toolDisplayName(name);
 }

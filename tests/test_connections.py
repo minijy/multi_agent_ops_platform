@@ -143,6 +143,31 @@ def test_vector_connections_mask_credentials_and_validate_endpoints(tmp_path):
     assert "q-secret" not in persisted
     assert "root:secret" not in persisted
 
+
+def test_tavily_connection_masks_api_key(tmp_path):
+    definitions = tmp_path / "connections.json"
+    registry = create_connection_registry(definitions, tmp_path / "secrets.json")
+    connection = registry.create(
+        tenant_id="tenant-a",
+        connector_type="tavily",
+        name="Tavily",
+        values={"api_key": "tvly-secret"},
+    )
+
+    assert registry.is_ready(connection)
+    assert connection.config["base_url"] == "https://api.tavily.com"
+    assert registry.masked_values(connection)["api_key"] == "********"
+    assert registry.masked_values(connection)["api_key_configured"] is True
+    assert "tvly-secret" not in definitions.read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="api.tavily.com"):
+        registry.create(
+            tenant_id="tenant-a",
+            connector_type="tavily",
+            name="Bad Tavily",
+            values={"api_key": "tvly-secret", "base_url": "https://evil.example"},
+        )
+
     with pytest.raises(ValueError, match="http://"):
         registry.create(
             tenant_id="tenant-a",

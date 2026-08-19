@@ -198,12 +198,30 @@ def _migrate_coordinator_override(
     tools = list(migrated.get("allowed_tools") or default.allowed_tools)
     if "search_knowledge" not in tools:
         tools.append("search_knowledge")
+    if "web_search" not in tools:
+        tools.append("web_search")
     migrated["allowed_tools"] = tools
     prompt = str(migrated.get("system_prompt") or "")
     if (
         not prompt.strip()
         or "你是企业数据与运维助手" in prompt
         or "agent_id 必须是 analyst" in prompt
+        or (
+            "制度、手册、故障码、SOP、内部文档：调用 search_knowledge" in prompt
+            and "系统不会预先检索知识库" not in prompt
+        )
+        or (
+            "系统不会预先检索知识库" in prompt
+            and "即使问「是什么意思」" not in prompt
+        )
+        or (
+            "即使问「是什么意思」" in prompt
+            and "web_search" not in prompt
+        )
+        or (
+            "调用 web_search" in prompt
+            and "当前工具列表里有 web_search" not in prompt
+        )
     ):
         migrated["system_prompt"] = default.system_prompt
     if migrated.get("name") in {None, "", "Function Calling Agent"}:

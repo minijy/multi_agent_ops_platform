@@ -10,9 +10,11 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
+from .integrations.tavily.client import validate_tavily_base_url
+
 
 ConnectorType = Literal[
-    "analytics", "lingxing", "kingdee", "dingtalk", "qdrant", "milvus"
+    "analytics", "lingxing", "kingdee", "dingtalk", "qdrant", "milvus", "tavily"
 ]
 AnalyticsDatabaseType = Literal["postgresql", "mysql"]
 SECRET_MASK = "********"
@@ -146,6 +148,7 @@ class ConnectionRegistry:
         "dingtalk": frozenset({"app_secret"}),
         "qdrant": frozenset({"api_key"}),
         "milvus": frozenset({"token"}),
+        "tavily": frozenset({"api_key"}),
     }
 
     def __init__(self, path: Path, secrets: LocalSecretStore) -> None:
@@ -272,6 +275,11 @@ class ConnectionRegistry:
                     or (current.config.get("db_name") if current else "default")
                     or "default"
                 ).strip()
+            elif connector_type == "tavily":
+                config["base_url"] = validate_tavily_base_url(
+                    values.get("base_url")
+                    or (current.config.get("base_url") if current else None)
+                )
             merged_config = {**(current.config if current else {}), **config}
             merged_scopes = self._normalize_scopes(
                 resource_scopes
@@ -406,6 +414,7 @@ class ConnectionRegistry:
             "dingtalk": ("app_key", "app_secret", "robot_code"),
             "qdrant": ("url",),
             "milvus": ("uri", "db_name"),
+            "tavily": ("api_key",),
         }
         ready = all(
             str(values.get(key) or "").strip()
@@ -431,6 +440,11 @@ class ConnectionRegistry:
                     values.get(field),
                     "Qdrant URL" if field == "url" else "Milvus URI",
                 )
+            except ValueError:
+                return False
+        if ready and connection.connector_type == "tavily":
+            try:
+                validate_tavily_base_url(values.get("base_url"))
             except ValueError:
                 return False
         return ready

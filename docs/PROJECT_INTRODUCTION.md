@@ -111,6 +111,7 @@ Tool 描述 Agent 能做什么，Connector 描述 Tool 通过哪个外部连接�
 | 领星 OpenAPI | 领星 ERP 利润数据查询 |
 | 金蝶云星空 | 销售、出库、应收和回款数据 |
 | 钉钉 OpenAPI | 单聊、群聊和待办任务推送 |
+| Tavily | Coordinator 公开网页搜索（`web_search`） |
 | Qdrant | 知识库和向量检索 |
 | Milvus | 知识库和向量检索 |
 

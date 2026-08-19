@@ -679,6 +679,86 @@ class AgentRuntime:
             return set(snapshotted_tools)
         return current_tools & (snapshotted_tools | SYSTEM_DEFAULT_TOOL_NAMES)
 
+    def _live_connector_scope(
+        self,
+        tenant_id: str,
+        allowed_tools: set[str] | None,
+    ) -> tuple[list[str], dict[str, list[str]]]:
+        if self.connection_registry is None:
+            return [], {}
+        if self.tool_bindings is not None:
+            return self.tool_bindings.execution_scope(
+                tenant_id, allowed_tools, self.connection_registry
+            )
+        connections = self.connection_registry.list_for_tenant(tenant_id)
+        return [item.id for item in connections], {
+            name: list(values)
+            for connection in connections
+            for name, values in connection.resource_scopes.items()
+        }
+
+    @staticmethod
+    def _merge_connector_scope(
+        base_ids: list[str],
+        base_scope: dict[str, list[str]],
+        live_ids: list[str],
+        live_scope: dict[str, list[str]],
+    ) -> tuple[list[str], dict[str, list[str]]]:
+        merged_scope = {
+            str(name): [str(value) for value in values]
+            for name, values in (base_scope or {}).items()
+        }
+        for name, values in (live_scope or {}).items():
+            merged_scope[str(name)] = sorted(
+                set(merged_scope.get(str(name), [])) | {str(item) for item in values}
+            )
+        return sorted({*base_ids, *live_ids}), merged_scope
+
+    def _connection_scope_for_session(
+        self,
+        *,
+        tenant_id: str,
+        allowed_tools: set[str] | None,
+        parent_session_id: str | None,
+        created: SessionEvent | None,
+        requested_ids: list[str] | None = None,
+        requested_scope: dict[str, list[str]] | None = None,
+    ) -> tuple[list[str], dict[str, list[str]]]:
+        session_parent = parent_session_id
+        if created and created.payload.get("parent_session_id"):
+            session_parent = str(created.payload["parent_session_id"])
+        if created and "connection_ids" in created.payload:
+            connection_ids = [
+                str(item) for item in created.payload.get("connection_ids") or []
+            ]
+            resource_scope = {
+                str(name): [str(value) for value in values]
+                for name, values in dict(
+                    created.payload.get("resource_scope") or {}
+                ).items()
+            }
+        elif requested_ids is not None:
+            connection_ids = [str(item) for item in requested_ids]
+            resource_scope = {
+                str(name): [str(value) for value in values]
+                for name, values in (requested_scope or {}).items()
+            }
+        elif self.connection_registry is not None:
+            connection_ids, resource_scope = self._live_connector_scope(
+                tenant_id, allowed_tools
+            )
+        else:
+            connection_ids, resource_scope = [], {}
+        if not session_parent and self.connection_registry is not None:
+            live_ids, live_scope = self._live_connector_scope(tenant_id, allowed_tools)
+            connection_ids, resource_scope = self._merge_connector_scope(
+                connection_ids, resource_scope, live_ids, live_scope
+            )
+        return list(connection_ids or []), {
+            str(name): [str(value) for value in values]
+            for name, values in (resource_scope or {}).items()
+        }
+
     @staticmethod
     def _message_text(message: dict[str, Any]) -> str:
         content = message.get("content", "")
@@ -841,6 +921,72 @@ class AgentRuntime:
         )
         return turn.model_copy(update={"content": "", "tool_calls": [call]})
 
+    @staticmethod
+    def _wants_web_search(text: str) -> bool:
+        value = str(text or "").strip().lower()
+        if not value:
+            return False
+        markers = (
+            "网页搜索",
+            "网上搜索",
+            "网上搜",
+            "搜索网页",
+            "搜网页",
+            "上网搜",
+            "上网查",
+            "最新新闻",
+            "实时新闻",
+            "公开网页",
+            "web search",
+        )
+        return any(marker in value for marker in markers)
+
+    def _recover_web_search(
+        self,
+        turn: ModelTurn,
+        state: RuntimeState,
+        schemas: list[dict[str, Any]],
+    ) -> ModelTurn:
+        if turn.tool_calls or state["agent_id"] != COORDINATOR_AGENT_ID:
+            return turn
+        visible = {
+            str(item.get("function", {}).get("name") or "") for item in schemas
+        }
+        if "web_search" not in visible:
+            return turn
+        last_user_index = max(
+            (
+                index
+                for index, message in enumerate(state["messages"])
+                if message.get("role") == "user"
+            ),
+            default=-1,
+        )
+        if last_user_index < 0:
+            return turn
+        if any(
+            message.get("role") == "tool" and message.get("name") == "web_search"
+            for message in state["messages"][last_user_index + 1 :]
+        ):
+            return turn
+        objective = self._message_text(state["messages"][last_user_index]).strip()
+        if not self._wants_web_search(objective):
+            return turn
+        call = ToolCall(
+            call_id=f"call-recovered-{uuid.uuid4().hex[:12]}",
+            name="web_search",
+            arguments={"query": objective[:500], "max_results": 5, "search_depth": "basic"},
+        )
+        self._append_event(
+            state,
+            "model.tool_call_recovered",
+            {
+                "reason": "web_search_request_requires_tool_call",
+                "tool_name": "web_search",
+            },
+        )
+        return turn.model_copy(update={"content": "", "tool_calls": [call]})
+
     def _model_node(self, state: RuntimeState) -> dict[str, Any]:
         self._check_control(state)
         context = self._context(state)
@@ -925,6 +1071,7 @@ class AgentRuntime:
             )
             raise
         self._check_control(state)
+        turn = self._recover_web_search(turn, state, schemas)
         turn = self._recover_claimed_delegation(turn, state, schemas)
         calls = turn.tool_calls
         visible_tool_names = {
@@ -1804,27 +1951,14 @@ class AgentRuntime:
                 allowed_tools = self._merge_session_tool_snapshot(
                     allowed_tools, snapshotted_tools
                 )
-        if created and "connection_ids" in created.payload:
-            connection_ids = list(created.payload.get("connection_ids") or [])
-            resource_scope = {
-                str(name): [str(value) for value in values]
-                for name, values in dict(
-                    created.payload.get("resource_scope") or {}
-                ).items()
-            }
-        elif connection_ids is None and self.connection_registry is not None:
-            if self.tool_bindings is not None:
-                connection_ids, resource_scope = self.tool_bindings.execution_scope(
-                    tenant_id, allowed_tools, self.connection_registry
-                )
-            else:
-                connections = self.connection_registry.list_for_tenant(tenant_id)
-                connection_ids = [item.id for item in connections]
-                resource_scope = {
-                    name: list(values)
-                    for connection in connections
-                    for name, values in connection.resource_scopes.items()
-                }
+        connection_ids, resource_scope = self._connection_scope_for_session(
+            tenant_id=tenant_id,
+            allowed_tools=allowed_tools,
+            parent_session_id=parent_session_id,
+            created=created,
+            requested_ids=connection_ids,
+            requested_scope=resource_scope,
+        )
         if (
             parent_session_id
             and created
@@ -2186,28 +2320,21 @@ class AgentRuntime:
                 ),
                 None,
             )
-            if created and "connection_ids" in created.payload:
-                connection_ids = tuple(
-                    str(item) for item in created.payload.get("connection_ids") or []
-                )
-                resource_scope = {
-                    str(name): tuple(str(value) for value in values)
-                    for name, values in dict(
-                        created.payload.get("resource_scope") or {}
-                    ).items()
-                }
-            else:
-                connections = (
-                    self.connection_registry.list_for_tenant(record.tenant_id)
-                    if self.connection_registry is not None
-                    else []
-                )
-                connection_ids = tuple(item.id for item in connections)
-                resource_scope = {
-                    name: tuple(values)
-                    for connection in connections
-                    for name, values in connection.resource_scopes.items()
-                }
+            agent_id = str(
+                (created.payload.get("agent_id") if created else None)
+                or COORDINATOR_AGENT_ID
+            )
+            allowed_tool_set = self._agent_allowed_tools(agent_id, record.tenant_id)
+            connection_ids, resource_scope_lists = self._connection_scope_for_session(
+                tenant_id=record.tenant_id,
+                allowed_tools=allowed_tool_set,
+                parent_session_id=None,
+                created=created,
+            )
+            connection_ids = tuple(connection_ids)
+            resource_scope = {
+                name: tuple(values) for name, values in resource_scope_lists.items()
+            }
             context = ToolExecutionContext(
                 session_id=record.session_id,
                 tenant_id=record.tenant_id,
@@ -2270,33 +2397,17 @@ class AgentRuntime:
             (event for event in events if event.event_type == "session.created"),
             None,
         )
-        if created and "connection_ids" in created.payload:
-            state_connection_ids = [
-                str(item) for item in created.payload.get("connection_ids") or []
-            ]
-            state_resource_scope = {
-                str(name): [str(value) for value in values]
-                for name, values in dict(
-                    created.payload.get("resource_scope") or {}
-                ).items()
-            }
-        else:
-            connections = (
-                self.connection_registry.list_for_tenant(record.tenant_id)
-                if self.connection_registry is not None
-                else []
-            )
-            state_connection_ids = [item.id for item in connections]
-            state_resource_scope = {
-                name: list(values)
-                for connection in connections
-                for name, values in connection.resource_scopes.items()
-            }
         agent_id = str(
             (created.payload.get("agent_id") if created else None)
             or COORDINATOR_AGENT_ID
         )
         allowed_tool_set = self._agent_allowed_tools(agent_id, record.tenant_id)
+        state_connection_ids, state_resource_scope = self._connection_scope_for_session(
+            tenant_id=record.tenant_id,
+            allowed_tools=allowed_tool_set,
+            parent_session_id=None,
+            created=created,
+        )
         system_prompt = self._base_system_prompt(
             allowed_tool_set,
             agent_id=agent_id,

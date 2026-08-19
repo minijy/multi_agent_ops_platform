@@ -146,6 +146,34 @@ def test_specialist_mode_repairs_stale_coordinator_override(tmp_path):
     assert "delegate_specialists" in allowed
     assert "delegate_subagent" not in allowed
     assert "agent_id 必须是 analyst" not in agents.runtime_config().system_prompt
+    assert "系统不会预先检索知识库" in agents.runtime_config().system_prompt
+
+
+def test_coordinator_prompt_upgrades_stock_knowledge_routing(tmp_path):
+    path = tmp_path / "agents.json"
+    path.write_text(
+        json.dumps(
+            {
+                COORDINATOR_AGENT_ID: {
+                    "id": COORDINATOR_AGENT_ID,
+                    "system_prompt": (
+                        "你是 Coordinator。用户只和你对话。\n"
+                        "制度、手册、故障码、SOP、内部文档：调用 search_knowledge，"
+                        "根据返回切片作答。"
+                    ),
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    agents = create_agent_registry(path)
+    prompt = agents.runtime_config().system_prompt
+    assert "系统不会预先检索知识库" in prompt
+    assert "也没有单独的意图分类器" in prompt
+    assert "即使问「是什么意思」" in prompt
+    assert "web_search" in prompt
+    assert "当前工具列表里有 web_search" in prompt
 
 
 def test_specialist_analysts_have_distinct_tool_allowlists(tmp_path):
@@ -493,6 +521,11 @@ def test_coordinator_prompt_does_not_list_query_tools(tmp_path):
         {"amazon_finance_query"}, agent_id=ANALYST_AGENT_ID
     )
     assert "agent_id 填 analyst" in coordinator_prompt
+    assert "系统不会预先检索知识库" in coordinator_prompt
+    assert "也没有单独的意图分类器" in coordinator_prompt
+    assert "即使问「是什么意思」" in coordinator_prompt
+    assert "search_knowledge" in coordinator_prompt
+    assert "web_search" in coordinator_prompt
     assert "amazon_finance_query" not in coordinator_prompt
     assert "amazon_finance_query" in analyst_prompt
 

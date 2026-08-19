@@ -1321,6 +1321,37 @@ def test_dingtalk_connection_and_tool_bindings_are_exposed_by_api(tmp_path: Path
             assert tools[tool_name]["risk"] == "medium"
 
 
+def test_tavily_connection_and_web_search_binding_are_exposed_by_api(tmp_path: Path):
+    with TestClient(create_app(_settings(tmp_path))) as client:
+        created = client.post(
+            "/v1/connections",
+            json={
+                "connector_type": "tavily",
+                "name": "Tavily 搜索",
+                "config": {},
+                "credentials": {"api_key": "tvly-test-secret"},
+            },
+        )
+        assert created.status_code == 201
+        assert created.json()["api_key"] == "********"
+        assert created.json()["api_key_configured"] is True
+        assert created.json()["base_url"] == "https://api.tavily.com"
+
+        bindings = {
+            item["tool_name"]: item
+            for item in client.get("/v1/tool-bindings").json()["items"]
+        }
+        assert bindings["web_search"]["connector_type"] == "tavily"
+        bound = client.put(
+            "/v1/tools/web_search/connection",
+            json={"connection_id": created.json()["id"]},
+        )
+        assert bound.status_code == 200
+        catalog = {item["id"]: item for item in client.get("/v1/catalog").json()["tools"]}
+        assert catalog["web_search"]["approval"] is False
+        assert catalog["web_search"]["risk"] == "low"
+
+
 def test_multiple_connections_can_be_bound_to_individual_tools(tmp_path: Path):
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:

@@ -157,7 +157,13 @@ def resolve_agent_tool_allowlist(
         requested = set(agent.allowed_tools)
         if agent.id == COORDINATOR_AGENT_ID:
             requested |= DINGTALK_TOOL_NAMES
-            requested |= {"remember_fact", "search_memory", "forget_memory", "search_knowledge"}
+            requested |= {
+                "remember_fact",
+                "search_memory",
+                "forget_memory",
+                "search_knowledge",
+                "web_search",
+            }
             requested -= DATA_QUERY_TOOL_NAMES
             if settings.analyst_mode == "general":
                 requested.add("delegate_subagent")
@@ -170,7 +176,13 @@ def resolve_agent_tool_allowlist(
                 requested.discard("delegate_subagent")
         if agent.id == ANALYST_AGENT_ID or agent.id in SPECIALIST_ANALYST_IDS:
             requested.discard("delegate_subagent")
-            requested -= {"remember_fact", "search_memory", "forget_memory", "search_knowledge"}
+            requested -= {
+                "remember_fact",
+                "search_memory",
+                "forget_memory",
+                "search_knowledge",
+                "web_search",
+            }
         return requested & visible
     allowlist = runtime_tool_allowlist(
         registry,

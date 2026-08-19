@@ -1792,7 +1792,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             {"admin"},
         )
         if connector_type not in {
-            "analytics", "lingxing", "kingdee", "dingtalk", "qdrant", "milvus"
+            "analytics", "lingxing", "kingdee", "dingtalk", "qdrant", "milvus", "tavily"
         }:
             raise HTTPException(status_code=404, detail="unknown connector type")
         registry = request.app.state.connection_registry

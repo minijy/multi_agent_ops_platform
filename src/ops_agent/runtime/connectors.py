@@ -21,6 +21,7 @@ from ..connections import (
 from ..integrations.kingdee.client import KingdeeClient, KingdeeCredentials
 from ..integrations.lingxing.client import LingXingClient
 from ..integrations.dingtalk.client import DingTalkClient
+from ..integrations.tavily.client import TavilyClient
 from ..vector_connections import MilvusVectorClient, QdrantVectorClient
 from ..workflows.kingdee_cloud.domain import KingdeeIntegrationConfig
 from ..workflows.lingxing_profit.domain import LingXingIntegrationConfig
@@ -374,6 +375,20 @@ class MilvusConnectorProvider:
         )
 
 
+@dataclass(frozen=True)
+class TavilyConnectorProvider:
+    timeout_seconds: float = 20.0
+    connector_type: ConnectorType = "tavily"
+    min_interval_seconds: float = 0.2
+
+    def create_client(self, values: dict[str, Any]) -> TavilyClient:
+        return TavilyClient(
+            str(values.get("api_key") or ""),
+            base_url=str(values.get("base_url") or "https://api.tavily.com"),
+            timeout_seconds=self.timeout_seconds,
+        )
+
+
 @dataclass
 class _ConnectionState:
     failures: int = 0
@@ -700,6 +715,7 @@ def create_connector_runtime(
             DingTalkConnectorProvider(),
             QdrantConnectorProvider(),
             MilvusConnectorProvider(),
+            TavilyConnectorProvider(),
         ],
         bindings=bindings,
     )
@@ -734,6 +750,7 @@ def create_tool_bindings(path: Path | None = None) -> ToolBindingRegistry:
             "create_todo",
             "dingtalk_union_ids",
         ),
+        ToolBinding("web_search", "tavily", "search"),
     ):
         registry.register(binding)
     return registry

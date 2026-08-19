@@ -24,6 +24,7 @@ from .lingxing_profit_tool import register_lingxing_profit_tool
 from .profit_report_tool import register_profit_report_tool
 from .dingtalk_tool import register_dingtalk_tools
 from .knowledge_search_tool import register_search_knowledge_tool
+from .web_search_tool import register_web_search_tool
 from .attachments import LocalAttachmentStore
 from .connectors import (
     ConnectorRuntime,
@@ -94,6 +95,7 @@ def open_runtime_stack(settings: Settings) -> Iterator[RuntimeStack]:
     register_kingdee_cloud_tool(tool_registry, connector_runtime, timeout_seconds=45.0)
     register_profit_report_tool(tool_registry, settings, connector_runtime)
     register_dingtalk_tools(tool_registry, connector_runtime, timeout_seconds=20.0)
+    register_web_search_tool(tool_registry, connector_runtime, timeout_seconds=20.0)
     knowledge_gateway = KnowledgeGateway.from_settings(settings)
     register_search_knowledge_tool(tool_registry, knowledge_gateway)
     skill_registry = SkillRegistry.from_paths(settings.skills_paths)

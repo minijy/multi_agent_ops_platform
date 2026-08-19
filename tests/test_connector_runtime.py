@@ -126,6 +126,24 @@ def test_execution_scope_skips_optional_connector_without_connection(tmp_path):
     assert scopes == {}
 
 
+def test_execution_scope_includes_tavily_when_configured(tmp_path):
+    registry = create_connection_registry(
+        tmp_path / "connections.json", tmp_path / "secrets.json"
+    )
+    connection = registry.create(
+        tenant_id="tenant-a",
+        connector_type="tavily",
+        name="网页搜索",
+        values={"api_key": "tvly-test"},
+    )
+    bindings = create_tool_bindings(tmp_path / "bindings.json")
+    connection_ids, scopes = bindings.execution_scope(
+        "tenant-a", {"web_search"}, registry
+    )
+    assert connection_ids == [connection.id]
+    assert scopes == {}
+
+
 def test_tool_binding_selects_one_of_multiple_connector_instances(tmp_path):
     registry = create_connection_registry(
         tmp_path / "connections.json", tmp_path / "secrets.json"

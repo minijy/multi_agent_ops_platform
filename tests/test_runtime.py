@@ -445,6 +445,56 @@ def test_runtime_forces_delegation_when_model_refuses_explicit_data_request():
     assert recovered_events[0][1]["reason"] == "data_request_requires_delegation"
 
 
+def test_runtime_forces_web_search_when_model_claims_no_permission():
+    runtime = object.__new__(AgentRuntime)
+    recovered_events = []
+    runtime._append_event = lambda _state, event_type, payload: recovered_events.append(  # type: ignore[method-assign]
+        (event_type, payload)
+    )
+    turn = ModelTurn(
+        provider="qwen",
+        model="qwen-test",
+        content="抱歉，由于系统权限限制，我目前无法直接执行网页搜索。",
+    )
+    state = {
+        "agent_id": "function-calling-runtime",
+        "messages": [
+            {
+                "role": "tool",
+                "name": "web_search",
+                "content": '{"error":"connector is outside delegated scope: tavily"}',
+            },
+            {
+                "role": "user",
+                "content": "请帮我在网页搜索，股市最新的新闻",
+            },
+        ],
+    }
+    schemas = [{"type": "function", "function": {"name": "web_search"}}]
+
+    recovered = runtime._recover_web_search(turn, state, schemas)
+
+    assert recovered.content == ""
+    assert recovered.tool_calls[0].name == "web_search"
+    assert "股市最新的新闻" in recovered.tool_calls[0].arguments["query"]
+    assert recovered_events[0][1]["reason"] == "web_search_request_requires_tool_call"
+
+
+def test_runtime_does_not_force_web_search_for_internal_docs():
+    runtime = object.__new__(AgentRuntime)
+    runtime._append_event = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    turn = ModelTurn(provider="qwen", model="qwen-test", content="根据内部文档...")
+    state = {
+        "agent_id": "function-calling-runtime",
+        "messages": [{"role": "user", "content": "查询内部文档里的 VAT 申报流程"}],
+    }
+    recovered = runtime._recover_web_search(
+        turn, state, [{"type": "function", "function": {"name": "web_search"}}]
+    )
+    assert recovered.tool_calls == []
+    assert recovered.content.startswith("根据内部文档")
+
+
 def test_runtime_does_not_force_delegation_for_conceptual_profit_question():
     runtime = object.__new__(AgentRuntime)
     runtime._append_event = lambda *_args: None  # type: ignore[method-assign]

@@ -134,7 +134,10 @@ def register_search_knowledge_tool(
         ToolDefinition(
             name="search_knowledge",
             description=(
-                "检索当前租户已发布的知识文档切片（制度、手册、故障码、SOP）。"
+                "需要引用已发布制度、手册、故障码、SOP，或解释运营/平台政策术语时调用"
+                "（包括用户只问「VAT 是什么意思」这类定义）。"
+                "寒暄、与文档无关的百科、以及上文切片已够用时不要调用。"
+                "query 写成独立完整的检索句，不要原样丢用户短追问。"
                 "返回标题、页码和正文摘录。不要用它查个人记忆或业务数据库。"
                 "可选 space_id、category_ids、top_k。"
             ),

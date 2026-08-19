@@ -225,6 +225,10 @@
             <p>在「基础管理 → 公共设置 → Web API」完成第三方登录授权，服务地址以 /K3Cloud 结尾。</p>
           </article>
           <article class="setting-card">
+            <h3>Tavily 网页搜索</h3>
+            <p>保存 API Key 后，Coordinator 可通过 web_search 检索公开网页。内部制度仍走文枢知识库。</p>
+          </article>
+          <article class="setting-card">
             <h3>Qdrant / Milvus</h3>
             <p>仅用于 Agent 个人记忆等向量后端。知识文档的解析和检索走文枢，不在这里对接 Collection。</p>
           </article>
@@ -240,7 +244,7 @@
           <p id="connection-editor-subtitle">在页面中保存连接凭证和可访问数据范围</p>
           <form id="connection-editor-form">
             <label>连接名称<input id="connection-edit-name" required maxlength="120" placeholder="例如 华东生产库"></label>
-            <label>连接类型<select id="connection-edit-type"><option value="analytics">数据分析数据库</option><option value="lingxing">领星 OpenAPI</option><option value="kingdee">金蝶云星空</option><option value="dingtalk">钉钉</option><option value="qdrant">Qdrant 向量数据库</option><option value="milvus">Milvus 向量数据库</option></select></label>
+            <label>连接类型<select id="connection-edit-type"><option value="analytics">数据分析数据库</option><option value="lingxing">领星 OpenAPI</option><option value="kingdee">金蝶云星空</option><option value="dingtalk">钉钉</option><option value="tavily">Tavily 网页搜索</option><option value="qdrant">Qdrant 向量数据库</option><option value="milvus">Milvus 向量数据库</option></select></label>
             <label class="context-toggle"><input id="connection-edit-enabled" type="checkbox" checked>启用此连接</label>
             <div id="connection-fields-analytics">
               <label>数据库类型<select id="connection-edit-database-type" onchange="updateAnalyticsDatabaseFields()"><option value="postgresql">PostgreSQL</option><option value="mysql">MySQL</option></select></label>
@@ -274,6 +278,11 @@
               <label>Milvus URI<input id="connection-edit-milvus-uri" maxlength="512" placeholder="http://127.0.0.1:19530"></label>
               <label>Token<input id="connection-edit-milvus-token" type="password" autocomplete="new-password" placeholder="例如 root:Milvus，无鉴权可留空"></label>
               <label>Database<input id="connection-edit-milvus-database" maxlength="128" value="default"></label>
+            </div>
+            <div id="connection-fields-tavily" hidden>
+              <label>API Key<input id="connection-edit-tavily-key" type="password" autocomplete="new-password" placeholder="tvly-…"></label>
+              <label>API Base URL<input id="connection-edit-tavily-url" maxlength="256" value="https://api.tavily.com" readonly></label>
+              <p class="form-hint">Key 在 Tavily 控制台获取。免费档每月约 1,000 credits。保存后到「工具」页把 web_search 绑到此连接。</p>
             </div>
             <div id="connection-scopes-data">
               <label>可访问店铺<input id="connection-edit-stores" placeholder="逗号分隔，* 表示全部"></label>
