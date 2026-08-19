@@ -47,6 +47,11 @@ class AmazonFinanceAgent:
         if not rows:
             return "指定条件下没有 RELEASED 结算交易。"
         if plan.metric == "overview":
+            if len(rows) > 1:
+                currencies = "、".join(
+                    str(row.get("currency_code") or "未知币种") for row in rows
+                )
+                return f"按币种返回 {len(rows)} 组 RELEASED 交易汇总：{currencies}。"
             row = rows[0]
             return (
                 f"共查询到 {row['transaction_count']} 笔 RELEASED 交易，"
@@ -61,18 +66,28 @@ class AmazonFinanceAgent:
         }
         return f"按当前条件返回 {len(rows)} {labels[plan.metric]}，数据口径仅包含 RELEASED。"
 
-    def run(self, request: AmazonFinanceQueryRequest) -> AmazonFinanceQueryResponse:
-        plan = self.model.structured(
-            AmazonFinanceQueryPlan,
-            system_prompt=self.system_prompt,
-            payload={"objective": request.question},
-        )
-        seller_id, rows = self.query_tool.execute(plan, seller_id=request.seller_id)
+    def run(
+        self,
+        request: AmazonFinanceQueryRequest,
+        *,
+        query_tool: AmazonFinanceQueryTool | None = None,
+    ) -> AmazonFinanceQueryResponse:
+        plan = self.plan(request)
+        rows = (query_tool or self.query_tool).execute(plan)
         return AmazonFinanceQueryResponse(
             question=request.question,
-            seller_id=seller_id,
             plan=plan,
             columns=list(rows[0].keys()) if rows else [],
             rows=rows,
             summary=self._summary(plan, rows),
         )
+
+    def plan(self, request: AmazonFinanceQueryRequest) -> AmazonFinanceQueryPlan:
+        if request.plan is not None:
+            return request.plan
+        plan = self.model.structured(
+            AmazonFinanceQueryPlan,
+            system_prompt=self.system_prompt,
+            payload={"objective": request.question},
+        )
+        return plan

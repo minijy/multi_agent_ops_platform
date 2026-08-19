@@ -2,22 +2,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..agent_registry import AgentRegistry
-from ..integrations.kingdee.client import KingdeeClient, KingdeeCredentials
-from ..workflows.kingdee_cloud.domain import KingdeeIntegrationConfig, KingdeeQueryPlan
+from ..workflows.kingdee_cloud.domain import KingdeeQueryPlan
 from ..workflows.kingdee_cloud.query_tool import KingdeeQueryTool
 from .tools import ToolDefinition, ToolExecutionContext, ToolRegistry
-
-
-def _integration_from_registry(registry: AgentRegistry) -> KingdeeIntegrationConfig:
-    agent = registry.kingdee_cloud_config()
-    raw = agent.integration if isinstance(agent.integration, dict) else {}
-    return KingdeeIntegrationConfig.model_validate(raw)
+from .connectors import ConnectorRuntime
+from ..source_privacy import KINGDEE_SOURCE
 
 
 def register_kingdee_cloud_tool(
     registry: ToolRegistry,
-    agent_registry: AgentRegistry,
+    connectors: ConnectorRuntime,
     *,
     timeout_seconds: float = 45.0,
 ) -> None:
@@ -27,30 +21,11 @@ def register_kingdee_cloud_tool(
         plan: KingdeeQueryPlan,
         context: ToolExecutionContext,
     ) -> dict[str, Any]:
-        integration = _integration_from_registry(agent_registry)
-        if not (
-            integration.server_url.strip()
-            and integration.acct_id.strip()
-            and integration.app_id.strip()
-            and integration.app_secret.strip()
-            and integration.username.strip()
-        ):
-            raise ValueError(
-                "金蝶云星空 WebAPI 凭证未配置，请在 Agents 页编辑「金蝶云星空 Agent」"
-                "填写服务地址、账套 ID、应用 ID、应用密钥与集成用户名"
-            )
-        client = KingdeeClient(
-            KingdeeCredentials(
-                server_url=integration.server_url.strip(),
-                acct_id=integration.acct_id.strip(),
-                app_id=integration.app_id.strip(),
-                app_secret=integration.app_secret.strip(),
-                username=integration.username.strip(),
-                lcid=integration.lcid,
-            ),
-            timeout_seconds=timeout_seconds,
+        rows, label, form_id, columns = connectors.execute_tool(
+            context.tenant_id,
+            "kingdee_cloud_query",
+            lambda client, _connection: query_tool.execute(client, plan),
         )
-        rows, label, form_id, columns = query_tool.execute(client, plan)
         summary = (
             f"{label} 在 {plan.start_date} 至 {plan.end_date} 无匹配记录"
             if not rows
@@ -64,7 +39,14 @@ def register_kingdee_cloud_tool(
             "rows": rows,
             "summary": summary,
             "total": len(rows),
-            "data_scope": "金蝶云星空 · ExecuteBillQuery",
+            "data_scope": KINGDEE_SOURCE,
+            "data_source": KINGDEE_SOURCE,
+            "calculation": {
+                "engine": "kingdee-webapi",
+                "operation": "authorized bill query",
+                "grouped_by": [],
+                "source_rows": len(rows),
+            },
         }
 
     registry.register(

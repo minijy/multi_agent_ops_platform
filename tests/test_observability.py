@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
 from pathlib import Path
 
 import jwt
@@ -22,17 +23,41 @@ def _settings(tmp_path: Path, **overrides) -> Settings:
         session_event_path=tmp_path / "session-events.sqlite3",
         runtime_governance_path=tmp_path / "governance.sqlite3",
         runtime_metrics_path=tmp_path / "metrics.sqlite3",
+        memory_db_path=tmp_path / "memory.sqlite3",
+        agent_definitions_path=tmp_path / "agents.json",
+        model_definitions_path=tmp_path / "models.json",
+        connection_definitions_path=tmp_path / "connections.json",
+        connection_secrets_path=tmp_path / "connection-secrets.json",
+        tool_bindings_path=tmp_path / "tool-bindings.json",
         attachment_path=tmp_path / "attachments",
         skills_paths=str(tmp_path / "missing-skills"),
         mcp_config_path=tmp_path / "missing-mcp.json",
     )
     values.update(overrides)
-    return Settings(**values)
+    settings = Settings(**values)
+    if not settings.model_definitions_path.exists():
+        settings.model_definitions_path.write_text(
+            json.dumps(
+                {
+                    "test-mock": {
+                        "name": "Test Mock",
+                        "provider": "mock",
+                        "model_name": "mock-function-calling",
+                        "enabled": True,
+                        "is_default": True,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+    return settings
 
 
 def test_estimate_cost_uses_provider_rates():
     assert estimate_cost("mock", "mock-function-calling", 1000, 1000) == 0
     assert estimate_cost("openai", "gpt-4o", 1_000_000, 1_000_000) == 12.5
+    assert estimate_cost("qwen", "qwen3.7-plus", 1_000_000, 1_000_000) == 5.6
+    assert estimate_cost("deepseek", "deepseek-chat", 1_000_000, 1_000_000) == 0.7
 
 
 def test_replay_detects_leaked_protocol():

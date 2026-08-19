@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..config import Settings
 
@@ -19,6 +19,28 @@ class SessionEvent(BaseModel):
     event_type: str
     payload: dict[str, Any] = Field(default_factory=dict)
     created_at: str
+
+    @field_validator("payload", mode="before")
+    @classmethod
+    def remove_legacy_seller_fields(cls, value: Any) -> dict[str, Any]:
+        def clean(item: Any) -> Any:
+            if isinstance(item, dict):
+                return {
+                    key: clean(child)
+                    for key, child in item.items()
+                    if key not in {"seller_id", "seller_ids"}
+                }
+            if isinstance(item, list):
+                return [clean(child) for child in item]
+            return item
+
+        return clean(value) if isinstance(value, dict) else {}
+
+
+class SessionSummary(BaseModel):
+    session_id: str
+    title: str
+    updated_at: str
 
 
 class SessionEventStore(Protocol):
@@ -36,11 +58,44 @@ class SessionEventStore(Protocol):
         self, *, session_id: str, tenant_id: str
     ) -> list[SessionEvent]: ...
 
+    def list_sessions(
+        self, *, tenant_id: str, user_id: str, limit: int = 50
+    ) -> list[SessionSummary]: ...
+
     def delete_session(self, *, session_id: str, tenant_id: str) -> int: ...
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _session_summaries(
+    events: list[SessionEvent], limit: int
+) -> list[SessionSummary]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for event in events:
+        item = grouped.setdefault(
+            event.session_id,
+            {"title": "", "updated_at": event.created_at, "is_child": False},
+        )
+        if event.created_at > item["updated_at"]:
+            item["updated_at"] = event.created_at
+        if event.event_type == "session.created":
+            item["is_child"] = bool(event.payload.get("parent_session_id"))
+        elif event.event_type == "user.message" and not item["title"]:
+            content = event.payload.get("content", "")
+            item["title"] = content.strip() if isinstance(content, str) else str(content)
+    summaries = [
+        SessionSummary(
+            session_id=session_id,
+            title=(str(item["title"]) or "未命名会话")[:80],
+            updated_at=str(item["updated_at"]),
+        )
+        for session_id, item in grouped.items()
+        if not item["is_child"]
+    ]
+    summaries.sort(key=lambda item: item.updated_at, reverse=True)
+    return summaries[:limit]
 
 
 class SQLiteSessionEventStore:
@@ -62,6 +117,8 @@ class SQLiteSessionEventStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_agent_session_events_tenant
                     ON agent_session_events(tenant_id, session_id, sequence);
+                CREATE INDEX IF NOT EXISTS idx_agent_session_events_user
+                    ON agent_session_events(tenant_id, user_id, created_at);
                 """
             )
 
@@ -141,6 +198,31 @@ class SQLiteSessionEventStore:
             for row in rows
         ]
 
+    def list_sessions(
+        self, *, tenant_id: str, user_id: str, limit: int = 50
+    ) -> list[SessionSummary]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM agent_session_events
+                WHERE tenant_id=? AND user_id=? ORDER BY session_id, sequence
+                """,
+                (tenant_id, user_id),
+            ).fetchall()
+        events = [
+            SessionEvent(
+                session_id=row["session_id"],
+                sequence=row["sequence"],
+                tenant_id=row["tenant_id"],
+                user_id=row["user_id"],
+                event_type=row["event_type"],
+                payload=json.loads(row["payload_json"]),
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+        return _session_summaries(events, limit)
+
     def delete_session(self, *, session_id: str, tenant_id: str) -> int:
         with self._connect() as connection:
             cursor = connection.execute(
@@ -175,6 +257,12 @@ class PostgresSessionEventStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_agent_session_events_tenant
                 ON agent_session_events(tenant_id, session_id, sequence)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_agent_session_events_user
+                ON agent_session_events(tenant_id, user_id, created_at)
                 """
             )
 
@@ -232,6 +320,19 @@ class PostgresSessionEventStore:
                 (session_id, tenant_id),
             ).fetchall()
         return [self._row(row) for row in rows]
+
+    def list_sessions(
+        self, *, tenant_id: str, user_id: str, limit: int = 50
+    ) -> list[SessionSummary]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM agent_session_events
+                WHERE tenant_id=%s AND user_id=%s ORDER BY session_id, sequence
+                """,
+                (tenant_id, user_id),
+            ).fetchall()
+        return _session_summaries([self._row(row) for row in rows], limit)
 
     def delete_session(self, *, session_id: str, tenant_id: str) -> int:
         with self._connect() as connection:

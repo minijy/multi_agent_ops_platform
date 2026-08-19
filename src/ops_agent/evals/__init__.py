@@ -110,13 +110,20 @@ def default_eval_path() -> Path:
 
 
 def _offline_runtime(event_path: Path) -> AgentRuntime:
+    from ..agent_registry import create_agent_registry
     from ..config import Settings
+    from ..runtime.governance import SQLiteRuntimeGovernanceStore
     from ..runtime.model_router import create_model_router
     from ..runtime.session_events import SQLiteSessionEventStore
+    from ..runtime.subagents import SubagentManager, register_subagent_tool
     from ..runtime.tools import ToolDefinition, ToolExecutor, ToolRegistry
     from ..workflows.amazon_finance.domain import AmazonFinanceQueryPlan
 
-    settings = Settings(_env_file=None, model_provider="mock")
+    settings = Settings(
+        _env_file=None,
+        model_provider="mock",
+        agent_definitions_path=event_path.with_name("eval-agents.json"),
+    )
     registry = ToolRegistry()
     registry.register(
         ToolDefinition(
@@ -130,12 +137,29 @@ def _offline_runtime(event_path: Path) -> AgentRuntime:
             },
         )
     )
-    return AgentRuntime(
+    events = SQLiteSessionEventStore(event_path)
+    governance = SQLiteRuntimeGovernanceStore(
+        event_path.with_name("eval-governance.sqlite3")
+    )
+    agent_registry = create_agent_registry(settings.agent_definitions_path)
+    runtime = AgentRuntime(
         router=create_model_router(settings),
         registry=registry,
         executor=ToolExecutor(registry),
-        event_store=SQLiteSessionEventStore(event_path),
+        event_store=events,
+        governance_store=governance,
+        settings=settings,
+        agent_registry=agent_registry,
     )
+    manager = SubagentManager(
+        runtime=runtime,
+        registry=registry,
+        event_store=events,
+        governance_store=governance,
+        settings=settings,
+    )
+    register_subagent_tool(registry, manager)
+    return runtime
 
 
 def main() -> int:

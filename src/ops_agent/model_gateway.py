@@ -24,6 +24,30 @@ class ModelGateway:
         raise NotImplementedError
 
 
+class UnconfiguredModelGateway(ModelGateway):
+    """Hard stop used before an administrator configures a page model."""
+
+    def structured(
+        self, schema: type[T], *, system_prompt: str, payload: dict[str, Any]
+    ) -> T:
+        # Import lazily: runtime.model_router imports MockModelGateway for
+        # isolated tests, so importing the runtime package at module load time
+        # would create a cycle.
+        from .runtime.model_errors import ModelProviderError
+
+        raise ModelProviderError(
+            provider="configuration",
+            code="model_configuration_required",
+            user_message=(
+                "尚未配置可用模型，请管理员前往系统设置 → "
+                "模型配置添加并启用模型。"
+            ),
+            status_code=503,
+            retry_after_seconds=1,
+            automatic_retry=False,
+        )
+
+
 class MockModelGateway(ModelGateway):
     """Deterministic local model substitute used for development and CI."""
 
@@ -238,4 +262,6 @@ def create_model_gateway(settings: Settings) -> ModelGateway:
         return OpenAIModelGateway(settings)
     if settings.model_provider == "zhipu":
         return ZhipuModelGateway(settings)
-    return MockModelGateway()
+    if settings.model_provider == "mock":
+        return MockModelGateway()
+    return UnconfiguredModelGateway()

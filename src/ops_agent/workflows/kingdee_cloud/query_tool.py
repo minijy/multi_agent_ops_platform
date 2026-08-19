@@ -19,6 +19,8 @@ DOCUMENT_META: dict[DocumentType, dict[str, str]] = {
             "FDocumentStatus,FBillAllAmount,FNote"
         ),
         "date_field": "FDate",
+        "customer_field": "FCustId.FName",
+        "organization_field": "FSaleOrgId.FName",
     },
     "sale_outstock": {
         "form_id": "SAL_OUTSTOCK",
@@ -28,6 +30,8 @@ DOCUMENT_META: dict[DocumentType, dict[str, str]] = {
             "FDocumentStatus,FRealQty,FBillAllAmount"
         ),
         "date_field": "FDate",
+        "customer_field": "FCustId.FName",
+        "organization_field": "FStockOrgId.FName",
     },
     "ar_receivable": {
         "form_id": "AR_receivable",
@@ -37,6 +41,8 @@ DOCUMENT_META: dict[DocumentType, dict[str, str]] = {
             "FALLAMOUNTFOR,FCURRENCYID.FName,FRemark"
         ),
         "date_field": "FDate",
+        "customer_field": "FCUSTOMERID.FName",
+        "organization_field": "",
     },
     "ar_expense_receivable": {
         "form_id": "AR_OtherRecAble",
@@ -46,6 +52,8 @@ DOCUMENT_META: dict[DocumentType, dict[str, str]] = {
             "FALLAMOUNTFOR,FCURRENCYID.FName,FRemark"
         ),
         "date_field": "FDate",
+        "customer_field": "FCUSTOMERID.FName",
+        "organization_field": "",
     },
 }
 
@@ -72,9 +80,23 @@ def build_filter_string(plan: KingdeeQueryPlan) -> str:
     bill_no = plan.bill_no.strip()
     if bill_no:
         parts.append(f"FBillNo = '{_escape_filter(bill_no)}'")
-    extra = plan.extra_filter.strip()
-    if extra:
-        parts.append(extra)
+    customer_name = plan.customer_name.strip()
+    if customer_name:
+        parts.append(
+            f"{meta['customer_field']} = '{_escape_filter(customer_name)}'"
+        )
+    organization_name = plan.organization_name.strip()
+    if organization_name:
+        organization_field = meta["organization_field"]
+        if not organization_field:
+            raise KingdeeQueryError(
+                f"{meta['label']} does not support organization_name filtering"
+            )
+        parts.append(
+            f"{organization_field} = '{_escape_filter(organization_name)}'"
+        )
+    if plan.document_status:
+        parts.append(f"FDocumentStatus = '{plan.document_status}'")
     return " and ".join(parts)
 
 

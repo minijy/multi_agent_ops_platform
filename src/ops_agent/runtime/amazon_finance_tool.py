@@ -6,12 +6,19 @@ from ..config import Settings
 from ..workflows.amazon_finance.domain import AmazonFinanceQueryPlan
 from ..workflows.amazon_finance.query_tool import AmazonFinanceQueryTool
 from .tools import ToolDefinition, ToolExecutionContext, ToolRegistry
+from .connectors import ConnectorRuntime
+from ..source_privacy import AMAZON_FINANCE_SOURCE
 
 
 def _summary(plan: AmazonFinanceQueryPlan, rows: list[dict[str, Any]]) -> str:
     if not rows:
         return "指定条件下没有 RELEASED 结算交易。"
     if plan.metric == "overview":
+        if len(rows) > 1:
+            currencies = "、".join(
+                str(row.get("currency_code") or "未知币种") for row in rows
+            )
+            return f"按币种返回 {len(rows)} 组 RELEASED 交易汇总：{currencies}。"
         row = rows[0]
         return (
             f"共查询到 {row['transaction_count']} 笔 RELEASED 交易，"
@@ -30,24 +37,38 @@ def _summary(plan: AmazonFinanceQueryPlan, rows: list[dict[str, Any]]) -> str:
 def register_amazon_finance_tool(
     registry: ToolRegistry,
     settings: Settings,
+    connectors: ConnectorRuntime,
 ) -> None:
-    query_tool = AmazonFinanceQueryTool(
-        settings.analytics_dsn,
-        statement_timeout_ms=settings.analytics_statement_timeout_ms,
-    )
-
     def execute(
         plan: AmazonFinanceQueryPlan,
         context: ToolExecutionContext,
     ) -> dict[str, Any]:
-        seller_id, rows = query_tool.execute(plan, seller_id=context.seller_id)
+        def query(client, _connection):
+            query_tool = AmazonFinanceQueryTool(
+                client["dsn"],
+                statement_timeout_ms=settings.analytics_statement_timeout_ms,
+                engine=client.get("engine", "postgresql"),
+            )
+            return query_tool.execute(plan)
+
+        rows = connectors.execute_tool(
+            context.tenant_id, "amazon_finance_query", query
+        )
         return {
-            "seller_id": seller_id,
             "plan": plan.model_dump(mode="json"),
             "columns": list(rows[0].keys()) if rows else [],
             "rows": rows,
             "summary": _summary(plan, rows),
-            "data_scope": "RELEASED only",
+            "data_scope": AMAZON_FINANCE_SOURCE,
+            "data_source": AMAZON_FINANCE_SOURCE,
+            "calculation": {
+                "engine": connectors.connection_for_tool(
+                    context.tenant_id, "amazon_finance_query"
+                ).config.get("database_type", "postgresql"),
+                "operation": "parameterized aggregate query",
+                "metric": plan.metric,
+                "grouped_by": [] if plan.metric == "overview" else [plan.metric],
+            },
         }
 
     registry.register(

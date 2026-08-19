@@ -5,23 +5,41 @@ from dataclasses import dataclass
 from typing import Iterator
 
 from ..config import Settings
+from ..access_control import AccessControlStore, create_access_control_store
 from ..agent_registry import AgentRegistry, create_agent_registry
 from ..model_registry import ModelRegistry, create_model_registry
+from ..knowledge_spaces import (
+    KnowledgeSpaceRegistry,
+    create_knowledge_space_registry,
+)
+from ..connections import (
+    ConnectionRegistry,
+    create_connection_registry,
+)
 from .agent_loop import AgentRuntime
 from .amazon_finance_tool import register_amazon_finance_tool
 from .kingdee_cloud_tool import register_kingdee_cloud_tool
 from .lingxing_profit_tool import register_lingxing_profit_tool
 from .profit_report_tool import register_profit_report_tool
+from .dingtalk_tool import register_dingtalk_tools
 from .attachments import LocalAttachmentStore
+from .connectors import (
+    ConnectorRuntime,
+    ToolBindingRegistry,
+    create_connector_runtime,
+    create_tool_bindings,
+)
 from .governance import RuntimeGovernanceStore, create_runtime_governance_store
 from .mcp_client import MCPClientManager
+from .memory import MemoryService, create_memory_service, register_memory_tools
 from .model_router import create_model_router_from_registry
 from .observability import create_metrics_store
+from .result_store import ResultStore, create_result_store
 from .sandbox import SandboxRunner, register_sandbox_tools
 from .session_events import create_session_event_store
 from .skills import SkillRegistry, register_skill_tool
 from .subagents import SubagentManager, register_subagent_tool
-from .tools import ToolExecutor, ToolRegistry
+from .tools import ApprovalGuard, ConnectorAccessGuard, ToolExecutor, ToolRegistry
 from .tracing import configure_tracing
 
 
@@ -40,6 +58,13 @@ class RuntimeStack:
     sandbox_runner: SandboxRunner
     agent_runtime: AgentRuntime
     subagent_manager: SubagentManager
+    connection_registry: ConnectionRegistry | None = None
+    connector_runtime: ConnectorRuntime | None = None
+    tool_bindings: ToolBindingRegistry | None = None
+    access_control: AccessControlStore | None = None
+    result_store: ResultStore | None = None
+    memory_service: MemoryService | None = None
+    knowledge_spaces: KnowledgeSpaceRegistry | None = None
 
 
 @contextmanager
@@ -47,12 +72,26 @@ def open_runtime_stack(settings: Settings) -> Iterator[RuntimeStack]:
     """Build the shared Agent Runtime stack used by API and external workers."""
     configure_tracing(settings)
     agent_registry = create_agent_registry(settings.agent_definitions_path)
+    connection_registry = create_connection_registry(
+        settings.connection_definitions_path,
+        settings.connection_secrets_path,
+    )
+    knowledge_spaces = create_knowledge_space_registry(
+        settings.knowledge_spaces_path, connection_registry
+    )
+    tool_bindings = create_tool_bindings(settings.tool_bindings_path)
+    access_control = create_access_control_store(settings)
+    connector_runtime = create_connector_runtime(connection_registry, tool_bindings)
     model_registry = create_model_registry(settings.model_definitions_path, settings)
     tool_registry = ToolRegistry()
-    register_amazon_finance_tool(tool_registry, settings)
-    register_lingxing_profit_tool(tool_registry, agent_registry, timeout_seconds=30.0)
-    register_kingdee_cloud_tool(tool_registry, agent_registry, timeout_seconds=45.0)
-    register_profit_report_tool(tool_registry, settings)
+    memory_service = create_memory_service(settings) if settings.memory_enabled else None
+    if memory_service is not None:
+        register_memory_tools(tool_registry, memory_service)
+    register_amazon_finance_tool(tool_registry, settings, connector_runtime)
+    register_lingxing_profit_tool(tool_registry, connector_runtime, timeout_seconds=30.0)
+    register_kingdee_cloud_tool(tool_registry, connector_runtime, timeout_seconds=45.0)
+    register_profit_report_tool(tool_registry, settings, connector_runtime)
+    register_dingtalk_tools(tool_registry, connector_runtime, timeout_seconds=20.0)
     skill_registry = SkillRegistry.from_paths(settings.skills_paths)
     register_skill_tool(tool_registry, skill_registry)
     sandbox_runner = SandboxRunner(
@@ -64,6 +103,7 @@ def open_runtime_stack(settings: Settings) -> Iterator[RuntimeStack]:
     mcp_manager = MCPClientManager(settings.mcp_config_path, tool_registry)
     mcp_manager.start()
     session_events = create_session_event_store(settings)
+    result_store = create_result_store(settings)
     metrics_store = create_metrics_store(settings)
     governance_store = create_runtime_governance_store(settings)
     attachment_store = LocalAttachmentStore(
@@ -74,7 +114,13 @@ def open_runtime_stack(settings: Settings) -> Iterator[RuntimeStack]:
     agent_runtime = AgentRuntime(
         router=create_model_router_from_registry(model_registry, settings),
         registry=tool_registry,
-        executor=ToolExecutor(tool_registry),
+        executor=ToolExecutor(
+            tool_registry,
+            guards=[
+                ApprovalGuard(),
+                ConnectorAccessGuard(tool_bindings, connection_registry),
+            ],
+        ),
         event_store=session_events,
         attachment_store=attachment_store,
         skill_registry=skill_registry,
@@ -85,6 +131,11 @@ def open_runtime_stack(settings: Settings) -> Iterator[RuntimeStack]:
         settings=settings,
         agent_registry=agent_registry,
         model_registry=model_registry,
+        connection_registry=connection_registry,
+        access_control=access_control,
+        tool_bindings=tool_bindings,
+        result_store=result_store,
+        memory_service=memory_service,
     )
     subagent_manager = SubagentManager(
         runtime=agent_runtime,
@@ -92,12 +143,15 @@ def open_runtime_stack(settings: Settings) -> Iterator[RuntimeStack]:
         event_store=session_events,
         governance_store=governance_store,
         settings=settings,
+        access_control=access_control,
+        memory_service=memory_service,
     )
     register_subagent_tool(tool_registry, subagent_manager)
     stack = RuntimeStack(
         settings=settings,
         agent_registry=agent_registry,
         model_registry=model_registry,
+        connection_registry=connection_registry,
         tool_registry=tool_registry,
         skill_registry=skill_registry,
         mcp_manager=mcp_manager,
@@ -108,6 +162,12 @@ def open_runtime_stack(settings: Settings) -> Iterator[RuntimeStack]:
         sandbox_runner=sandbox_runner,
         agent_runtime=agent_runtime,
         subagent_manager=subagent_manager,
+        connector_runtime=connector_runtime,
+        tool_bindings=tool_bindings,
+        access_control=access_control,
+        result_store=result_store,
+        memory_service=memory_service,
+        knowledge_spaces=knowledge_spaces,
     )
     try:
         yield stack

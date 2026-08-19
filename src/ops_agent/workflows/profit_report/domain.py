@@ -16,11 +16,6 @@ ProfitMetric = Literal[
 ]
 
 
-class ProfitReportQueryRequest(BaseModel):
-    question: str = Field(min_length=2, max_length=2000)
-    currency_code: str | None = Field(default=None, max_length=8)
-
-
 class ProfitReportQueryPlan(BaseModel):
     metric: ProfitMetric
     start_date: date | None = None
@@ -36,6 +31,12 @@ class ProfitReportQueryPlan(BaseModel):
         return self
 
 
+class ProfitReportQueryRequest(BaseModel):
+    question: str = Field(min_length=2, max_length=2000)
+    currency_code: str | None = Field(default=None, max_length=8)
+    plan: ProfitReportQueryPlan | None = None
+
+
 class ProfitReportQueryResponse(BaseModel):
     question: str
     plan: ProfitReportQueryPlan
@@ -43,4 +44,4 @@ class ProfitReportQueryResponse(BaseModel):
     rows: list[dict[str, Any]]
     summary: str
     total_rows: int
-    data_scope: str = "lingxing_profit_order_transactions"
+    data_scope: str = "领星利润分析数据（分析仓）"

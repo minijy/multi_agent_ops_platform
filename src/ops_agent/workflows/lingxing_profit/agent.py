@@ -50,13 +50,16 @@ class LingXingProfitAgent:
     def set_integration(self, integration: LingXingIntegrationConfig) -> None:
         self.integration = integration
 
-    def _client(self) -> LingXingClient:
-        if not self.integration.app_id or not self.integration.app_secret:
+    def _client(
+        self, integration: LingXingIntegrationConfig | None = None
+    ) -> LingXingClient:
+        config = integration or self.integration
+        if not config.app_id or not config.app_secret:
             raise ValueError("领星开放平台凭证未配置")
         return LingXingClient(
-            self.integration.app_id,
-            self.integration.app_secret,
-            base_url=self.integration.base_url,
+            config.app_id,
+            config.app_secret,
+            base_url=config.base_url,
             timeout_seconds=self.timeout_seconds,
         )
 
@@ -75,13 +78,20 @@ class LingXingProfitAgent:
             f"当前页结算毛利润合计 {gross:.2f}。"
         )
 
-    def run(self, request: LingXingProfitQueryRequest) -> LingXingProfitQueryResponse:
-        plan = self.model.structured(
-            LingXingProfitQueryPlan,
-            system_prompt=self.system_prompt,
-            payload={"objective": request.question},
-        )
-        rows, total = self.query_tool.execute(self._client(), plan)
+    def run(
+        self,
+        request: LingXingProfitQueryRequest,
+        *,
+        integration: LingXingIntegrationConfig | None = None,
+        allowed_sids: set[int] | None = None,
+    ) -> LingXingProfitQueryResponse:
+        plan = self.plan(request)
+        if allowed_sids is not None:
+            if plan.sids and not set(plan.sids).issubset(allowed_sids):
+                raise PermissionError("one or more LingXing sids are not authorized")
+            if not plan.sids:
+                plan = plan.model_copy(update={"sids": sorted(allowed_sids)})
+        rows, total = self.query_tool.execute(self._client(integration), plan)
         return LingXingProfitQueryResponse(
             question=request.question,
             plan=plan,
@@ -90,3 +100,11 @@ class LingXingProfitAgent:
             summary=self._summary(plan, rows, total),
             total=total,
         )
+
+    def plan(self, request: LingXingProfitQueryRequest) -> LingXingProfitQueryPlan:
+        plan = self.model.structured(
+            LingXingProfitQueryPlan,
+            system_prompt=self.system_prompt,
+            payload={"objective": request.question},
+        )
+        return plan

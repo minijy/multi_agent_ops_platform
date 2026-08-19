@@ -24,6 +24,14 @@ _INPUT_OUTPUT_RATES: dict[tuple[str, str], tuple[float, float]] = {
     ("zhipu", "glm-5.2"): (1.00, 4.00),
     ("openai", "gpt-4o"): (2.50, 10.00),
     ("openai", "gpt-5.6-sol"): (1.25, 10.00),
+    ("qwen", "qwen3.7-plus"): (0.80, 4.80),
+    ("qwen", "qwen3-vl-235b-a22b-thinking"): (1.50, 12.00),
+    ("qwen", "*"): (0.80, 4.80),
+    ("deepseek", "deepseek-chat"): (0.28, 0.42),
+    ("deepseek", "deepseek-reasoner"): (0.28, 0.42),
+    ("deepseek", "deepseek-v4-flash"): (0.14, 0.28),
+    ("deepseek", "deepseek-v4-pro"): (1.25, 2.50),
+    ("deepseek", "*"): (0.28, 0.42),
 }
 
 

@@ -2,14 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..agent_registry import AgentRegistry
-from ..workflows.lingxing_profit.domain import (
-    LingXingIntegrationConfig,
-    LingXingProfitQueryPlan,
-)
+from ..workflows.lingxing_profit.domain import LingXingProfitQueryPlan
 from ..workflows.lingxing_profit.query_tool import LingXingProfitQueryTool
-from ..integrations.lingxing.client import LingXingClient
 from .tools import ToolDefinition, ToolExecutionContext, ToolRegistry
+from .connectors import ConnectorRuntime
+from ..source_privacy import LINGXING_LIVE_SOURCE
 
 
 def _summary(plan: LingXingProfitQueryPlan, rows: list[dict[str, Any]], total: int) -> str:
@@ -27,15 +24,9 @@ def _summary(plan: LingXingProfitQueryPlan, rows: list[dict[str, Any]], total: i
     )
 
 
-def _integration_from_registry(registry: AgentRegistry) -> LingXingIntegrationConfig:
-    agent = registry.lingxing_profit_config()
-    raw = agent.integration if isinstance(agent.integration, dict) else {}
-    return LingXingIntegrationConfig.model_validate(raw)
-
-
 def register_lingxing_profit_tool(
     registry: ToolRegistry,
-    agent_registry: AgentRegistry,
+    connectors: ConnectorRuntime,
     *,
     timeout_seconds: float = 30.0,
 ) -> None:
@@ -45,23 +36,42 @@ def register_lingxing_profit_tool(
         plan: LingXingProfitQueryPlan,
         context: ToolExecutionContext,
     ) -> dict[str, Any]:
-        integration = _integration_from_registry(agent_registry)
-        if not integration.app_id or not integration.app_secret:
-            raise ValueError("领星开放平台凭证未配置，请在 Agents 页编辑「领星利润报表 Agent」填写 App ID 与 App Secret")
-        client = LingXingClient(
-            integration.app_id,
-            integration.app_secret,
-            base_url=integration.base_url,
-            timeout_seconds=timeout_seconds,
+        def query(client, connection):
+            resolved_plan = plan
+            allowed_sids = connectors.scoped_tool_resources(
+                connection,
+                "lingxing_profit_query",
+                "sids",
+                context.resource_scope,
+            )
+            if allowed_sids and "*" not in allowed_sids:
+                allowed = {int(item) for item in allowed_sids}
+                if plan.sids and not set(plan.sids).issubset(allowed):
+                    raise PermissionError(
+                        "one or more LingXing sids are not authorized"
+                    )
+                if not plan.sids:
+                    resolved_plan = plan.model_copy(update={"sids": sorted(allowed)})
+            rows, total = query_tool.execute(client, resolved_plan)
+            return resolved_plan, rows, total
+
+        resolved_plan, rows, total = connectors.execute_tool(
+            context.tenant_id, "lingxing_profit_query", query
         )
-        rows, total = query_tool.execute(client, plan)
         return {
-            "plan": plan.model_dump(mode="json"),
+            "plan": resolved_plan.model_dump(mode="json"),
             "columns": list(rows[0].keys()) if rows else [],
             "rows": rows,
-            "summary": _summary(plan, rows, total),
+            "summary": _summary(resolved_plan, rows, total),
             "total": total,
-            "data_scope": "领星利润报表 · 订单维度 transaction 视图",
+            "data_scope": LINGXING_LIVE_SOURCE,
+            "data_source": LINGXING_LIVE_SOURCE,
+            "calculation": {
+                "engine": "lingxing-openapi",
+                "operation": "authorized paged retrieval",
+                "grouped_by": [],
+                "source_rows": total,
+            },
         }
 
     registry.register(

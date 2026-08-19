@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -13,6 +14,7 @@ import pytest
 
 from ops_agent.config import Settings
 from ops_agent.runtime.agent_loop import AgentRuntime
+from ops_agent.source_privacy import StreamingPublicTextSanitizer
 from ops_agent.runtime.attachments import AttachmentError, LocalAttachmentStore
 from ops_agent.runtime.domain import (
     AttachmentUploadRequest,
@@ -25,6 +27,7 @@ from ops_agent.runtime.model_errors import ModelProviderError
 from ops_agent.runtime.model_router import ModelRouter, create_model_router
 from ops_agent.runtime.session_events import SQLiteSessionEventStore
 from ops_agent.runtime.skills import SkillRegistry, register_skill_tool
+from ops_agent.runtime.subagents import DelegateSubagentArguments
 from ops_agent.runtime.tools import (
     ToolDefinition,
     ToolExecutionContext,
@@ -128,6 +131,81 @@ def test_runtime_function_call_and_session_events(tmp_path: Path):
     assert completed.payload["answer"] == "echo 工具调用完成"
 
 
+def test_runtime_repairs_stale_specialist_call_in_general_mode(tmp_path: Path):
+    class StaleSpecialistAdapter:
+        provider = "fake"
+        model_name = "stale-specialist"
+        input_modalities = frozenset({"text"})
+
+        def invoke(self, messages, _tools):
+            if any(message.get("role") == "tool" for message in messages):
+                return ModelTurn(
+                    provider=self.provider,
+                    model=self.model_name,
+                    content="通用 Analyst 已完成查询",
+                )
+            return ModelTurn(
+                provider=self.provider,
+                model=self.model_name,
+                tool_calls=[
+                    ToolCall(
+                        call_id="stale-specialist",
+                        name="delegate_specialists",
+                        arguments={
+                            "tasks": [
+                                {
+                                    "agent_id": "profit-analyst",
+                                    "objective": "再查询 2026 年 5 月的毛利率",
+                                }
+                            ]
+                        },
+                    )
+                ],
+            )
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="delegate_subagent",
+            description="general analyst delegation",
+            arguments_model=DelegateSubagentArguments,
+            handler=lambda args, _context: {
+                "agent_id": args.agent_id,
+                "answer": "5 月毛利率查询完成",
+            },
+            builtin=True,
+        )
+    )
+    events = SQLiteSessionEventStore(tmp_path / "mode-repair-events.sqlite3")
+    runtime = AgentRuntime(
+        router=ModelRouter(
+            {"fake": StaleSpecialistAdapter()}, default_model_id="fake"
+        ),
+        registry=registry,
+        executor=ToolExecutor(registry),
+        event_store=events,
+    )
+
+    response = runtime.run(
+        RuntimeAgentRequest(question="再查5月份的毛利率"),
+        tenant_id="tenant-a",
+        user_id="user-a",
+        allowed_tools={"delegate_subagent"},
+    )
+
+    assert response.answer == "通用 Analyst 已完成查询"
+    assert response.tool_results[0].tool_name == "delegate_subagent"
+    assert response.tool_results[0].output["agent_id"] == "analyst"
+    event_types = {
+        event.event_type
+        for event in events.list_events(
+            session_id=response.session_id, tenant_id="tenant-a"
+        )
+    }
+    assert "delegation.mode_repaired" in event_types
+    assert "model.tool_call_rejected" not in event_types
+
+
 def test_runtime_empty_model_content_still_records_final_answer(tmp_path: Path):
     class EmptyAdapter:
         provider = "fake"
@@ -183,7 +261,8 @@ def test_zhipu_adapter_uses_native_function_calling(monkeypatch):
             model_dump=lambda: {"prompt_tokens": 10, "completion_tokens": 5}
         ),
     )
-    create = lambda **_kwargs: response
+    def create(**_kwargs):
+        return response
     fake_client = SimpleNamespace(
         chat=SimpleNamespace(completions=SimpleNamespace(create=create))
     )
@@ -241,6 +320,184 @@ def test_sanitize_assistant_content_strips_leaked_completion_json():
     assert "finish_reason" not in content
     assert calls[0].name == "sandbox_full_access"
     assert calls[0].arguments["command"] == ["curl https://example.test"]
+
+
+def test_sanitize_assistant_content_strips_echoed_tool_arguments():
+    from ops_agent.runtime.model_router import sanitize_assistant_content
+
+    call = ToolCall(
+        call_id="parallel-1",
+        name="delegate_specialists",
+        arguments={
+            "tasks": [
+                {"agent_id": "profit-analyst", "objective": "查询月度利润"}
+            ]
+        },
+    )
+    content, calls = sanitize_assistant_content(
+        json.dumps(call.arguments, ensure_ascii=False), [call]
+    )
+
+    assert content == ""
+    assert calls == [call]
+
+
+def test_sanitize_assistant_content_recovers_textual_delegation_call():
+    from ops_agent.runtime.model_router import sanitize_assistant_content
+
+    content, calls = sanitize_assistant_content(
+        'delegate_subagent\n{"agent_id":"profit-analyst",'
+        '"objective":"按月汇总利润","parameters":{"group_by":"MSKU"}}'
+    )
+
+    assert content == ""
+    assert len(calls) == 1
+    assert calls[0].name == "delegate_subagent"
+    assert calls[0].arguments["agent_id"] == "profit-analyst"
+
+
+def test_sanitize_assistant_content_recovers_prefixed_textual_delegation_call():
+    from ops_agent.runtime.model_router import sanitize_assistant_content
+
+    content, calls = sanitize_assistant_content(
+        '该任务需要分析数据，我将调用子代理。 delegate_subagent\n'
+        '{"agent_id":"profit-analyst","objective":"按月汇总利润"}'
+    )
+
+    assert content == "该任务需要分析数据，我将调用子代理。"
+    assert len(calls) == 1
+    assert calls[0].name == "delegate_subagent"
+    assert calls[0].arguments["objective"] == "按月汇总利润"
+
+
+def test_runtime_recovers_false_delegation_claim_as_real_specialist_call():
+    runtime = object.__new__(AgentRuntime)
+    recovered_events = []
+    runtime._append_event = lambda _state, event_type, payload: recovered_events.append(  # type: ignore[method-assign]
+        (event_type, payload)
+    )
+    turn = ModelTurn(
+        provider="zhipu",
+        model="glm-test",
+        content=(
+            "我已经向利润分析师子代理发送了请求，"
+            "请稍等片刻。"
+        ),
+    )
+    state = {
+        "agent_id": "function-calling-runtime",
+        "messages": [
+            {
+                "role": "user",
+                "content": "帮我按月汇总 2026 年 1–7 月每个 MSKU 的销售量和利润",
+            }
+        ],
+    }
+    schemas = [
+        {"type": "function", "function": {"name": "delegate_specialists"}}
+    ]
+
+    recovered = runtime._recover_claimed_delegation(turn, state, schemas)
+
+    assert recovered.content == ""
+    assert len(recovered.tool_calls) == 1
+    assert recovered.tool_calls[0].name == "delegate_specialists"
+    assert recovered.tool_calls[0].arguments["tasks"][0]["agent_id"] == "profit-analyst"
+    assert "MSKU" in recovered.tool_calls[0].arguments["tasks"][0]["objective"]
+    assert recovered_events[0][0] == "model.tool_call_recovered"
+
+
+def test_runtime_forces_delegation_when_model_refuses_explicit_data_request():
+    runtime = object.__new__(AgentRuntime)
+    recovered_events = []
+    runtime._append_event = lambda _state, event_type, payload: recovered_events.append(  # type: ignore[method-assign]
+        (event_type, payload)
+    )
+    turn = ModelTurn(
+        provider="zhipu",
+        model="glm-test",
+        content="很抱歉，目前我无法直接获取您所需的数据。",
+    )
+    state = {
+        "agent_id": "function-calling-runtime",
+        "messages": [
+            {"role": "user", "content": "上一个数据问题"},
+            {
+                "role": "tool",
+                "name": "delegate_subagent",
+                "content": '{"error":"old failure"}',
+            },
+            {
+                "role": "user",
+                "content": "帮我按月汇总 2026 年 1–7 月每个 MSKU 的销售量和利润",
+            },
+        ],
+    }
+    schemas = [
+        {"type": "function", "function": {"name": "delegate_specialists"}}
+    ]
+
+    recovered = runtime._recover_claimed_delegation(turn, state, schemas)
+
+    assert recovered.content == ""
+    assert recovered.tool_calls[0].name == "delegate_specialists"
+    assert recovered.tool_calls[0].arguments["tasks"][0]["agent_id"] == "profit-analyst"
+    assert recovered_events[0][1]["reason"] == "data_request_requires_delegation"
+
+
+def test_runtime_does_not_force_delegation_for_conceptual_profit_question():
+    runtime = object.__new__(AgentRuntime)
+    runtime._append_event = lambda *_args: None  # type: ignore[method-assign]
+    turn = ModelTurn(
+        provider="zhipu",
+        model="glm-test",
+        content="毛利是收入减去直接成本。",
+    )
+    state = {
+        "agent_id": "function-calling-runtime",
+        "messages": [{"role": "user", "content": "毛利是什么？"}],
+    }
+    schemas = [
+        {"type": "function", "function": {"name": "delegate_specialists"}}
+    ]
+
+    recovered = runtime._recover_claimed_delegation(turn, state, schemas)
+
+    assert recovered == turn
+
+
+def test_visible_answer_uses_specialist_results_instead_of_wait_message():
+    answer = AgentRuntime._visible_answer(
+        {
+            "answer": "分析师正在收集数据，请稍等片刻。",
+            "tool_results": [
+                {
+                    "tool_name": "delegate_specialists",
+                    "ok": True,
+                    "output": {
+                        "tasks": [
+                            {
+                                "agent_id": "profit-analyst",
+                                "status": "completed",
+                                "answer": "1 月利润为 120 CAD。",
+                            },
+                            {
+                                "agent_id": "erp-analyst",
+                                "status": "completed",
+                                "answer": "1 月销售额为 500 CAD。",
+                            },
+                        ]
+                    },
+                }
+            ],
+        },
+        "任务已完成。",
+    )
+
+    assert "profit-analyst" in answer
+    assert "1 月利润为 120 CAD" in answer
+    assert "erp-analyst" in answer
+    assert "请稍等" not in answer
 
 
 def test_zhipu_adapter_hides_leaked_tool_json_from_content(monkeypatch):
@@ -702,6 +959,47 @@ def test_compact_tool_content_truncates_rows():
     assert len(compact["rows"]) == 12
 
 
+def test_model_facing_tool_content_hides_physical_table_names():
+    compact = json.loads(
+        AgentRuntime._compact_tool_content(
+            json.dumps(
+                {
+                    "error": "relation lingxing_profit_order_transactions is unavailable",
+                    "data_scope": "lingxing_profit_order_transactions",
+                }
+            )
+        )
+    )
+
+    serialized = json.dumps(compact, ensure_ascii=False)
+    assert "lingxing_profit_order_transactions" not in serialized
+    assert "领星利润分析数据（分析仓）" in serialized
+
+
+def test_visible_answer_hides_physical_table_names():
+    answer = AgentRuntime._visible_answer(
+        {"answer": "数据来自 lingxing_profit_order_transactions。"},
+        "任务已完成。",
+    )
+
+    assert "lingxing_profit_order_transactions" not in answer
+    assert "领星利润分析数据（分析仓）" in answer
+
+
+def test_stream_sanitizer_hides_identifier_split_across_tokens():
+    sanitizer = StreamingPublicTextSanitizer()
+    visible = [
+        sanitizer.feed("来源 lingxing_profit_"),
+        sanitizer.feed("order_trans"),
+        sanitizer.feed("actions 完成"),
+        sanitizer.flush(),
+    ]
+    answer = "".join(visible)
+
+    assert "lingxing_profit_order_transactions" not in answer
+    assert "领星利润分析数据（分析仓）" in answer
+
+
 def test_prepare_model_messages_nulls_empty_tool_call_content(tmp_path: Path):
     runtime = AgentRuntime(
         router=ModelRouter({"fake": FakeFunctionCallingAdapter()}, default_model_id="fake"),
@@ -726,6 +1024,28 @@ def test_prepare_model_messages_nulls_empty_tool_call_content(tmp_path: Path):
     assert prepared[2]["content"] is None
     assert json.loads(prepared[3]["content"])["rows_truncated"] is True
     assert prepared[-1]["content"] == "q2"
+
+
+def test_prepare_model_messages_keeps_prior_reasoning(tmp_path: Path):
+    runtime = AgentRuntime(
+        router=ModelRouter({"fake": FakeFunctionCallingAdapter()}, default_model_id="fake"),
+        registry=ToolRegistry(),
+        executor=ToolExecutor(ToolRegistry()),
+        event_store=SQLiteSessionEventStore(tmp_path / "events.sqlite3"),
+    )
+    prepared = runtime._prepare_model_messages(
+        [
+            {"role": "user", "content": "q1"},
+            {
+                "role": "assistant",
+                "content": "a1",
+                "reasoning_content": "secret thinking",
+            },
+            {"role": "user", "content": "q2"},
+        ]
+    )
+    assert prepared[1]["content"] == "a1"
+    assert prepared[1]["reasoning_content"] == "secret thinking"
 
 
 def test_prepare_model_messages_sliding_window_drops_old_turns(tmp_path: Path):
@@ -776,6 +1096,26 @@ def test_prepare_model_messages_sliding_window_drops_old_turns(tmp_path: Path):
     ]
 
 
+def test_session_events_hide_legacy_seller_fields(tmp_path: Path):
+    event_store = SQLiteSessionEventStore(tmp_path / "events.sqlite3")
+    event_store.append(
+        session_id="legacy-session",
+        tenant_id="tenant-a",
+        user_id="user-a",
+        event_type="session.created",
+        payload={
+            "seller_id": "legacy-seller",
+            "resource_scope": {"seller_ids": ["legacy-seller"]},
+            "role": "admin",
+        },
+    )
+
+    payload = event_store.list_events(
+        session_id="legacy-session", tenant_id="tenant-a"
+    )[0].payload
+    assert payload == {"resource_scope": {}, "role": "admin"}
+
+
 def test_continue_session_resumes_open_turn_without_new_user_message(tmp_path: Path):
     class ResumeAdapter:
         provider = "fake"
@@ -799,7 +1139,7 @@ def test_continue_session_resumes_open_turn_without_new_user_message(tmp_path: P
     session_id = "11111111-1111-1111-1111-111111111111"
     event_store.append(
         session_id=session_id, tenant_id="tenant-a", user_id="user-a",
-        event_type="session.created", payload={"seller_id": None, "role": "admin"},
+        event_type="session.created", payload={"role": "admin"},
     )
     event_store.append(
         session_id=session_id, tenant_id="tenant-a", user_id="user-a",
@@ -846,3 +1186,82 @@ def test_continue_session_resumes_open_turn_without_new_user_message(tmp_path: P
     assert result.answer == "续上的结论"
     assert [event.event_type for event in events if event.event_type == "user.message"] == ["user.message"]
     assert not turn_is_open(events)
+
+
+def test_resumable_interrupt_keeps_turn_open_and_continues(tmp_path: Path):
+    from ops_agent.runtime.agent_loop import turn_is_open
+
+    class InterruptResumeAdapter:
+        provider = "fake"
+        model_name = "fake-interrupt-resume"
+        input_modalities = frozenset({"text"})
+
+        def __init__(self):
+            self.calls = 0
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def invoke(self, _messages, _tools):
+            self.calls += 1
+            if self.calls == 1:
+                self.started.set()
+                self.release.wait(timeout=3)
+                return ModelTurn(
+                    provider=self.provider,
+                    model=self.model_name,
+                    content="这次结果应被中断丢弃",
+                )
+            return ModelTurn(
+                provider=self.provider,
+                model=self.model_name,
+                content="已从检查点恢复并完成",
+            )
+
+    adapter = InterruptResumeAdapter()
+    event_store = SQLiteSessionEventStore(tmp_path / "interrupt-events.sqlite3")
+    registry = ToolRegistry()
+    runtime = AgentRuntime(
+        router=ModelRouter({"fake": adapter}, default_model_id="fake"),
+        registry=registry,
+        executor=ToolExecutor(registry),
+        event_store=event_store,
+    )
+    session_id = "22222222-2222-2222-2222-222222222222"
+    control = threading.Event()
+    responses = []
+
+    thread = threading.Thread(
+        target=lambda: responses.append(
+            runtime.run(
+                RuntimeAgentRequest(question="完成长任务", session_id=session_id),
+                tenant_id="tenant-a",
+                user_id="user-a",
+                cancellation_event=control,
+                interruption_is_resumable=True,
+            )
+        )
+    )
+    thread.start()
+    assert adapter.started.wait(timeout=2)
+    control.set()
+    adapter.release.set()
+    thread.join(timeout=3)
+
+    assert responses[0].status == "interrupted"
+    interrupted_events = event_store.list_events(
+        session_id=session_id, tenant_id="tenant-a"
+    )
+    assert turn_is_open(interrupted_events)
+    assert interrupted_events[-1].event_type == "turn.interrupted"
+
+    resumed = runtime.continue_session(
+        session_id=session_id,
+        tenant_id="tenant-a",
+        user_id="user-a",
+        interruption_is_resumable=True,
+    )
+    assert resumed.status == "completed"
+    assert resumed.answer == "已从检查点恢复并完成"
+    assert not turn_is_open(
+        event_store.list_events(session_id=session_id, tenant_id="tenant-a")
+    )

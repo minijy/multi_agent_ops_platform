@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -9,7 +10,7 @@ from ..config import Settings
 from ..model_gateway import MockModelGateway
 from ..workflows.amazon_finance.domain import AmazonFinanceQueryPlan
 from .domain import ModelTurn, ToolCall
-from .model_errors import invoke_zhipu_with_backoff
+from .model_errors import ModelProviderError, invoke_zhipu_with_backoff
 
 
 class FunctionCallingAdapter(Protocol):
@@ -22,6 +23,57 @@ class FunctionCallingAdapter(Protocol):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
     ) -> ModelTurn: ...
+
+
+class MissingApiKeyAdapter:
+    """Non-network adapter used as a hard stop for invalid persisted models."""
+
+    input_modalities = frozenset({"text", "image"})
+
+    def __init__(self, provider: str, model_name: str) -> None:
+        self.provider = provider
+        self.model_name = model_name
+
+    def invoke(
+        self,
+        _messages: list[dict[str, Any]],
+        _tools: list[dict[str, Any]],
+        on_token: Any | None = None,
+    ) -> ModelTurn:
+        raise ModelProviderError(
+            provider=self.provider,
+            code="model_api_key_missing",
+            user_message="当前模型未配置 API Key，请联系管理员在模型配置中填写。",
+            status_code=503,
+            retry_after_seconds=1,
+            automatic_retry=False,
+        )
+
+
+class ModelConfigurationRequiredAdapter:
+    """Keeps the control plane bootable while model configuration is empty."""
+
+    provider = "configuration"
+    model_name = "model-required"
+    input_modalities = frozenset({"text", "image"})
+
+    def invoke(
+        self,
+        _messages: list[dict[str, Any]],
+        _tools: list[dict[str, Any]],
+        on_token: Any | None = None,
+    ) -> ModelTurn:
+        raise ModelProviderError(
+            provider=self.provider,
+            code="model_configuration_required",
+            user_message=(
+                "尚未配置可用模型，请管理员前往系统设置 → "
+                "模型配置添加并启用模型。"
+            ),
+            status_code=503,
+            retry_after_seconds=1,
+            automatic_retry=False,
+        )
 
 
 def _looks_like_completion_dump(payload: Any) -> bool:
@@ -77,7 +129,29 @@ def sanitize_assistant_content(
 ) -> tuple[str, list[ToolCall]]:
     """Drop leaked ChatCompletion JSON that weaker models echo into content."""
     text = content or ""
+    call_arguments = [call.arguments for call in existing_calls or []]
     recovered: list[ToolCall] = []
+    textual_call = re.search(
+        r"\b(delegate_subagent|delegate_specialists)\s*(?:[:：]\s*)?(?=\{)",
+        text,
+    )
+    if textual_call and not existing_calls:
+        try:
+            arguments, end = json.JSONDecoder().raw_decode(
+                text, textual_call.end()
+            )
+        except json.JSONDecodeError:
+            arguments = None
+            end = textual_call.end()
+        if isinstance(arguments, dict):
+            recovered.append(
+                ToolCall(
+                    call_id=f"call-recovered-{uuid.uuid4().hex[:12]}",
+                    name=textual_call.group(1),
+                    arguments=arguments,
+                )
+            )
+            text = f"{text[:textual_call.start()]} {text[end:]}".strip()
     pieces: list[str] = []
     index = 0
     decoder = json.JSONDecoder()
@@ -95,6 +169,9 @@ def sanitize_assistant_content(
             continue
         if _looks_like_completion_dump(payload):
             recovered.extend(_tool_calls_from_payload(payload))
+            index = end
+            continue
+        if any(payload == arguments for arguments in call_arguments):
             index = end
             continue
         pieces.append(text[brace:end])
@@ -143,7 +220,7 @@ class MockFunctionCallingAdapter:
                 result = json.loads(tool_message)
             except json.JSONDecodeError:
                 result = {}
-            summary = result.get("summary")
+            summary = result.get("summary") or result.get("answer")
             content = str(summary or "工具查询已完成。")
             return self._maybe_stream(
                 ModelTurn(
@@ -180,6 +257,31 @@ class MockFunctionCallingAdapter:
                     )
                 ],
             )
+        if "delegate_subagent" in available and any(
+            word in question.lower() for word in finance_words
+        ):
+            system_prompt = "\n".join(
+                str(message.get("content", ""))
+                for message in messages
+                if message.get("role") == "system"
+            )
+            specialist_mode = "amazon-finance-analyst" in system_prompt
+            agent_id = "amazon-finance-analyst" if specialist_mode else "analyst"
+            return ModelTurn(
+                provider=self.provider,
+                model=self.model_name,
+                tool_calls=[
+                    ToolCall(
+                        call_id=f"call-{uuid.uuid4().hex[:12]}",
+                        name="delegate_subagent",
+                        arguments={
+                            "agent_id": agent_id,
+                            "objective": question,
+                            "run_in_background": False,
+                        },
+                    )
+                ],
+            )
         return self._maybe_stream(
             ModelTurn(
                 provider=self.provider,
@@ -209,7 +311,6 @@ class MockFunctionCallingAdapter:
 
 class OpenAIFunctionCallingAdapter:
     provider = "openai"
-    input_modalities = frozenset({"text"})
 
     def __init__(
         self,
@@ -218,6 +319,7 @@ class OpenAIFunctionCallingAdapter:
         model_name: str | None = None,
         api_key: str | None = None,
         temperature: float | None = None,
+        input_modalities: frozenset[str] = frozenset({"text"}),
     ) -> None:
         from langchain_openai import ChatOpenAI
 
@@ -233,6 +335,7 @@ class OpenAIFunctionCallingAdapter:
         if resolved_temperature is not None:
             options["temperature"] = resolved_temperature
         self.model_name = resolved_model
+        self.input_modalities = input_modalities
         self.model = ChatOpenAI(**options)
 
     def invoke(
@@ -265,8 +368,60 @@ class OpenAIFunctionCallingAdapter:
         )
 
 
+def _normalize_glm_name(model_name: str) -> str:
+    return str(model_name or "").strip().lower().replace("_", "-")
+
+
+def zhipu_supports_thinking(model_name: str) -> bool:
+    """Thinking is official for GLM-4.5+ and the GLM-5 family."""
+    name = _normalize_glm_name(model_name)
+    if name.startswith("glm-5"):
+        return True
+    return bool(re.match(r"^glm-4\.[567]", name))
+
+
+def zhipu_thinking_forced(model_name: str) -> bool:
+    name = _normalize_glm_name(model_name)
+    return (
+        name.startswith("glm-5.3")
+        or name.startswith("glm-4.7")
+        or name.startswith("glm-4.5v")
+    )
+
+
+def zhipu_supports_reasoning_effort(model_name: str) -> bool:
+    """reasoning_effort is official for GLM-5.2 and newer."""
+    name = _normalize_glm_name(model_name)
+    return (
+        name.startswith("glm-5.2")
+        or name.startswith("glm-5.3")
+        or name.startswith("glm-5.4")
+    )
+
+
+def history_for_zhipu(
+    messages: list[dict[str, Any]],
+    *,
+    keep_reasoning: bool,
+) -> list[dict[str, Any]]:
+    """Keep prior CoT when the current request carries tools.
+
+    Zhipu interleaved thinking requires unmodified reasoning_content on
+    assistant turns that called tools; plain chat can omit it.
+    """
+    prepared: list[dict[str, Any]] = []
+    for message in messages:
+        item = dict(message)
+        if item.get("role") != "assistant" or not keep_reasoning:
+            item.pop("reasoning_content", None)
+        elif not str(item.get("reasoning_content") or "").strip():
+            item.pop("reasoning_content", None)
+        prepared.append(item)
+    return prepared
+
+
 class ZhipuFunctionCallingAdapter:
-    """Official zai-sdk adapter with native Function Calling."""
+    """Official zai-sdk adapter with native Function Calling and thinking."""
 
     provider = "zhipu"
 
@@ -278,6 +433,8 @@ class ZhipuFunctionCallingAdapter:
         api_key: str | None = None,
         base_url: str | None = None,
         temperature: float | None = None,
+        enable_thinking: bool | None = None,
+        reasoning_effort: str | None = None,
         input_modalities: frozenset[str] = frozenset({"text"}),
     ) -> None:
         from zai import ZhipuAiClient
@@ -287,15 +444,30 @@ class ZhipuFunctionCallingAdapter:
         self.temperature = (
             temperature if temperature is not None else settings.model_temperature
         )
+        self.thinking_supported = zhipu_supports_thinking(self.model_name)
+        if not self.thinking_supported:
+            self.enable_thinking = False
+        elif zhipu_thinking_forced(self.model_name):
+            self.enable_thinking = True
+        else:
+            self.enable_thinking = (
+                True if enable_thinking is None else bool(enable_thinking)
+            )
+        effort = str(reasoning_effort or "high").lower()
+        self.reasoning_effort = effort if effort in {"low", "high", "max"} else "high"
+        self.effort_supported = zhipu_supports_reasoning_effort(self.model_name)
         self.max_retries = settings.model_max_retries
         self.backoff_base_seconds = settings.model_backoff_base_seconds
         self.rate_limit_cooldown_seconds = (
             settings.model_rate_limit_cooldown_seconds
         )
+        timeout = settings.model_request_timeout_seconds
+        if self.enable_thinking:
+            timeout = max(timeout, 180)
         self.client = ZhipuAiClient(
             api_key=api_key if api_key is not None else settings.zai_api_key,
             base_url=base_url if base_url is not None else settings.zhipu_base_url,
-            timeout=settings.model_request_timeout_seconds,
+            timeout=timeout,
             max_retries=0,
         )
 
@@ -305,15 +477,25 @@ class ZhipuFunctionCallingAdapter:
         tools: list[dict[str, Any]],
         on_token: Any | None = None,
     ) -> ModelTurn:
+        keep_reasoning = bool(self.enable_thinking and tools)
         options: dict[str, Any] = {
             "model": self.model_name,
-            "messages": messages,
+            "messages": history_for_zhipu(messages, keep_reasoning=keep_reasoning),
             "tools": tools,
             "tool_choice": "auto",
             "stream": bool(on_token),
         }
         if self.temperature is not None:
             options["temperature"] = self.temperature
+        if self.thinking_supported:
+            thinking: dict[str, Any] = {
+                "type": "enabled" if self.enable_thinking else "disabled"
+            }
+            if keep_reasoning:
+                thinking["clear_thinking"] = False
+            options["thinking"] = thinking
+            if self.enable_thinking and self.effort_supported:
+                options["reasoning_effort"] = self.reasoning_effort
         response = invoke_zhipu_with_backoff(
             self.client.chat.completions.create,
             options,
@@ -346,10 +528,16 @@ class ZhipuFunctionCallingAdapter:
                 if raw_content
                 else ""
             )
-        return self._turn_from_parts(raw_content, calls, getattr(response, "usage", None))
+        return self._turn_from_parts(
+            raw_content,
+            calls,
+            getattr(response, "usage", None),
+            reasoning_content=str(getattr(message, "reasoning_content", None) or ""),
+        )
 
     def _invoke_stream(self, response: Any, on_token: Any) -> ModelTurn:
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         tool_acc: dict[int, dict[str, str]] = {}
         usage_object = None
         for chunk in response:
@@ -358,10 +546,14 @@ class ZhipuFunctionCallingAdapter:
             if not choices:
                 continue
             delta = choices[0].delta
+            reasoning = getattr(delta, "reasoning_content", None) or ""
+            if reasoning:
+                reasoning_parts.append(reasoning)
+                _emit_token(on_token, reasoning, channel="reasoning")
             text = getattr(delta, "content", None) or ""
             if text:
                 content_parts.append(text)
-                on_token(text)
+                _emit_token(on_token, text)
             for call in getattr(delta, "tool_calls", None) or []:
                 slot = tool_acc.setdefault(
                     int(getattr(call, "index", 0) or 0),
@@ -392,13 +584,19 @@ class ZhipuFunctionCallingAdapter:
                     arguments=arguments,
                 )
             )
-        return self._turn_from_parts("".join(content_parts), calls, usage_object)
+        return self._turn_from_parts(
+            "".join(content_parts),
+            calls,
+            usage_object,
+            reasoning_content="".join(reasoning_parts),
+        )
 
     def _turn_from_parts(
         self,
         raw_content: str,
         calls: list[ToolCall],
         usage_object: Any,
+        reasoning_content: str = "",
     ) -> ModelTurn:
         content, recovered = sanitize_assistant_content(raw_content, calls)
         if not calls:
@@ -412,9 +610,20 @@ class ZhipuFunctionCallingAdapter:
             provider=self.provider,
             model=self.model_name,
             content=content,
+            reasoning_content=reasoning_content,
             tool_calls=calls,
             usage=usage,
         )
+
+
+def _emit_token(on_token: Any | None, text: str, *, channel: str = "content") -> None:
+    if not on_token or not text:
+        return
+    try:
+        on_token(text, channel=channel)
+    except TypeError:
+        if channel == "content":
+            on_token(text)
 
 
 @dataclass(frozen=True)
@@ -476,8 +685,21 @@ class ModelRouter:
         if adapter is None:
             raise ValueError(f"no adapter registered for model: {resolved_id}")
         if not required.issubset(getattr(adapter, "input_modalities", {"text"})):
-            raise ValueError(
-                f"model {resolved_id} does not support modalities: {sorted(required)}"
+            unsupported = sorted(
+                required - set(getattr(adapter, "input_modalities", {"text"}))
+            )
+            labels = {"image": "图片", "audio": "语音", "text": "文本"}
+            names = "、".join(labels.get(item, item) for item in unsupported)
+            raise ModelProviderError(
+                provider=adapter.provider,
+                code="model_input_modality_unsupported",
+                user_message=(
+                    f"当前模型未配置支持{names}输入，请更换模型或由"
+                    "管理员在模型配置中开启对应能力。"
+                ),
+                status_code=400,
+                retry_after_seconds=1,
+                automatic_retry=False,
             )
         return ModelRoute(
             model_id=resolved_id,
@@ -501,15 +723,29 @@ class ModelRouter:
             required_modalities=required_modalities,
         )
         adapter = self.adapters[route.adapter_key]
+        outgoing = (
+            messages
+            if adapter.provider in {"deepseek", "zhipu"}
+            else strip_reasoning_content(messages)
+        )
         if on_token is None:
-            return adapter.invoke(messages, tools)
+            return adapter.invoke(outgoing, tools)
         try:
-            return adapter.invoke(messages, tools, on_token=on_token)
+            return adapter.invoke(outgoing, tools, on_token=on_token)
         except TypeError:
-            turn = adapter.invoke(messages, tools)
+            turn = adapter.invoke(outgoing, tools)
             if turn.content:
                 on_token(turn.content)
             return turn
+
+
+def strip_reasoning_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    prepared: list[dict[str, Any]] = []
+    for message in messages:
+        item = dict(message)
+        item.pop("reasoning_content", None)
+        prepared.append(item)
+    return prepared
 
 
 def build_adapter_for_model(
@@ -525,29 +761,68 @@ def build_adapter_for_model(
         if isinstance(model, ModelDefinition)
         else ModelDefinition.model_validate(model)
     )
+    configured_modalities = {"text"}
+    if profile.supports_image_input:
+        configured_modalities.add("image")
+    if profile.supports_audio_input:
+        configured_modalities.add("audio")
+    primary_modalities = frozenset(configured_modalities)
+    if profile.provider != "mock" and not profile.api_key.strip():
+        return MissingApiKeyAdapter(profile.provider, profile.model_name)
     if profile.provider == "openai":
         return OpenAIFunctionCallingAdapter(
             settings,
             model_name=profile.model_name,
-            api_key=profile.api_key or None,
+            api_key=profile.api_key,
             temperature=profile.temperature,
+            input_modalities=primary_modalities,
         )
     if profile.provider == "zhipu":
         model_name = profile.vision_model_name if vision else profile.model_name
         if vision and not model_name:
             model_name = profile.model_name
-        modalities = (
-            frozenset({"text", "image"})
-            if vision and profile.vision_model_name
-            else frozenset({"text"})
-        )
+        modalities = primary_modalities
+        if vision:
+            modalities = frozenset(set(primary_modalities) | {"image"})
         return ZhipuFunctionCallingAdapter(
             settings,
             model_name=model_name,
-            api_key=profile.api_key or None,
+            api_key=profile.api_key,
             base_url=profile.base_url or None,
             temperature=profile.temperature,
+            enable_thinking=profile.enable_thinking,
+            reasoning_effort=profile.reasoning_effort,
             input_modalities=modalities,
+        )
+    if profile.provider == "qwen":
+        from .qwen_adapter import QwenFunctionCallingAdapter
+
+        model_name = profile.vision_model_name if vision and profile.vision_model_name else profile.model_name
+        modalities = primary_modalities
+        if vision:
+            modalities = frozenset(set(primary_modalities) | {"image"})
+        return QwenFunctionCallingAdapter(
+            settings,
+            model_name=model_name,
+            api_key=profile.api_key,
+            base_url=profile.base_url or None,
+            temperature=profile.temperature,
+            enable_thinking=profile.enable_thinking,
+            thinking_budget=profile.thinking_budget,
+            input_modalities=modalities,
+        )
+    if profile.provider == "deepseek":
+        from .deepseek_adapter import DeepSeekFunctionCallingAdapter
+
+        return DeepSeekFunctionCallingAdapter(
+            settings,
+            model_name=profile.model_name,
+            api_key=profile.api_key,
+            base_url=profile.base_url or None,
+            temperature=profile.temperature,
+            enable_thinking=profile.enable_thinking,
+            reasoning_effort=profile.reasoning_effort,
+            input_modalities=primary_modalities,
         )
     return MockFunctionCallingAdapter()
 
@@ -560,19 +835,18 @@ def create_model_router_from_registry(
     vision_keys: dict[str, str] = {}
     for model in registry.list(enabled_only=True):
         adapters[model.id] = build_adapter_for_model(model, settings)
-        if model.vision_model_name:
+        if model.supports_image_input and model.vision_model_name:
             vision_key = f"{model.id}__vision"
             adapters[vision_key] = build_adapter_for_model(
                 model, settings, vision=True
             )
             vision_keys[model.id] = vision_key
     if not adapters:
-        fallback = build_adapter_for_model(
-            registry.default_model(),
-            settings,
+        placeholder_id = "__model_configuration_required__"
+        return ModelRouter(
+            {placeholder_id: ModelConfigurationRequiredAdapter()},
+            default_model_id=placeholder_id,
         )
-        default_id = registry.default_model_id()
-        adapters[default_id] = fallback
     return ModelRouter(
         adapters,
         default_model_id=registry.default_model_id(),
@@ -581,7 +855,20 @@ def create_model_router_from_registry(
 
 
 def create_model_router(settings: Settings) -> ModelRouter:
-    from ..model_registry import create_model_registry
+    """Build the legacy single-model router without reading persisted UI config."""
+    from ..model_registry import default_models_from_settings
 
-    registry = create_model_registry(settings.model_definitions_path, settings)
-    return create_model_router_from_registry(registry, settings)
+    model = default_models_from_settings(settings)[0]
+    adapters: dict[str, FunctionCallingAdapter] = {
+        model.id: build_adapter_for_model(model, settings)
+    }
+    vision_keys: dict[str, str] = {}
+    if model.vision_model_name:
+        vision_key = f"{model.id}__vision"
+        adapters[vision_key] = build_adapter_for_model(model, settings, vision=True)
+        vision_keys[model.id] = vision_key
+    return ModelRouter(
+        adapters,
+        default_model_id=model.id,
+        vision_adapter_keys=vision_keys,
+    )

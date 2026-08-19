@@ -9,7 +9,7 @@ from ops_agent.agent_registry import create_agent_registry
 from ops_agent.model_registry import create_model_registry
 from ops_agent.config import Settings
 from ops_agent.runtime.agent_loop import AgentRuntime
-from ops_agent.runtime.domain import ModelTurn, RuntimeAgentRequest
+from ops_agent.runtime.domain import ModelTurn
 from ops_agent.runtime.governance import SQLiteRuntimeGovernanceStore
 from ops_agent.runtime.model_router import ModelRouter
 from ops_agent.runtime.session_events import SQLiteSessionEventStore
@@ -127,7 +127,11 @@ def test_db_queue_claim_and_worker_completes(tmp_path: Path):
                 session_id="parent-db", tenant_id="tenant-a"
             )
         ]
-        assert parent_events == ["subagent.started", "subagent.finished"]
+        assert parent_events == [
+            "subagent.started",
+            "subagent.running",
+            "subagent.finished",
+        ]
     finally:
         stop.set()
         thread.join(timeout=2)

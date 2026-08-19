@@ -33,6 +33,7 @@ class ModelTurn(BaseModel):
     provider: str
     model: str
     content: str = ""
+    reasoning_content: str = ""
     tool_calls: list[ToolCall] = Field(default_factory=list)
     usage: dict[str, Any] = Field(default_factory=dict)
 
@@ -50,14 +51,12 @@ class ToolResult(BaseModel):
 class RuntimeAgentRequest(BaseModel):
     question: str = Field(min_length=2, max_length=4000)
     session_id: str | None = Field(default=None, max_length=128)
-    seller_id: str | None = Field(default=None, max_length=128)
     model_id: str | None = Field(default=None, max_length=64)
     attachment_ids: list[str] = Field(default_factory=list, max_length=20)
 
 
 class ResumeAgentRequest(BaseModel):
     session_id: str = Field(min_length=8, max_length=128)
-    seller_id: str | None = Field(default=None, max_length=128)
 
 
 class ContextWindowUpdate(BaseModel):
@@ -80,6 +79,7 @@ class RuntimeAgentResponse(BaseModel):
         "completed",
         "waiting_approval",
         "cancelled",
+        "interrupted",
         "budget_exceeded",
         "timed_out",
         "failed",

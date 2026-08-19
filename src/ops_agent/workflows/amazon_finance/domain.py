@@ -16,11 +16,6 @@ FinanceMetric = Literal[
 ]
 
 
-class AmazonFinanceQueryRequest(BaseModel):
-    question: str = Field(min_length=2, max_length=2000)
-    seller_id: str | None = Field(default=None, max_length=128)
-
-
 class AmazonFinanceQueryPlan(BaseModel):
     metric: FinanceMetric
     start_date: date | None = None
@@ -34,9 +29,13 @@ class AmazonFinanceQueryPlan(BaseModel):
         return self
 
 
+class AmazonFinanceQueryRequest(BaseModel):
+    question: str = Field(min_length=2, max_length=2000)
+    plan: AmazonFinanceQueryPlan | None = None
+
+
 class AmazonFinanceQueryResponse(BaseModel):
     question: str
-    seller_id: str
     plan: AmazonFinanceQueryPlan
     columns: list[str]
     rows: list[dict[str, Any]]

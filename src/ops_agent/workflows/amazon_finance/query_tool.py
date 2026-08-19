@@ -7,6 +7,8 @@ from typing import Any
 from psycopg import connect, sql
 from psycopg.rows import dict_row
 
+from ...connections import normalize_analytics_database_type
+from ...mysql_connection import mysql_read_only_connection
 from .domain import AmazonFinanceQueryPlan
 
 
@@ -17,30 +19,16 @@ class AmazonFinanceQueryError(RuntimeError):
 class AmazonFinanceQueryTool:
     """Compile approved BI plans into parameterized, read-only SQL."""
 
-    def __init__(self, dsn: str, *, statement_timeout_ms: int = 5000) -> None:
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        statement_timeout_ms: int = 5000,
+        engine: str = "postgresql",
+    ) -> None:
         self.dsn = dsn
         self.statement_timeout_ms = statement_timeout_ms
-
-    def _resolve_seller(self, connection: Any, requested: str | None) -> str:
-        if requested:
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT 1 FROM amazon_finance_transactions WHERE seller_id=%s LIMIT 1",
-                    (requested,),
-                )
-                if cursor.fetchone() is None:
-                    raise AmazonFinanceQueryError("seller_id 不存在或没有可查询数据")
-            return requested
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT DISTINCT seller_id FROM amazon_finance_transactions ORDER BY seller_id LIMIT 2"
-            )
-            sellers = [str(row["seller_id"]) for row in cursor.fetchall()]
-        if not sellers:
-            raise AmazonFinanceQueryError("Amazon 结算数据表为空")
-        if len(sellers) > 1:
-            raise AmazonFinanceQueryError("存在多个卖家，请明确提供 seller_id")
-        return sellers[0]
+        self.engine = normalize_analytics_database_type(engine)
 
     @staticmethod
     def _date_filter(
@@ -71,9 +59,11 @@ class AmazonFinanceQueryTool:
                        coalesce(sum(t.total_amount), 0) AS net_amount,
                        min(t.posted_at) AS first_posted_at,
                        max(t.posted_at) AS last_posted_at,
-                       min(t.currency_code) AS currency_code
+                       t.currency_code
                 FROM amazon_finance_transactions t
-                WHERE t.seller_id=%s {date_filter}
+                WHERE TRUE {date_filter}
+                GROUP BY t.currency_code
+                ORDER BY t.currency_code
                 """
             ).format(date_filter=date_filter)
         elif plan.metric == "daily":
@@ -82,10 +72,10 @@ class AmazonFinanceQueryTool:
                 SELECT (t.posted_at AT TIME ZONE 'UTC')::date AS posted_date,
                        count(*) AS transaction_count,
                        sum(t.total_amount) AS net_amount,
-                       min(t.currency_code) AS currency_code
+                       t.currency_code
                 FROM amazon_finance_transactions t
-                WHERE t.seller_id=%s {date_filter}
-                GROUP BY posted_date
+                WHERE TRUE {date_filter}
+                GROUP BY posted_date, t.currency_code
                 ORDER BY posted_date
                 LIMIT %s
                 """
@@ -97,10 +87,10 @@ class AmazonFinanceQueryTool:
                 SELECT t.transaction_type,
                        count(*) AS transaction_count,
                        sum(t.total_amount) AS net_amount,
-                       min(t.currency_code) AS currency_code
+                       t.currency_code
                 FROM amazon_finance_transactions t
-                WHERE t.seller_id=%s {date_filter}
-                GROUP BY t.transaction_type
+                WHERE TRUE {date_filter}
+                GROUP BY t.transaction_type, t.currency_code
                 ORDER BY abs(sum(t.total_amount)) DESC
                 LIMIT %s
                 """
@@ -113,14 +103,15 @@ class AmazonFinanceQueryTool:
                        coalesce(l.category_level_2, l.category_level_1) AS fee_type,
                        count(*) AS line_count,
                        sum(l.amount) AS amount,
-                       min(l.currency_code) AS currency_code
+                       l.currency_code
                 FROM amazon_finance_amount_lines l
                 JOIN amazon_finance_transactions t
                   ON t.seller_id=l.seller_id AND t.transaction_id=l.transaction_id
-                WHERE t.seller_id=%s
-                  AND l.category_level_1 IN ('AmazonFees', 'FBAFees')
+                WHERE l.category_level_1 IN ('AmazonFees', 'FBAFees')
                   {date_filter}
-                GROUP BY l.category_level_1, coalesce(l.category_level_2, l.category_level_1)
+                GROUP BY l.category_level_1,
+                         coalesce(l.category_level_2, l.category_level_1),
+                         l.currency_code
                 ORDER BY abs(sum(l.amount)) DESC
                 LIMIT %s
                 """
@@ -133,12 +124,12 @@ class AmazonFinanceQueryTool:
                        min(i.asin) AS asin,
                        sum(coalesce(i.quantity_shipped, 0)) AS quantity_shipped,
                        sum(coalesce(i.total_amount, 0)) AS net_amount,
-                       min(i.currency_code) AS currency_code
+                       i.currency_code
                 FROM amazon_finance_items i
                 JOIN amazon_finance_transactions t
                   ON t.seller_id=i.seller_id AND t.transaction_id=i.transaction_id
-                WHERE t.seller_id=%s {date_filter}
-                GROUP BY coalesce(i.sku, 'UNKNOWN')
+                WHERE TRUE {date_filter}
+                GROUP BY coalesce(i.sku, 'UNKNOWN'), i.currency_code
                 ORDER BY abs(sum(coalesce(i.total_amount, 0))) DESC
                 LIMIT %s
                 """
@@ -152,14 +143,13 @@ class AmazonFinanceQueryTool:
                        sum(t.total_amount) AS net_amount,
                        min(t.posted_at) AS first_posted_at,
                        max(t.posted_at) AS last_posted_at,
-                       min(t.currency_code) AS currency_code
+                       t.currency_code
                 FROM amazon_finance_transaction_identifiers ids
                 JOIN amazon_finance_transactions t
                   ON t.seller_id=ids.seller_id AND t.transaction_id=ids.transaction_id
-                WHERE t.seller_id=%s
-                  AND ids.identifier_name='SETTLEMENT_ID'
+                WHERE ids.identifier_name='SETTLEMENT_ID'
                   {date_filter}
-                GROUP BY ids.identifier_value
+                GROUP BY ids.identifier_value, t.currency_code
                 ORDER BY max(t.posted_at) DESC
                 LIMIT %s
                 """
@@ -176,11 +166,135 @@ class AmazonFinanceQueryTool:
             return value.isoformat()
         return value
 
-    def execute(
-        self, plan: AmazonFinanceQueryPlan, *, seller_id: str | None = None
-    ) -> tuple[str, list[dict[str, Any]]]:
+    @staticmethod
+    def _mysql_date_filter(
+        plan: AmazonFinanceQueryPlan, *, alias: str = "t"
+    ) -> tuple[str, list[Any]]:
+        clauses = [f"{alias}.transaction_status = 'RELEASED'"]
+        parameters: list[Any] = []
+        if plan.start_date:
+            clauses.append(f"{alias}.posted_at >= %s")
+            parameters.append(plan.start_date)
+        if plan.end_date:
+            clauses.append(f"{alias}.posted_at < %s")
+            parameters.append(plan.end_date + timedelta(days=1))
+        return " AND " + " AND ".join(clauses), parameters
+
+    def _mysql_statement(
+        self, plan: AmazonFinanceQueryPlan
+    ) -> tuple[str, list[Any]]:
+        date_filter, date_parameters = self._mysql_date_filter(plan)
+        limit_parameters: list[Any] = []
+        if plan.metric == "overview":
+            statement = f"""
+                SELECT count(*) AS transaction_count,
+                       coalesce(sum(t.total_amount), 0) AS net_amount,
+                       min(t.posted_at) AS first_posted_at,
+                       max(t.posted_at) AS last_posted_at,
+                       t.currency_code
+                FROM amazon_finance_transactions t
+                WHERE TRUE {date_filter}
+                GROUP BY t.currency_code
+                ORDER BY t.currency_code
+            """
+        elif plan.metric == "daily":
+            statement = f"""
+                SELECT DATE(t.posted_at) AS posted_date,
+                       count(*) AS transaction_count,
+                       sum(t.total_amount) AS net_amount,
+                       t.currency_code
+                FROM amazon_finance_transactions t
+                WHERE TRUE {date_filter}
+                GROUP BY DATE(t.posted_at), t.currency_code
+                ORDER BY posted_date
+                LIMIT %s
+            """
+            limit_parameters.append(plan.limit)
+        elif plan.metric == "transaction_type":
+            statement = f"""
+                SELECT t.transaction_type,
+                       count(*) AS transaction_count,
+                       sum(t.total_amount) AS net_amount,
+                       t.currency_code
+                FROM amazon_finance_transactions t
+                WHERE TRUE {date_filter}
+                GROUP BY t.transaction_type, t.currency_code
+                ORDER BY abs(sum(t.total_amount)) DESC
+                LIMIT %s
+            """
+            limit_parameters.append(plan.limit)
+        elif plan.metric == "fee":
+            statement = f"""
+                SELECT l.category_level_1 AS fee_category,
+                       coalesce(l.category_level_2, l.category_level_1) AS fee_type,
+                       count(*) AS line_count,
+                       sum(l.amount) AS amount,
+                       l.currency_code
+                FROM amazon_finance_amount_lines l
+                JOIN amazon_finance_transactions t
+                  ON t.seller_id=l.seller_id AND t.transaction_id=l.transaction_id
+                WHERE l.category_level_1 IN ('AmazonFees', 'FBAFees')
+                  {date_filter}
+                GROUP BY l.category_level_1,
+                         coalesce(l.category_level_2, l.category_level_1),
+                         l.currency_code
+                ORDER BY abs(sum(l.amount)) DESC
+                LIMIT %s
+            """
+            limit_parameters.append(plan.limit)
+        elif plan.metric == "sku":
+            statement = f"""
+                SELECT coalesce(i.sku, 'UNKNOWN') AS sku,
+                       min(i.asin) AS asin,
+                       sum(coalesce(i.quantity_shipped, 0)) AS quantity_shipped,
+                       sum(coalesce(i.total_amount, 0)) AS net_amount,
+                       i.currency_code
+                FROM amazon_finance_items i
+                JOIN amazon_finance_transactions t
+                  ON t.seller_id=i.seller_id AND t.transaction_id=i.transaction_id
+                WHERE TRUE {date_filter}
+                GROUP BY coalesce(i.sku, 'UNKNOWN'), i.currency_code
+                ORDER BY abs(sum(coalesce(i.total_amount, 0))) DESC
+                LIMIT %s
+            """
+            limit_parameters.append(plan.limit)
+        else:
+            statement = f"""
+                SELECT ids.identifier_value AS settlement_id,
+                       count(DISTINCT t.transaction_id) AS transaction_count,
+                       sum(t.total_amount) AS net_amount,
+                       min(t.posted_at) AS first_posted_at,
+                       max(t.posted_at) AS last_posted_at,
+                       t.currency_code
+                FROM amazon_finance_transaction_identifiers ids
+                JOIN amazon_finance_transactions t
+                  ON t.seller_id=ids.seller_id AND t.transaction_id=ids.transaction_id
+                WHERE ids.identifier_name='SETTLEMENT_ID'
+                  {date_filter}
+                GROUP BY ids.identifier_value, t.currency_code
+                ORDER BY max(t.posted_at) DESC
+                LIMIT %s
+            """
+            limit_parameters.append(plan.limit)
+        return statement, date_parameters + limit_parameters
+
+    def _execute_mysql(self, plan: AmazonFinanceQueryPlan) -> list[dict[str, Any]]:
+        statement, parameters = self._mysql_statement(plan)
+        with mysql_read_only_connection(
+            self.dsn, timeout_ms=self.statement_timeout_ms
+        ) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(statement, parameters)
+                return [
+                    {key: self._json_value(value) for key, value in row.items()}
+                    for row in cursor.fetchall()
+                ]
+
+    def execute(self, plan: AmazonFinanceQueryPlan) -> list[dict[str, Any]]:
         if not self.dsn:
-            raise AmazonFinanceQueryError("ANALYTICS_DSN 未配置")
+            raise AmazonFinanceQueryError("未配置数据库连接")
+        if self.engine == "mysql":
+            return self._execute_mysql(plan)
         with connect(self.dsn, row_factory=dict_row) as connection:
             with connection.transaction():
                 with connection.cursor() as cursor:
@@ -190,12 +304,11 @@ class AmazonFinanceQueryTool:
                             sql.Literal(f"{self.statement_timeout_ms}ms")
                         )
                     )
-                resolved_seller = self._resolve_seller(connection, seller_id)
                 statement, parameters = self._statement(plan)
                 with connection.cursor() as cursor:
-                    cursor.execute(statement, [resolved_seller, *parameters])
+                    cursor.execute(statement, parameters)
                     rows = [
                         {key: self._json_value(value) for key, value in row.items()}
                         for row in cursor.fetchall()
                     ]
-        return resolved_seller, rows
+        return rows

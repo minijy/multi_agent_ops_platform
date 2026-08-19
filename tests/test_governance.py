@@ -171,8 +171,11 @@ def test_subagent_runs_in_background_with_parent_child_events(tmp_path: Path):
         )
         assert [item.event_type for item in parent_events] == [
             "subagent.started",
+            "subagent.running",
             "subagent.finished",
         ]
+        assert parent_events[0].payload["status"] == "queued"
+        assert parent_events[1].payload["status"] == "running"
     finally:
         manager.shutdown()
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -37,7 +36,6 @@ class ToolApprovalRecord(BaseModel):
     user_id: str
     role: str
     call: ToolCall
-    seller_id: str | None = None
     status: Literal["pending", "approved", "rejected"]
     decided_by: str | None = None
     comment: str = ""
@@ -52,6 +50,10 @@ class SubagentTaskRecord(BaseModel):
     tenant_id: str
     user_id: str
     role: str
+    model_id: str | None = None
+    connection_ids: list[str] = Field(default_factory=list)
+    resource_scope: dict[str, list[str]] = Field(default_factory=dict)
+    memory_snapshot: list[dict[str, Any]] = Field(default_factory=list)
     objective: str
     status: Literal[
         "queued",
@@ -65,6 +67,7 @@ class SubagentTaskRecord(BaseModel):
         "budget_exceeded",
     ]
     depth: int
+    agent_id: str = "analyst"
     allowed_tools: list[str] = Field(default_factory=list)
     token_budget: int
     timeout_seconds: float
@@ -99,7 +102,6 @@ class RuntimeGovernanceStore(Protocol):
         user_id: str,
         role: str,
         call: ToolCall,
-        seller_id: str | None,
     ) -> ToolApprovalRecord: ...
 
     def get_approval(
@@ -183,12 +185,12 @@ class SQLiteRuntimeGovernanceStore:
 
     def create_approval(
         self, *, session_id: str, tenant_id: str, user_id: str, role: str,
-        call: ToolCall, seller_id: str | None,
+        call: ToolCall,
     ) -> ToolApprovalRecord:
         record = ToolApprovalRecord(
             approval_id=str(uuid.uuid4()), session_id=session_id,
             tenant_id=tenant_id, user_id=user_id, role=role, call=call,
-            seller_id=seller_id, status="pending", created_at=_now(),
+            status="pending", created_at=_now(),
         )
         with self._connect() as connection:
             connection.execute(
@@ -460,12 +462,12 @@ class PostgresRuntimeGovernanceStore:
 
     def create_approval(
         self, *, session_id: str, tenant_id: str, user_id: str, role: str,
-        call: ToolCall, seller_id: str | None,
+        call: ToolCall,
     ) -> ToolApprovalRecord:
         record = ToolApprovalRecord(
             approval_id=str(uuid.uuid4()), session_id=session_id,
             tenant_id=tenant_id, user_id=user_id, role=role, call=call,
-            seller_id=seller_id, status="pending", created_at=_now(),
+            status="pending", created_at=_now(),
         )
         with self._connect() as connection:
             connection.execute(

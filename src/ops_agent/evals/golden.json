@@ -10,7 +10,7 @@
     "id": "finance-routes-to-tool",
     "question": "分析 2026年7月 Top 5 Amazon 费用",
     "expect_status": "completed",
-    "expect_tools": ["amazon_finance_query"],
+    "expect_tools": ["delegate_subagent"],
     "forbid_tools": ["sandbox_full_access"]
   }
 ]

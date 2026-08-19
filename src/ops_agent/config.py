@@ -17,6 +17,10 @@ CONTEXT_WINDOW_API_TO_FIELD = {
     "tool_max_chars": "context_tool_max_chars",
 }
 
+ANALYST_RUNTIME_API_TO_FIELD = {
+    "mode": "analyst_mode",
+}
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -35,8 +39,14 @@ class Settings(BaseSettings):
     session_event_path: Path = Path("data/session_events.sqlite3")
     runtime_governance_path: Path = Path("data/runtime_governance.sqlite3")
     runtime_metrics_path: Path = Path("data/runtime_metrics.sqlite3")
+    memory_db_path: Path = Path("data/memory.sqlite3")
     runtime_overrides_path: Path = Path("data/runtime_overrides.json")
     agent_definitions_path: Path = Path("data/agent_definitions.json")
+    connection_definitions_path: Path = Path("data/connections.json")
+    connection_secrets_path: Path = Path("data/connection_secrets.json")
+    tool_bindings_path: Path = Path("data/tool_bindings.json")
+    knowledge_spaces_path: Path = Path("data/knowledge_spaces.json")
+    default_tenant_id: str = "tenant-a"
     model_definitions_path: Path = Path("data/model_definitions.json")
     attachment_path: Path = Path("data/attachments")
     attachment_max_image_bytes: int = Field(default=5 * 1024 * 1024, ge=1024)
@@ -45,10 +55,13 @@ class Settings(BaseSettings):
     skills_paths: str = "skills"
     mcp_config_path: Path = Path("config/mcp_servers.json")
     postgres_dsn: str = "postgresql://ops_agent:ops_agent@127.0.0.1:5432/ops_agent"
-    analytics_dsn: str = ""
     analytics_statement_timeout_ms: int = Field(default=5000, ge=100, le=60_000)
 
-    model_provider: Literal["mock", "openai", "zhipu"] = "mock"
+    # Provider credentials are configured in the control plane UI. This field
+    # remains only for isolated legacy tests and must not bootstrap production.
+    model_provider: Literal[
+        "unconfigured", "mock", "openai", "zhipu", "qwen", "deepseek"
+    ] = "unconfigured"
     model_name: str = "gpt-5.6-sol"
     openai_api_key: str = ""
     model_temperature: float | None = None
@@ -60,6 +73,12 @@ class Settings(BaseSettings):
     zhipu_base_url: str = "https://open.bigmodel.cn/api/paas/v4/"
     zhipu_model_name: str = "glm-5.2"
     zhipu_vision_model_name: str = "glm-4.6v-flash"
+    dashscope_api_key: str = ""
+    qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    qwen_model_name: str = "qwen3.7-plus"
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_model_name: str = "deepseek-chat"
 
     max_tool_steps: int = Field(default=8, ge=1, le=30)
     run_token_budget: int = Field(default=30_000, ge=1000)
@@ -79,6 +98,17 @@ class Settings(BaseSettings):
     subagent_worker_poll_seconds: float = Field(default=0.5, ge=0.05, le=30)
     subagent_max_attempts: int = Field(default=3, ge=1, le=20)
     subagent_worker_id: str = ""
+    analyst_mode: Literal["general", "specialized_parallel"] = "general"
+    analyst_parallel_limit: int = Field(default=3, ge=1, le=3)
+    memory_enabled: bool = True
+    memory_backend: Literal["sqlite", "postgres"] = "sqlite"
+    memory_semantic_backend: Literal["local", "pgvector", "qdrant"] = "local"
+    memory_qdrant_collection: str = "agent_memory_items_v1"
+    qdrant_url: str = ""
+    qdrant_api_key: str = ""
+    memory_snapshot_limit: int = Field(default=8, ge=1, le=50)
+    memory_default_expiry_days: int | None = Field(default=365, ge=1, le=3650)
+    memory_auto_extract_enabled: bool = True
     sandbox_workspace_root: Path = Path(".")
     sandbox_timeout_seconds: float = Field(default=30, ge=1, le=600)
     sandbox_max_output_bytes: int = Field(default=65536, ge=1024)
@@ -88,26 +118,26 @@ class Settings(BaseSettings):
     jwt_issuer: str = ""
     jwt_audience: str = ""
     jwt_required: bool = False
+    account_access_token_minutes: int = Field(default=15, ge=5, le=1440)
+    account_refresh_token_days: int = Field(default=7, ge=1, le=90)
+    account_max_login_attempts: int = Field(default=5, ge=3, le=20)
+    account_lock_minutes: int = Field(default=15, ge=1, le=1440)
     otel_service_name: str = "ops-agent"
     otel_exporter: Literal["none", "console", "otlp"] = "none"
     otel_exporter_otlp_endpoint: str = ""
-
-    knowledge_backend: Literal["mock", "qdrant"] = "mock"
-    qdrant_url: str = ""
-    qdrant_api_key: str = ""
-    qdrant_collection: str = "rag_chunks_multilingual_minilm_v1"
-    qdrant_tenant_id: str = ""
-    qdrant_knowledge_base_id: str = ""
-    embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    qdrant_top_k: int = Field(default=5, ge=1, le=50)
 
     @field_validator(
         "platform_db_path",
         "session_event_path",
         "runtime_governance_path",
         "runtime_metrics_path",
+        "memory_db_path",
         "runtime_overrides_path",
         "agent_definitions_path",
+        "connection_definitions_path",
+        "connection_secrets_path",
+        "tool_bindings_path",
+        "knowledge_spaces_path",
         "model_definitions_path",
         "attachment_path",
         "mcp_config_path",
@@ -128,21 +158,22 @@ class Settings(BaseSettings):
         )
         if "postgres" in postgres_backends and not self.postgres_dsn:
             raise ValueError("POSTGRES_DSN is required for postgres persistence")
+        if self.memory_backend == "postgres" and not self.postgres_dsn:
+            raise ValueError("POSTGRES_DSN is required for postgres memory persistence")
+        if self.memory_semantic_backend == "pgvector" and self.memory_backend != "postgres":
+            raise ValueError("MEMORY_BACKEND=postgres is required for pgvector memory search")
+        if self.memory_semantic_backend == "qdrant" and not self.qdrant_url:
+            raise ValueError("QDRANT_URL is required for Qdrant memory search")
         if self.model_provider == "openai" and not self.openai_api_key:
             raise ValueError("OPENAI_API_KEY is required when MODEL_PROVIDER=openai")
         if self.model_provider == "zhipu" and not self.zai_api_key:
             raise ValueError("ZAI_API_KEY is required when MODEL_PROVIDER=zhipu")
-        if self.knowledge_backend == "qdrant":
-            missing = [
-                name for name, value in {
-                    "QDRANT_URL": self.qdrant_url,
-                    "QDRANT_API_KEY": self.qdrant_api_key,
-                    "QDRANT_TENANT_ID": self.qdrant_tenant_id,
-                    "QDRANT_KNOWLEDGE_BASE_ID": self.qdrant_knowledge_base_id,
-                }.items() if not value
-            ]
-            if missing:
-                raise ValueError(f"missing Qdrant settings: {', '.join(missing)}")
+        if self.model_provider == "qwen" and not self.dashscope_api_key:
+            raise ValueError("DASHSCOPE_API_KEY is required when MODEL_PROVIDER=qwen")
+        if self.model_provider == "deepseek" and not self.deepseek_api_key:
+            raise ValueError("DEEPSEEK_API_KEY is required when MODEL_PROVIDER=deepseek")
+        # Knowledge vector stores are tenant-scoped control-plane connections.
+        # Legacy QDRANT_* environment fields are retained only for migrations.
 
 
 def context_window_snapshot(settings: Settings) -> dict[str, Any]:
@@ -162,15 +193,15 @@ def apply_runtime_overrides(settings: Settings) -> Settings:
         return settings
     if not isinstance(payload, dict):
         return settings
-    updates = {
-        field: payload[field]
-        for field in CONTEXT_WINDOW_API_TO_FIELD.values()
-        if field in payload
+    overridable = {
+        *CONTEXT_WINDOW_API_TO_FIELD.values(),
+        *ANALYST_RUNTIME_API_TO_FIELD.values(),
     }
+    updates = {field: payload[field] for field in overridable if field in payload}
     if not updates:
         return settings
     validated = Settings.model_validate({**settings.model_dump(), **updates})
-    for field in CONTEXT_WINDOW_API_TO_FIELD.values():
+    for field in overridable:
         setattr(settings, field, getattr(validated, field))
     return settings
 
@@ -208,6 +239,46 @@ def update_context_window(
             encoding="utf-8",
         )
     return context_window_snapshot(settings)
+
+
+def analyst_runtime_snapshot(settings: Settings) -> dict[str, Any]:
+    return {
+        "mode": settings.analyst_mode,
+        "max_parallel": settings.analyst_parallel_limit,
+    }
+
+
+def update_analyst_runtime(settings: Settings, updates: dict[str, Any]) -> dict[str, Any]:
+    mapped = {
+        ANALYST_RUNTIME_API_TO_FIELD[key]: value
+        for key, value in updates.items()
+        if key in ANALYST_RUNTIME_API_TO_FIELD and value is not None
+    }
+    if mapped:
+        validated = Settings.model_validate({**settings.model_dump(), **mapped})
+        for field in ANALYST_RUNTIME_API_TO_FIELD.values():
+            setattr(settings, field, getattr(validated, field))
+        path = settings.runtime_overrides_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing: dict[str, Any] = {}
+        if path.is_file():
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    existing = loaded
+            except (OSError, json.JSONDecodeError):
+                existing = {}
+        existing.update(
+            {
+                field: getattr(settings, field)
+                for field in ANALYST_RUNTIME_API_TO_FIELD.values()
+            }
+        )
+        path.write_text(
+            json.dumps(existing, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    return analyst_runtime_snapshot(settings)
 
 
 @lru_cache(maxsize=1)

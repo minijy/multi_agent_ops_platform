@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 DocumentType = Literal[
@@ -28,13 +28,17 @@ class KingdeeQueryRequest(BaseModel):
 
 
 class KingdeeQueryPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     document_type: DocumentType
     start_date: date
     end_date: date
     bill_no: str = ""
+    customer_name: str = Field(default="", max_length=120)
+    organization_name: str = Field(default="", max_length=120)
+    document_status: Literal["", "A", "B", "C", "D", "Z"] = ""
     limit: int = Field(default=50, ge=1, le=1000)
     start_row: int = Field(default=0, ge=0)
-    extra_filter: str = ""
 
     @model_validator(mode="after")
     def validate_dates(self) -> "KingdeeQueryPlan":

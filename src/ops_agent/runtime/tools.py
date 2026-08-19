@@ -9,6 +9,8 @@ from pydantic import BaseModel, ValidationError
 
 from .domain import ToolCall, ToolResult, ToolRisk
 from .tracing import span
+from .connectors import ToolBindingRegistry
+from ..connections import ConnectionRegistry
 
 
 @dataclass(frozen=True)
@@ -17,10 +19,19 @@ class ToolExecutionContext:
     tenant_id: str
     user_id: str
     role: str = "admin"
-    seller_id: str | None = None
     approved_call_ids: frozenset[str] = field(default_factory=frozenset)
     allowed_tool_names: frozenset[str] | None = None
     delegation_depth: int = 0
+    agent_id: str = "function-calling-runtime"
+    model_id: str | None = None
+    connection_ids: tuple[str, ...] = ()
+    resource_scope: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    connection_scope_enforced: bool = False
+    deadline: float | None = None
+    cancellation_event: Any = None
+    explicit_memory_consent: bool = False
+    explicit_memory_forget: bool = False
+    memory_snapshot: tuple[dict[str, Any], ...] = ()
 
 
 ToolHandler = Callable[[BaseModel, ToolExecutionContext], Any]
@@ -180,6 +191,36 @@ class ApprovalGuard:
             raise PermissionError(f"tool requires approval: {definition.name}")
 
 
+class ConnectorAccessGuard:
+    def __init__(
+        self,
+        bindings: ToolBindingRegistry,
+        connections: ConnectionRegistry,
+    ) -> None:
+        self.bindings = bindings
+        self.connections = connections
+
+    def check(
+        self,
+        definition: ToolDefinition,
+        call: ToolCall,
+        context: ToolExecutionContext,
+    ) -> None:
+        binding = self.bindings.find(definition.name)
+        if binding is None:
+            return
+        connection = self.bindings.resolve_connection(
+            context.tenant_id, definition.name, self.connections
+        )
+        if (
+            context.connection_scope_enforced
+            and connection.id not in context.connection_ids
+        ):
+            raise PermissionError(
+                f"connector is outside delegated scope: {binding.connector_type}"
+            )
+
+
 class ToolExecutor:
     """Deterministic validation and execution pipeline for every tool source."""
 
@@ -204,14 +245,23 @@ class ToolExecutor:
             for guard in self.guards:
                 guard.check(definition, call, context)
 
+            if context.cancellation_event is not None and context.cancellation_event.is_set():
+                raise TimeoutError(f"tool cancelled before execution: {call.name}")
+            timeout = definition.timeout_seconds
+            if context.deadline is not None:
+                timeout = min(timeout, max(0.0, context.deadline - time.monotonic()))
+            if timeout <= 0:
+                raise TimeoutError(f"tool deadline exceeded before execution: {call.name}")
             pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"tool-{call.name}")
             future = pool.submit(definition.handler, arguments, context)
             try:
-                output = future.result(timeout=definition.timeout_seconds)
+                output = future.result(timeout=timeout)
             except FutureTimeout as exc:
+                if context.cancellation_event is not None:
+                    context.cancellation_event.set()
                 future.cancel()
                 raise TimeoutError(
-                    f"tool timed out after {definition.timeout_seconds:g}s: {call.name}"
+                    f"tool timed out after {timeout:g}s: {call.name}"
                 ) from exc
             finally:
                 pool.shutdown(wait=False, cancel_futures=True)

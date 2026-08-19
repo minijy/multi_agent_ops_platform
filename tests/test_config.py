@@ -12,6 +12,7 @@ def test_sqlite_is_default_and_paths_are_absolute(tmp_path: Path, monkeypatch):
     assert settings.session_event_backend == "sqlite"
     assert settings.platform_db_path.is_absolute()
     assert settings.session_event_path.is_absolute()
+    assert settings.knowledge_spaces_path.is_absolute()
 
 
 def test_postgres_requires_dsn():
@@ -29,6 +30,28 @@ def test_zhipu_requires_api_key():
         zai_api_key="",
     )
     with pytest.raises(ValueError, match="ZAI_API_KEY"):
+        settings.validate_runtime()
+
+
+def test_qwen_requires_api_key_only_when_selected_as_env_provider():
+    settings = Settings(
+        _env_file=None,
+        model_provider="qwen",
+        dashscope_api_key="",
+    )
+    with pytest.raises(ValueError, match="DASHSCOPE_API_KEY"):
+        settings.validate_runtime()
+    page_configured = Settings(_env_file=None, model_provider="mock")
+    page_configured.validate_runtime()
+
+
+def test_deepseek_requires_api_key_only_when_selected_as_env_provider():
+    settings = Settings(
+        _env_file=None,
+        model_provider="deepseek",
+        deepseek_api_key="",
+    )
+    with pytest.raises(ValueError, match="DEEPSEEK_API_KEY"):
         settings.validate_runtime()
 
 

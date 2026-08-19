@@ -21,44 +21,55 @@ from .domain import (
 )
 from .attachments import LocalAttachmentStore
 from .model_router import ModelRouter
+from .memory import (
+    MemoryService,
+    explicit_forget_requested,
+    explicit_remember_requested,
+    memory_prompt,
+)
 from .model_errors import ModelProviderError
 from .governance import RuntimeGovernanceStore
 from .observability import MetricsStore, TurnMetric, usage_from_events
 from .session_events import SessionEvent, SessionEventStore
 from .skills import SkillRegistry
 from .tools import ToolExecutionContext, ToolExecutor, ToolRegistry
+from .result_store import materialize_tool_output
+from ..source_privacy import (
+    StreamingPublicTextSanitizer,
+    sanitize_public_text,
+    sanitize_public_value,
+)
+from ..agent_roles import (
+    ANALYST_AGENT_ID,
+    ANALYST_SYSTEM_PROMPT,
+    AMAZON_FINANCE_ANALYST_ID,
+    AMAZON_FINANCE_ANALYST_PROMPT,
+    COORDINATOR_AGENT_ID,
+    COORDINATOR_SYSTEM_PROMPT,
+    DATA_QUERY_TOOL_NAMES,
+    ERP_ANALYST_ID,
+    ERP_ANALYST_PROMPT,
+    PROFIT_ANALYST_ID,
+    PROFIT_ANALYST_PROMPT,
+    SPECIALIST_ANALYST_IDS,
+    SYSTEM_DEFAULT_TOOL_NAMES,
+)
 from .agent_tool_policy import (
     active_data_query_tools,
+    coordinator_delegation_prompt,
     data_tool_usage_prompt,
-    runtime_tool_allowlist,
+    resolve_agent_tool_allowlist,
     skill_names_for_tools,
 )
 from .tracing import span
 
 if TYPE_CHECKING:
     from ..agent_registry import AgentRegistry
+    from ..connections import ConnectionRegistry
     from ..model_registry import ModelRegistry
 
 
-SYSTEM_PROMPT = """
-你是企业数据与运维助手。用简洁中文直接回答用户，不要输出 JSON、tool_calls 或内部协议。
-
-多轮对话：
-- 必须阅读完整会话。用户说「上面」「底下」「改成」「继续」「按上次」时，是在改已有答案，不是新任务。
-- 若会话里已有数据查询工具结果且能回答当前问题，直接基于上文改写；不要重复查询。
-- 严格遵守用户最新的展示要求（列名、分组、排序、语言），不要照搬工具英文字段名。
-
-工具使用规则：
-- 普通知识、概念解释、某模型是否免费：直接回答，不要调用工具。
-- 数据查询：仅调用系统末尾「当前可用的数据查询工具」中列出的工具；未列出的工具不可调用。
-- 只有用户明确要求在本机执行命令时，才使用 sandbox_read_only 或 sandbox_workspace_write。
-- 不要为了查网页、查价格或“确认一下”去调用沙箱或 curl。
-- 用户要下载表格、费用或导出数据时，必须生成 UTF-8 的 .csv，不要用 .txt。
-- CSV 第一行是中文表头，字段用逗号分隔；单元格含逗号或引号时用双引号包裹。不要给整段正文再套一层引号。
-- 生成文件后，用 Markdown 链接给出工作区内的文件名，例如 [下载 report.csv](report.csv)；不要使用 sandbox: 协议或本机绝对路径。
-- echo 没有重定向时不会写文件；把 CSV 正文放在倒数第二个参数、文件名放在最后（必须以 .csv 结尾），运行时会落盘。也可以用 python 直接写入工作区文件。
-- 工具参数必须遵循 Schema。
-""".strip()
+SYSTEM_PROMPT = COORDINATOR_SYSTEM_PROMPT
 
 _stream_events: ContextVar[Callable[[dict[str, Any]], None] | None] = ContextVar(
     "agent_stream_events", default=None
@@ -72,14 +83,24 @@ class SessionLiveHub:
         self._lock = threading.Lock()
         self._inflight: set[str] = set()
         self._subscribers: dict[str, list[Queue[dict[str, Any] | None]]] = {}
+        self._controls: dict[str, threading.Event] = {}
 
-    def begin(self, session_id: str) -> None:
+    def begin(self, session_id: str, control: threading.Event) -> None:
         with self._lock:
             self._inflight.add(session_id)
+            self._controls[session_id] = control
 
     def is_inflight(self, session_id: str) -> bool:
         with self._lock:
             return session_id in self._inflight
+
+    def interrupt(self, session_id: str) -> bool:
+        with self._lock:
+            control = self._controls.get(session_id)
+        if control is None:
+            return False
+        control.set()
+        return True
 
     def publish(self, session_id: str | None, item: dict[str, Any]) -> None:
         if not session_id:
@@ -111,6 +132,7 @@ class SessionLiveHub:
     def end(self, session_id: str) -> None:
         with self._lock:
             self._inflight.discard(session_id)
+            self._controls.pop(session_id, None)
             subscribers = list(self._subscribers.pop(session_id, ()))
         for queue in subscribers:
             queue.put(None)
@@ -132,7 +154,6 @@ class RuntimeState(TypedDict):
     tenant_id: str
     user_id: str
     role: str
-    seller_id: str | None
     model_id: str
     required_modalities: set[str]
     pending_calls: list[dict[str, Any]]
@@ -143,14 +164,22 @@ class RuntimeState(TypedDict):
     model: str
     approved_call_ids: list[str]
     allowed_tools: list[str] | None
+    agent_id: str
     delegation_depth: int
+    connection_ids: list[str]
+    resource_scope: dict[str, list[str]]
+    connection_scope_enforced: bool
     waiting_approval: bool
     pending_approval_ids: list[str]
     cancellation_event: Any
+    interruption_is_resumable: bool
     deadline: float | None
     token_budget: int
     tokens_used: int
     status: str
+    explicit_memory_consent: bool
+    explicit_memory_forget: bool
+    memory_snapshot: list[dict[str, Any]]
 
 
 class AgentRuntime:
@@ -170,6 +199,11 @@ class AgentRuntime:
         settings: Settings | None = None,
         agent_registry: AgentRegistry | None = None,
         model_registry: ModelRegistry | None = None,
+        connection_registry: ConnectionRegistry | None = None,
+        access_control=None,
+        tool_bindings=None,
+        result_store=None,
+        memory_service: MemoryService | None = None,
     ) -> None:
         self.router = router
         self.registry = registry
@@ -184,6 +218,11 @@ class AgentRuntime:
         self.settings = settings
         self.agent_registry = agent_registry
         self.model_registry = model_registry
+        self.connection_registry = connection_registry
+        self.access_control = access_control
+        self.tool_bindings = tool_bindings
+        self.result_store = result_store
+        self.memory_service = memory_service
         self.live_hub = SessionLiveHub()
         self.graph = self._build_graph()
 
@@ -193,33 +232,89 @@ class AgentRuntime:
     def _active_data_tools_for_prompt(
         self, allowed_tools: set[str] | None
     ) -> frozenset[str]:
+        if allowed_tools is not None:
+            return frozenset(
+                tool for tool in allowed_tools if tool in DATA_QUERY_TOOL_NAMES
+            )
         if self.agent_registry is None or self.settings is None:
             return frozenset()
-        active = active_data_query_tools(self.agent_registry, self.settings)
-        if allowed_tools is None:
-            return active
-        return frozenset(tool for tool in active if tool in allowed_tools)
+        return active_data_query_tools(
+            self.agent_registry, self.settings, self.connection_registry
+        )
 
-    def _base_system_prompt(self, allowed_tools: set[str] | None = None) -> str:
-        prompt = SYSTEM_PROMPT
+    def _default_prompt_for(self, agent_id: str) -> str:
+        prompts = {
+            ANALYST_AGENT_ID: ANALYST_SYSTEM_PROMPT,
+            AMAZON_FINANCE_ANALYST_ID: AMAZON_FINANCE_ANALYST_PROMPT,
+            PROFIT_ANALYST_ID: PROFIT_ANALYST_PROMPT,
+            ERP_ANALYST_ID: ERP_ANALYST_PROMPT,
+        }
+        if agent_id in prompts:
+            return prompts[agent_id]
+        return COORDINATOR_SYSTEM_PROMPT
+
+    def _base_system_prompt(
+        self,
+        allowed_tools: set[str] | None = None,
+        agent_id: str = COORDINATOR_AGENT_ID,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        role: str | None = None,
+    ) -> str:
+        prompt = self._default_prompt_for(agent_id)
         if self.agent_registry is not None:
-            config = self.agent_registry.runtime_config()
-            prompt = config.effective_system_prompt(SYSTEM_PROMPT)
-        prompt += data_tool_usage_prompt(self._active_data_tools_for_prompt(allowed_tools))
+            config = self.agent_registry.get(agent_id)
+            if config is not None:
+                prompt = config.effective_system_prompt(prompt)
+        if agent_id == ANALYST_AGENT_ID or agent_id in SPECIALIST_ANALYST_IDS:
+            prompt += data_tool_usage_prompt(
+                self._active_data_tools_for_prompt(allowed_tools)
+            )
+        else:
+            principal_data_tools = None
+            if self.access_control is not None and tenant_id and user_id:
+                access = self.access_control.effective_access(
+                    tenant_id, user_id, role
+                )
+                if access.allowed_tools is not None:
+                    principal_data_tools = (
+                        set(access.allowed_tools) & DATA_QUERY_TOOL_NAMES
+                    )
+            prompt += coordinator_delegation_prompt(
+                self.agent_registry,
+                self.settings.analyst_mode if self.settings is not None else "general",
+                principal_data_tools,
+            )
         return prompt
 
-    def _runtime_allowed_tools(self) -> set[str] | None:
+    def _agent_allowed_tools(
+        self,
+        agent_id: str,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        role: str | None = None,
+    ) -> set[str] | None:
         if self.agent_registry is None or self.settings is None:
             return None
-        config = self.agent_registry.runtime_config()
-        if not config.enabled:
+        config = self.agent_registry.get(agent_id)
+        if config is None or not config.enabled:
             return set()
-        return runtime_tool_allowlist(
+        allowed = resolve_agent_tool_allowlist(
+            config,
             self.agent_registry,
             self.settings,
             self.registry,
-            config.allowed_tools,
+            self.connection_registry,
+            tenant_id,
         )
+        if self.access_control is not None and tenant_id and user_id:
+            decision = self.access_control.effective_access(tenant_id, user_id, role)
+            if decision.allowed_tools is not None:
+                allowed &= set(decision.allowed_tools)
+        return allowed
+
+    def _runtime_allowed_tools(self) -> set[str] | None:
+        return self._agent_allowed_tools(COORDINATOR_AGENT_ID)
 
     @staticmethod
     def _check_control(state: RuntimeState) -> None:
@@ -233,8 +328,41 @@ class AgentRuntime:
     @staticmethod
     def _visible_answer(result: dict[str, Any], fallback: str) -> str:
         answer = str(result.get("answer") or "").strip()
+        deferred_markers = (
+            "正在收集",
+            "正在获取",
+            "正在查询",
+            "请稍等",
+            "请稍候",
+            "稍后反馈",
+            "完成后反馈",
+            "完成后汇总",
+        )
+        specialist_sections: list[str] = []
+        for item in result.get("tool_results") or []:
+            if (
+                not isinstance(item, dict)
+                or not item.get("ok")
+                or item.get("tool_name") != "delegate_specialists"
+            ):
+                continue
+            output = item.get("output")
+            if not isinstance(output, dict):
+                continue
+            for task in output.get("tasks") or []:
+                if not isinstance(task, dict):
+                    continue
+                task_answer = str(task.get("answer") or "").strip()
+                if not task_answer:
+                    continue
+                label = str(task.get("agent_id") or "专业 Analyst")
+                specialist_sections.append(f"### {label}\n{task_answer}")
+        if specialist_sections and (
+            not answer or any(marker in answer for marker in deferred_markers)
+        ):
+            return sanitize_public_text("\n\n".join(specialist_sections)[:12000])
         if answer:
-            return answer
+            return sanitize_public_text(answer)
         for item in reversed(result.get("tool_results") or []):
             if not isinstance(item, dict) or not item.get("ok"):
                 continue
@@ -242,24 +370,35 @@ class AgentRuntime:
             if output is None:
                 continue
             if isinstance(output, str) and output.strip():
-                return output.strip()[:4000]
+                return sanitize_public_text(output.strip()[:4000])
             text = json.dumps(output, ensure_ascii=False, default=str)
             if text and text not in {"{}", "[]", "null"}:
-                return text[:4000]
-        return fallback
+                return sanitize_public_text(text[:4000])
+        return sanitize_public_text(fallback)
 
-    @staticmethod
-    def _context(state: RuntimeState) -> ToolExecutionContext:
+    def _context(self, state: RuntimeState) -> ToolExecutionContext:
         allowed = state.get("allowed_tools")
         return ToolExecutionContext(
             session_id=state["session_id"],
             tenant_id=state["tenant_id"],
             user_id=state["user_id"],
             role=state["role"],
-            seller_id=state["seller_id"],
             approved_call_ids=frozenset(state["approved_call_ids"]),
             allowed_tool_names=frozenset(allowed) if allowed is not None else None,
             delegation_depth=state["delegation_depth"],
+            agent_id=state["agent_id"],
+            model_id=state["model_id"],
+            connection_ids=tuple(state["connection_ids"]),
+            resource_scope={
+                name: tuple(values)
+                for name, values in state["resource_scope"].items()
+            },
+            connection_scope_enforced=state["connection_scope_enforced"],
+            deadline=state["deadline"],
+            cancellation_event=state["cancellation_event"],
+            explicit_memory_consent=bool(state.get("explicit_memory_consent", False)),
+            explicit_memory_forget=bool(state.get("explicit_memory_forget", False)),
+            memory_snapshot=tuple(state.get("memory_snapshot") or []),
         )
 
     def _append_event(
@@ -315,7 +454,392 @@ class AgentRuntime:
             ]
         elif message["content"] is None:
             message["content"] = ""
+        if turn.reasoning_content:
+            message["reasoning_content"] = turn.reasoning_content
         return message
+
+    def _normalize_specialist_delegations(
+        self,
+        calls: list[ToolCall],
+        context: ToolExecutionContext,
+    ) -> tuple[list[ToolCall], int, int]:
+        """Route legacy single delegations through bounded parallel batches."""
+        try:
+            self.registry.get("delegate_specialists", context)
+        except (KeyError, PermissionError):
+            return calls, 0, 0
+
+        eligible: list[tuple[int, ToolCall]] = []
+        for index, call in enumerate(calls):
+            arguments = call.arguments
+            if (
+                call.name == "delegate_subagent"
+                and arguments.get("agent_id") in SPECIALIST_ANALYST_IDS
+                and not arguments.get("run_in_background", False)
+            ):
+                eligible.append((index, call))
+        if not eligible:
+            return calls, 0, 0
+
+        batches: list[ToolCall] = []
+        for start in range(0, len(eligible), 3):
+            group = [call for _index, call in eligible[start : start + 3]]
+            timeouts = [
+                float(call.arguments["timeout_seconds"])
+                for call in group
+                if call.arguments.get("timeout_seconds") is not None
+            ]
+            budgets = [
+                int(call.arguments["token_budget"])
+                for call in group
+                if call.arguments.get("token_budget") is not None
+            ]
+            arguments: dict[str, Any] = {
+                "tasks": [
+                    {
+                        "agent_id": call.arguments["agent_id"],
+                        "objective": call.arguments["objective"],
+                    }
+                    for call in group
+                ]
+            }
+            if timeouts:
+                arguments["timeout_seconds"] = min(170.0, max(timeouts))
+            if budgets:
+                arguments["token_budget"] = max(budgets)
+            batches.append(
+                ToolCall(
+                    call_id=f"parallel-{group[0].call_id}",
+                    name="delegate_specialists",
+                    arguments=arguments,
+                )
+            )
+
+        eligible_indexes = {index for index, _call in eligible}
+        insertion_index = eligible[0][0]
+        normalized: list[ToolCall] = []
+        for index, call in enumerate(calls):
+            if index == insertion_index:
+                normalized.extend(batches)
+            if index not in eligible_indexes:
+                normalized.append(call)
+        return normalized, len(eligible), len(batches)
+
+    @staticmethod
+    def _delegation_objective_text(value: Any) -> str:
+        """Flatten provider-specific rich text into the Tool's string contract."""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, dict):
+            for key in ("content", "text", "objective", "value"):
+                if key in value:
+                    text = AgentRuntime._delegation_objective_text(value[key])
+                    if text:
+                        return text
+            return ""
+        if isinstance(value, list):
+            parts = [AgentRuntime._delegation_objective_text(item) for item in value]
+            return "\n".join(part for part in parts if part).strip()
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    def _canonicalize_delegation_arguments(
+        self,
+        calls: list[ToolCall],
+    ) -> tuple[list[ToolCall], int, int]:
+        """Normalize delegation arguments and coalesce same-specialist work."""
+        normalized_calls: list[ToolCall] = []
+        normalized_objectives = 0
+        merged_tasks = 0
+
+        for call in calls:
+            arguments = dict(call.arguments)
+            if call.name == "delegate_subagent" and "objective" in arguments:
+                objective = arguments["objective"]
+                text = self._delegation_objective_text(objective)
+                if text and not isinstance(objective, str):
+                    arguments["objective"] = text[:4000]
+                    normalized_objectives += 1
+
+            elif call.name == "delegate_specialists" and isinstance(
+                arguments.get("tasks"), list
+            ):
+                tasks_by_agent: dict[str, list[str]] = {}
+                task_templates: dict[str, dict[str, Any]] = {}
+                passthrough_tasks: list[Any] = []
+                agent_order: list[str] = []
+                for raw_task in arguments["tasks"]:
+                    if not isinstance(raw_task, dict):
+                        passthrough_tasks.append(raw_task)
+                        continue
+                    task = dict(raw_task)
+                    raw_objective = task.get("objective")
+                    objective = self._delegation_objective_text(raw_objective)
+                    if objective and not isinstance(raw_objective, str):
+                        normalized_objectives += 1
+                    agent_id = task.get("agent_id")
+                    if not isinstance(agent_id, str) or not objective:
+                        if objective:
+                            task["objective"] = objective[:4000]
+                        passthrough_tasks.append(task)
+                        continue
+                    if agent_id not in tasks_by_agent:
+                        agent_order.append(agent_id)
+                        tasks_by_agent[agent_id] = []
+                        task_templates[agent_id] = task
+                    if objective not in tasks_by_agent[agent_id]:
+                        tasks_by_agent[agent_id].append(objective)
+
+                canonical_tasks: list[Any] = []
+                for agent_id in agent_order:
+                    objectives = tasks_by_agent[agent_id]
+                    task = task_templates[agent_id]
+                    if len(objectives) == 1:
+                        combined = objectives[0]
+                    else:
+                        combined = "请在一次查询和分析中同时完成：\n" + "\n".join(
+                            f"{index}. {objective}"
+                            for index, objective in enumerate(objectives, start=1)
+                        )
+                        merged_tasks += len(objectives) - 1
+                    task["objective"] = combined[:4000]
+                    canonical_tasks.append(task)
+                arguments["tasks"] = [*canonical_tasks, *passthrough_tasks]
+
+            normalized_calls.append(call.model_copy(update={"arguments": arguments}))
+
+        return normalized_calls, normalized_objectives, merged_tasks
+
+    @staticmethod
+    def _repair_delegation_mode(
+        calls: list[ToolCall],
+        visible_tool_names: set[str],
+    ) -> tuple[list[ToolCall], int]:
+        """Translate stale specialist calls after a session switches to general mode."""
+        if (
+            "delegate_subagent" not in visible_tool_names
+            or "delegate_specialists" in visible_tool_names
+        ):
+            return calls, 0
+        repaired: list[ToolCall] = []
+        repaired_count = 0
+        for call in calls:
+            if call.name != "delegate_specialists":
+                repaired.append(call)
+                continue
+            tasks = call.arguments.get("tasks")
+            if not isinstance(tasks, list):
+                repaired.append(call)
+                continue
+            objectives = [
+                str(task.get("objective") or "").strip()
+                for task in tasks
+                if isinstance(task, dict)
+                and str(task.get("objective") or "").strip()
+            ]
+            if not objectives:
+                repaired.append(call)
+                continue
+            objective = (
+                objectives[0]
+                if len(objectives) == 1
+                else "请在一次分析中同时完成：\n"
+                + "\n".join(
+                    f"{index}. {item}"
+                    for index, item in enumerate(objectives, start=1)
+                )
+            )
+            arguments: dict[str, Any] = {
+                "agent_id": ANALYST_AGENT_ID,
+                "objective": objective[:4000],
+                "run_in_background": False,
+            }
+            for name in ("timeout_seconds", "token_budget"):
+                if call.arguments.get(name) is not None:
+                    arguments[name] = call.arguments[name]
+            repaired.append(
+                call.model_copy(
+                    update={
+                        "name": "delegate_subagent",
+                        "arguments": arguments,
+                    }
+                )
+            )
+            repaired_count += 1
+        return repaired, repaired_count
+
+    @staticmethod
+    def _merge_session_tool_snapshot(
+        current_tools: set[str] | None,
+        snapshotted_tools: set[str],
+    ) -> set[str]:
+        """Keep business grants frozen while refreshing built-in orchestration tools."""
+        if current_tools is None:
+            return set(snapshotted_tools)
+        return current_tools & (snapshotted_tools | SYSTEM_DEFAULT_TOOL_NAMES)
+
+    @staticmethod
+    def _message_text(message: dict[str, Any]) -> str:
+        content = message.get("content", "")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "\n".join(
+                str(item.get("text", ""))
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text"
+            )
+        return str(content or "")
+
+    def _recover_claimed_delegation(
+        self,
+        turn: ModelTurn,
+        state: RuntimeState,
+        schemas: list[dict[str, Any]],
+    ) -> ModelTurn:
+        """Enforce a real blocking delegation for Coordinator data requests."""
+        if turn.tool_calls or state["agent_id"] != COORDINATOR_AGENT_ID:
+            return turn
+        last_user_index = max(
+            (
+                index
+                for index, message in enumerate(state["messages"])
+                if message.get("role") == "user"
+            ),
+            default=-1,
+        )
+        messages_after_user = state["messages"][last_user_index + 1 :]
+        if any(
+            message.get("role") == "tool"
+            and message.get("name") in {"delegate_subagent", "delegate_specialists"}
+            for message in messages_after_user
+        ):
+            return turn
+        objective = next(
+            (
+                self._message_text(message).strip()
+                for message in reversed(state["messages"])
+                if message.get("role") == "user"
+                and self._message_text(message).strip()
+            ),
+            "完成用户的数据分析请求",
+        )
+        content = str(turn.content or "")
+        role_claimed = any(
+            marker in content for marker in ("分析师", "子代理", "子 Agent", "子Agent")
+        )
+        action_claimed = any(
+            marker in content
+            for marker in (
+                "已经向", "已向", "已委派", "已经委派", "发送了请求", "正在收集"
+            )
+        )
+        lowered_objective = objective.lower()
+        data_subject = any(
+            marker in lowered_objective
+            for marker in (
+                "msku", "sku", "asin", "amazon", "亚马逊", "利润", "毛利",
+                "销售量", "销售额", "订单", "收入", "成本", "费用", "结算",
+                "退款", "领星", "金蝶", "出库", "应收", "回款", "报表",
+            )
+        )
+        data_operation = any(
+            marker in lowered_objective
+            for marker in (
+                "查询", "汇总", "统计", "分析", "对比", "趋势", "按月", "按日",
+                "top", "多少", "合计", "明细",
+            )
+        )
+        data_request = data_subject and data_operation
+        false_delegation_claim = role_claimed and action_claimed
+        if not (false_delegation_claim or data_request):
+            return turn
+        available = {
+            str(item.get("function", {}).get("name") or "") for item in schemas
+        }
+        if not ({"delegate_subagent", "delegate_specialists"} & available):
+            return turn
+        if "delegate_specialists" in available:
+            lowered = objective.lower()
+            allowed_specialists = set(SPECIALIST_ANALYST_IDS)
+            access_control = getattr(self, "access_control", None)
+            if access_control is not None:
+                access = access_control.effective_access(
+                    state["tenant_id"], state["user_id"], state["role"]
+                )
+                if access.allowed_tools is not None:
+                    agent_registry = getattr(self, "agent_registry", None)
+                    allowed_specialists = {
+                        agent_id
+                        for agent_id in SPECIALIST_ANALYST_IDS
+                        if agent_registry is not None
+                        and (agent := agent_registry.get(agent_id)) is not None
+                        and bool(
+                            (set(agent.allowed_tools) & DATA_QUERY_TOOL_NAMES)
+                            & set(access.allowed_tools)
+                        )
+                    }
+            if not allowed_specialists:
+                return turn
+            specialist_keywords = (
+                (
+                    PROFIT_ANALYST_ID,
+                    ("利润", "毛利", "销售量", "销售额", "msku", "订单", "收入", "成本"),
+                ),
+                (
+                    AMAZON_FINANCE_ANALYST_ID,
+                    ("亚马逊", "amazon", "结算", "退款", "费用", "asin"),
+                ),
+                (ERP_ANALYST_ID, ("金蝶", "出库", "应收", "回款", "erp")),
+            )
+            matched_agent_ids = [
+                agent_id
+                for agent_id, keywords in specialist_keywords
+                if any(keyword in lowered for keyword in keywords)
+            ]
+            agent_ids = [
+                agent_id
+                for agent_id in matched_agent_ids
+                if agent_id in allowed_specialists
+            ][:3]
+            if matched_agent_ids and not agent_ids:
+                return turn
+            if not agent_ids:
+                agent_ids = [sorted(allowed_specialists)[0]]
+            call = ToolCall(
+                call_id=f"call-recovered-{uuid.uuid4().hex[:12]}",
+                name="delegate_specialists",
+                arguments={
+                    "tasks": [
+                        {"agent_id": agent_id, "objective": objective}
+                        for agent_id in agent_ids
+                    ]
+                },
+            )
+        else:
+            call = ToolCall(
+                call_id=f"call-recovered-{uuid.uuid4().hex[:12]}",
+                name="delegate_subagent",
+                arguments={
+                    "agent_id": ANALYST_AGENT_ID,
+                    "objective": objective,
+                    "run_in_background": False,
+                },
+            )
+        self._append_event(
+            state,
+            "model.tool_call_recovered",
+            {
+                "reason": (
+                    "model_claimed_delegation_without_tool_call"
+                    if false_delegation_claim
+                    else "data_request_requires_delegation"
+                ),
+                "tool_name": call.name,
+            },
+        )
+        return turn.model_copy(update={"content": "", "tool_calls": [call]})
 
     def _model_node(self, state: RuntimeState) -> dict[str, Any]:
         self._check_control(state)
@@ -339,14 +863,23 @@ class AgentRuntime:
         )
         try:
             listener = _stream_events.get()
+            stream_sanitizer = StreamingPublicTextSanitizer()
+            reasoning_sanitizer = StreamingPublicTextSanitizer()
 
-            def on_token(text: str) -> None:
-                if not text:
+            def on_token(text: str, channel: str = "content") -> None:
+                self._check_control(state)
+                if channel == "reasoning":
+                    safe_text = reasoning_sanitizer.feed(text)
+                    event_type = "reasoning"
+                else:
+                    safe_text = stream_sanitizer.feed(text)
+                    event_type = "token"
+                if not safe_text:
                     return
                 self._emit_stream(
                     {
-                        "type": "token",
-                        "text": text,
+                        "type": event_type,
+                        "text": safe_text,
                         "provider": route.provider,
                         "model": route.model,
                         "session_id": state["session_id"],
@@ -361,6 +894,29 @@ class AgentRuntime:
                     required_modalities=state["required_modalities"],
                     on_token=on_token if listener is not None else None,
                 )
+            if listener is not None:
+                remaining_text = stream_sanitizer.flush()
+                if remaining_text:
+                    self._emit_stream(
+                        {
+                            "type": "token",
+                            "text": remaining_text,
+                            "provider": route.provider,
+                            "model": route.model,
+                            "session_id": state["session_id"],
+                        }
+                    )
+                remaining_reasoning = reasoning_sanitizer.flush()
+                if remaining_reasoning:
+                    self._emit_stream(
+                        {
+                            "type": "reasoning",
+                            "text": remaining_reasoning,
+                            "provider": route.provider,
+                            "model": route.model,
+                            "session_id": state["session_id"],
+                        }
+                    )
         except ModelProviderError as exc:
             self._append_event(
                 state,
@@ -369,8 +925,13 @@ class AgentRuntime:
             )
             raise
         self._check_control(state)
+        turn = self._recover_claimed_delegation(turn, state, schemas)
         calls = turn.tool_calls
-        answer = turn.content
+        visible_tool_names = {
+            str(item.get("function", {}).get("name") or "")
+            for item in schemas
+        }
+        answer = sanitize_public_text(turn.content)
         tokens_used = state["tokens_used"] + int(
             turn.usage.get("total_tokens", 0) or 0
         )
@@ -380,6 +941,67 @@ class AgentRuntime:
             answer = (
                 f"已达到本次执行的 Token 预算 {state['token_budget']}，任务已停止。"
             )
+        else:
+            calls, canonicalized_count, merged_task_count = (
+                self._canonicalize_delegation_arguments(calls)
+            )
+            if canonicalized_count or merged_task_count:
+                self._append_event(
+                    state,
+                    "delegation.arguments_normalized",
+                    {
+                        "normalized_objectives": canonicalized_count,
+                        "merged_tasks": merged_task_count,
+                    },
+                )
+            calls, mode_repaired_count = self._repair_delegation_mode(
+                calls, visible_tool_names
+            )
+            if mode_repaired_count:
+                self._append_event(
+                    state,
+                    "delegation.mode_repaired",
+                    {
+                        "from_tool": "delegate_specialists",
+                        "to_tool": "delegate_subagent",
+                        "count": mode_repaired_count,
+                        "analyst_mode": "general",
+                    },
+                )
+            calls, normalized_count, batch_count = (
+                self._normalize_specialist_delegations(calls, context)
+            )
+            if normalized_count:
+                self._append_event(
+                    state,
+                    "delegation.parallelized",
+                    {
+                        "original_calls": normalized_count,
+                        "parallel_batches": batch_count,
+                        "max_parallel": 3,
+                    },
+                )
+            hidden_calls = [
+                call.name for call in calls if call.name not in visible_tool_names
+            ]
+            if hidden_calls:
+                calls = [
+                    call for call in calls if call.name in visible_tool_names
+                ]
+                self._append_event(
+                    state,
+                    "model.tool_call_rejected",
+                    {
+                        "reason": "tool_not_visible",
+                        "tool_names": sorted(set(hidden_calls)),
+                    },
+                )
+                if not calls:
+                    answer = (
+                        "当前 Agent 无权调用模型请求的工具："
+                        + "、".join(sorted(set(hidden_calls)))
+                        + "。请检查当前 Analyst 模式和权限组配置。"
+                    )
         if calls and state["tool_steps"] >= self.max_tool_steps:
             calls = []
             answer = f"已达到最大工具调用轮数 {self.max_tool_steps}，任务已停止。"
@@ -390,6 +1012,7 @@ class AgentRuntime:
                 "provider": turn.provider,
                 "model": turn.model,
                 "content": answer,
+                "reasoning_content": turn.reasoning_content,
                 "tool_calls": [item.model_dump(mode="json") for item in calls],
                 "usage": turn.usage,
             },
@@ -462,7 +1085,6 @@ class AgentRuntime:
                     user_id=state["user_id"],
                     role=state["role"],
                     call=call,
-                    seller_id=state["seller_id"],
                 )
                 pending_approval_ids.append(approval.approval_id)
                 waiting_approval = True
@@ -479,6 +1101,31 @@ class AgentRuntime:
                 )
                 continue
             result = self.executor.execute(call, context)
+            self._check_control(state)
+            result = result.model_copy(
+                update={
+                    "output": sanitize_public_value(result.output),
+                    "error": (
+                        sanitize_public_text(result.error)
+                        if result.error is not None
+                        else None
+                    ),
+                }
+            )
+            if result.ok and self.result_store is not None:
+                result = result.model_copy(
+                    update={
+                        "output": materialize_tool_output(
+                            self.result_store,
+                            result.output,
+                            tenant_id=state["tenant_id"],
+                            user_id=state["user_id"],
+                            session_id=state["session_id"],
+                            tool_name=call.name,
+                            preview_rows=self._tool_compact_limits()[0],
+                        )
+                    }
+                )
             results.append(result)
             self._append_event(
                 state,
@@ -568,9 +1215,11 @@ class AgentRuntime:
             try:
                 payload = json.loads(content)
             except json.JSONDecodeError:
-                return content if len(content) <= max_chars else content[:max_chars] + "…"
+                sanitized = sanitize_public_text(content)
+                return sanitized if len(sanitized) <= max_chars else sanitized[:max_chars] + "…"
         else:
             payload = content
+        payload = sanitize_public_value(payload)
         if not isinstance(payload, dict):
             text = json.dumps(payload, ensure_ascii=False, default=str)
             return text if len(text) <= max_chars else text[:max_chars] + "…"
@@ -593,21 +1242,19 @@ class AgentRuntime:
     def _prepare_model_messages(
         self, messages: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        last_user = 0
-        for index, message in enumerate(messages):
-            if message.get("role") == "user":
-                last_user = index
         max_rows, max_chars = self._tool_compact_limits()
         prepared: list[dict[str, Any]] = []
-        for index, message in enumerate(messages):
+        for message in messages:
             item = dict(message)
+            if item.get("role") != "user" and isinstance(item.get("content"), str):
+                item["content"] = sanitize_public_text(item["content"])
             if (
                 item.get("role") == "assistant"
                 and item.get("tool_calls")
                 and not str(item.get("content") or "").strip()
             ):
                 item["content"] = None
-            if item.get("role") == "tool" and index < last_user:
+            if item.get("role") == "tool":
                 item["content"] = self._compact_tool_content(
                     item.get("content", ""),
                     max_rows=max_rows,
@@ -712,6 +1359,7 @@ class AgentRuntime:
                     provider=str(event.payload.get("provider", "")),
                     model=str(event.payload.get("model", "")),
                     content=str(event.payload.get("content", "")),
+                    reasoning_content=str(event.payload.get("reasoning_content") or ""),
                     tool_calls=[
                         ToolCall.model_validate(item)
                         for item in event.payload.get("tool_calls", [])
@@ -745,17 +1393,55 @@ class AgentRuntime:
         user_id: str,
         role: str = "admin",
         allowed_tools: set[str] | None = None,
+        agent_id: str | None = None,
         delegation_depth: int = 0,
         parent_session_id: str | None = None,
+        connection_ids: list[str] | None = None,
+        resource_scope: dict[str, list[str]] | None = None,
+        memory_snapshot: list[dict[str, Any]] | None = None,
         cancellation_event: threading.Event | None = None,
+        interruption_is_resumable: bool = False,
         timeout_seconds: float | None = None,
         token_budget: int = 30_000,
         on_event: Callable[[dict[str, Any]], None] | None = None,
         resume: bool = False,
     ) -> RuntimeAgentResponse:
-        if self.agent_registry is not None and not self.agent_registry.runtime_config().enabled:
-            raise ValueError("Function Calling Agent is disabled")
-        configured_tools = self._runtime_allowed_tools()
+        if request.session_id:
+            existing_events = self.event_store.list_events(
+                session_id=request.session_id, tenant_id=tenant_id
+            )
+            owner = next(
+                (
+                    event.user_id
+                    for event in existing_events
+                    if event.event_type == "session.created"
+                ),
+                existing_events[0].user_id if existing_events else None,
+            )
+            if existing_events and owner != user_id:
+                raise KeyError("session not found")
+        if resume and request.session_id:
+            previous = existing_events
+            created = next(
+                (
+                    event
+                    for event in previous
+                    if event.event_type == "session.created"
+                ),
+                None,
+            )
+            if created and created.payload.get("agent_id"):
+                agent_id = str(created.payload["agent_id"])
+        if self.agent_registry is not None:
+            resolved_agent_id = agent_id or COORDINATOR_AGENT_ID
+            config = self.agent_registry.get(resolved_agent_id)
+            if config is None or not config.enabled:
+                raise ValueError(f"Agent is disabled: {resolved_agent_id}")
+        else:
+            resolved_agent_id = agent_id or COORDINATOR_AGENT_ID
+        configured_tools = self._agent_allowed_tools(
+            resolved_agent_id, tenant_id, user_id, role
+        )
         if allowed_tools is None:
             allowed_tools = configured_tools
         elif configured_tools is not None:
@@ -768,6 +1454,7 @@ class AgentRuntime:
                 tenant_id=tenant_id,
                 user_id=user_id,
                 role=role,
+                agent_id=resolved_agent_id,
             ):
                 try:
                     result = self._run_turn(
@@ -776,9 +1463,14 @@ class AgentRuntime:
                         user_id=user_id,
                         role=role,
                         allowed_tools=allowed_tools,
+                        agent_id=resolved_agent_id,
                         delegation_depth=delegation_depth,
                         parent_session_id=parent_session_id,
+                        connection_ids=connection_ids,
+                        resource_scope=resource_scope,
+                        memory_snapshot=memory_snapshot,
                         cancellation_event=cancellation_event,
+                        interruption_is_resumable=interruption_is_resumable,
                         timeout_seconds=timeout_seconds,
                         token_budget=token_budget,
                         resume=resume,
@@ -812,21 +1504,21 @@ class AgentRuntime:
         tenant_id: str,
         user_id: str,
         role: str = "admin",
-        seller_id: str | None = None,
         token_budget: int = 30_000,
         on_event: Callable[[dict[str, Any]], None] | None = None,
+        interruption_is_resumable: bool = False,
     ) -> RuntimeAgentResponse:
         return self.run(
             RuntimeAgentRequest(
                 question="continue",
                 session_id=session_id,
-                seller_id=seller_id,
             ),
             tenant_id=tenant_id,
             user_id=user_id,
             role=role,
             token_budget=token_budget,
             on_event=on_event,
+            interruption_is_resumable=interruption_is_resumable,
             resume=True,
         )
 
@@ -936,9 +1628,14 @@ class AgentRuntime:
         user_id: str,
         role: str = "admin",
         allowed_tools: set[str] | None = None,
+        agent_id: str = COORDINATOR_AGENT_ID,
         delegation_depth: int = 0,
         parent_session_id: str | None = None,
+        connection_ids: list[str] | None = None,
+        resource_scope: dict[str, list[str]] | None = None,
+        memory_snapshot: list[dict[str, Any]] | None = None,
         cancellation_event: threading.Event | None = None,
+        interruption_is_resumable: bool = False,
         timeout_seconds: float | None = None,
         token_budget: int = 30_000,
         resume: bool = False,
@@ -946,7 +1643,8 @@ class AgentRuntime:
         if resume and not request.session_id:
             raise ValueError("session_id is required to resume")
         session_id = request.session_id or str(uuid.uuid4())
-        self.live_hub.begin(session_id)
+        control = cancellation_event or threading.Event()
+        self.live_hub.begin(session_id, control)
         try:
             return self._execute_turn(
                 request,
@@ -955,9 +1653,14 @@ class AgentRuntime:
                 user_id=user_id,
                 role=role,
                 allowed_tools=allowed_tools,
+                agent_id=agent_id,
                 delegation_depth=delegation_depth,
                 parent_session_id=parent_session_id,
-                cancellation_event=cancellation_event,
+                connection_ids=connection_ids,
+                resource_scope=resource_scope,
+                memory_snapshot=memory_snapshot,
+                cancellation_event=control,
+                interruption_is_resumable=interruption_is_resumable,
                 timeout_seconds=timeout_seconds,
                 token_budget=token_budget,
                 resume=resume,
@@ -1058,9 +1761,14 @@ class AgentRuntime:
         user_id: str,
         role: str,
         allowed_tools: set[str] | None,
+        agent_id: str,
         delegation_depth: int,
         parent_session_id: str | None,
+        connection_ids: list[str] | None,
+        resource_scope: dict[str, list[str]] | None,
+        memory_snapshot: list[dict[str, Any]] | None,
         cancellation_event: Any,
+        interruption_is_resumable: bool,
         timeout_seconds: float | None,
         token_budget: int,
         resume: bool,
@@ -1089,9 +1797,53 @@ class AgentRuntime:
             ),
             None,
         )
-        seller_id = request.seller_id or (
-            str(created.payload.get("seller_id") or "") or None if created else None
-        )
+        if created and "allowed_tools" in created.payload:
+            snapshot = created.payload.get("allowed_tools")
+            if snapshot is not None:
+                snapshotted_tools = {str(item) for item in snapshot}
+                allowed_tools = self._merge_session_tool_snapshot(
+                    allowed_tools, snapshotted_tools
+                )
+        if created and "connection_ids" in created.payload:
+            connection_ids = list(created.payload.get("connection_ids") or [])
+            resource_scope = {
+                str(name): [str(value) for value in values]
+                for name, values in dict(
+                    created.payload.get("resource_scope") or {}
+                ).items()
+            }
+        elif connection_ids is None and self.connection_registry is not None:
+            if self.tool_bindings is not None:
+                connection_ids, resource_scope = self.tool_bindings.execution_scope(
+                    tenant_id, allowed_tools, self.connection_registry
+                )
+            else:
+                connections = self.connection_registry.list_for_tenant(tenant_id)
+                connection_ids = [item.id for item in connections]
+                resource_scope = {
+                    name: list(values)
+                    for connection in connections
+                    for name, values in connection.resource_scopes.items()
+                }
+        if (
+            parent_session_id
+            and created
+            and isinstance(created.payload.get("memory_snapshot"), list)
+        ):
+            memory_snapshot = list(created.payload.get("memory_snapshot") or [])
+        elif memory_snapshot is None and self.memory_service is not None:
+            memory_snapshot = self.memory_service.build_snapshot(
+                request.question,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                agent_id=agent_id,
+            )
+        memory_snapshot = list(memory_snapshot or [])
+        connection_ids = list(connection_ids or [])
+        resource_scope = {
+            str(name): [str(value) for value in values]
+            for name, values in (resource_scope or {}).items()
+        }
         model_id = self._resolve_model_id(
             request, previous_events=previous_events
         )
@@ -1107,12 +1859,18 @@ class AgentRuntime:
                 user_id=user_id,
                 event_type="session.created",
                 payload={
-                    "seller_id": request.seller_id,
                     "model_id": model_id,
                     "role": role,
                     "parent_session_id": parent_session_id,
+                    "agent_id": agent_id,
                     "delegation_depth": delegation_depth,
+                    "allowed_tools": (
+                        sorted(allowed_tools) if allowed_tools is not None else None
+                    ),
+                    "connection_ids": connection_ids,
+                    "resource_scope": resource_scope,
                     "token_budget": token_budget,
+                    "memory_snapshot": memory_snapshot if parent_session_id else [],
                 },
             )
         if not resume:
@@ -1146,7 +1904,37 @@ class AgentRuntime:
         allowed_tool_set = (
             set(allowed_tools) if allowed_tools is not None else None
         )
-        system_prompt = self._base_system_prompt(allowed_tool_set)
+        system_prompt = self._base_system_prompt(
+            allowed_tool_set,
+            agent_id=agent_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            role=role,
+        )
+        system_prompt += memory_prompt(memory_snapshot)
+        if role != "admin" and self.access_control is not None:
+            access = self.access_control.effective_access(tenant_id, user_id, role)
+            if access.configured:
+                if allowed_tool_set:
+                    system_prompt += (
+                        "\n权限边界：当前用户本轮仅可调用以下工具："
+                        + "、".join(sorted(allowed_tool_set))
+                        + "。如果完成用户目标需要列表之外的工具，不得用文本模拟工具调用，"
+                        "必须明确告知用户缺少对应工具权限，并提示联系管理员配置权限组和规则。"
+                    )
+                else:
+                    detail = access.denial_detail()
+                    system_prompt += (
+                        "\n权限边界：当前用户没有可用工具权限。若问题需要调用工具，"
+                        f"请直接告知用户：{detail['message']} {detail.get('hint', '')}"
+                    )
+        if resume and any(
+            event.event_type == "turn.interrupted" for event in previous_events
+        ):
+            system_prompt += (
+                "\n上一次执行由用户主动中断。请从已有事件和工具结果恢复未完成目标；"
+                "对取消、缺失或失败的子任务重新委派，不要把中断状态当作最终答案。"
+            )
         if self.skill_registry is not None:
             system_prompt += self.skill_registry.catalog_prompt(
                 include_names=skill_names_for_tools(allowed_tool_set),
@@ -1202,7 +1990,6 @@ class AgentRuntime:
             "tenant_id": tenant_id,
             "user_id": user_id,
             "role": role,
-            "seller_id": seller_id,
             "model_id": model_id,
             "required_modalities": (
                 {"text", "image"}
@@ -1217,10 +2004,15 @@ class AgentRuntime:
             "model": "",
             "approved_call_ids": [],
             "allowed_tools": sorted(allowed_tools) if allowed_tools is not None else None,
+            "agent_id": agent_id,
             "delegation_depth": delegation_depth,
+            "connection_ids": connection_ids,
+            "resource_scope": resource_scope,
+            "connection_scope_enforced": self.connection_registry is not None,
             "waiting_approval": False,
             "pending_approval_ids": [],
             "cancellation_event": cancellation_event,
+            "interruption_is_resumable": interruption_is_resumable,
             "deadline": (
                 time.monotonic() + timeout_seconds
                 if timeout_seconds is not None
@@ -1229,6 +2021,9 @@ class AgentRuntime:
             "token_budget": token_budget,
             "tokens_used": 0,
             "status": "completed",
+            "explicit_memory_consent": explicit_remember_requested(request.question),
+            "explicit_memory_forget": explicit_forget_requested(request.question),
+            "memory_snapshot": memory_snapshot,
         }
         if resume:
             state["messages"] = self._fill_missing_tool_results(
@@ -1263,6 +2058,25 @@ class AgentRuntime:
         except RuntimeError as exc:
             if "cancelled" not in str(exc).lower():
                 raise
+            if state["interruption_is_resumable"]:
+                self.event_store.append(
+                    session_id=session_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    event_type="turn.interrupted",
+                    payload={"status": "interrupted", "reason": "user_requested"},
+                )
+                events = self.event_store.list_events(
+                    session_id=session_id, tenant_id=tenant_id
+                )
+                return RuntimeAgentResponse(
+                    session_id=session_id,
+                    answer="任务已中断，可继续执行。",
+                    provider=state["provider"],
+                    model=state["model"],
+                    event_count=len(events),
+                    status="interrupted",
+                )
             self.event_store.append(
                 session_id=session_id,
                 tenant_id=tenant_id,
@@ -1282,6 +2096,26 @@ class AgentRuntime:
                 status="cancelled",
             )
         answer = self._visible_answer(result, "任务已完成。")
+        if (
+            self.memory_service is not None
+            and self.settings is not None
+            and self.settings.memory_auto_extract_enabled
+            and agent_id == COORDINATOR_AGENT_ID
+            and not resume
+            and result["status"] == "completed"
+        ):
+            candidates = self.memory_service.extract_candidates(
+                request.question,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                source_session_id=session_id,
+            )
+            if candidates:
+                self._append_event(
+                    state,
+                    "memory.candidates_extracted",
+                    {"memory_ids": [item.id for item in candidates], "count": len(candidates)},
+                )
         self.event_store.append(
             session_id=session_id,
             tenant_id=tenant_id,
@@ -1341,13 +2175,48 @@ class AgentRuntime:
             },
         )
         if approved:
+            session_events = self.event_store.list_events(
+                session_id=record.session_id, tenant_id=record.tenant_id
+            )
+            created = next(
+                (
+                    event
+                    for event in session_events
+                    if event.event_type == "session.created"
+                ),
+                None,
+            )
+            if created and "connection_ids" in created.payload:
+                connection_ids = tuple(
+                    str(item) for item in created.payload.get("connection_ids") or []
+                )
+                resource_scope = {
+                    str(name): tuple(str(value) for value in values)
+                    for name, values in dict(
+                        created.payload.get("resource_scope") or {}
+                    ).items()
+                }
+            else:
+                connections = (
+                    self.connection_registry.list_for_tenant(record.tenant_id)
+                    if self.connection_registry is not None
+                    else []
+                )
+                connection_ids = tuple(item.id for item in connections)
+                resource_scope = {
+                    name: tuple(values)
+                    for connection in connections
+                    for name, values in connection.resource_scopes.items()
+                }
             context = ToolExecutionContext(
                 session_id=record.session_id,
                 tenant_id=record.tenant_id,
                 user_id=record.user_id,
                 role=record.role,
-                seller_id=record.seller_id,
                 approved_call_ids=frozenset({record.call.call_id}),
+                connection_ids=connection_ids,
+                resource_scope=resource_scope,
+                connection_scope_enforced=self.connection_registry is not None,
             )
             tool_result = self.executor.execute(record.call, context)
         else:
@@ -1397,8 +2266,44 @@ class AgentRuntime:
             )
             for message in restored_messages
         )
-        allowed_tool_set = self._runtime_allowed_tools()
-        system_prompt = self._base_system_prompt(allowed_tool_set)
+        created = next(
+            (event for event in events if event.event_type == "session.created"),
+            None,
+        )
+        if created and "connection_ids" in created.payload:
+            state_connection_ids = [
+                str(item) for item in created.payload.get("connection_ids") or []
+            ]
+            state_resource_scope = {
+                str(name): [str(value) for value in values]
+                for name, values in dict(
+                    created.payload.get("resource_scope") or {}
+                ).items()
+            }
+        else:
+            connections = (
+                self.connection_registry.list_for_tenant(record.tenant_id)
+                if self.connection_registry is not None
+                else []
+            )
+            state_connection_ids = [item.id for item in connections]
+            state_resource_scope = {
+                name: list(values)
+                for connection in connections
+                for name, values in connection.resource_scopes.items()
+            }
+        agent_id = str(
+            (created.payload.get("agent_id") if created else None)
+            or COORDINATOR_AGENT_ID
+        )
+        allowed_tool_set = self._agent_allowed_tools(agent_id, record.tenant_id)
+        system_prompt = self._base_system_prompt(
+            allowed_tool_set,
+            agent_id=agent_id,
+            tenant_id=record.tenant_id,
+            user_id=record.user_id,
+            role=record.role,
+        )
         if self.skill_registry is not None:
             system_prompt += self.skill_registry.catalog_prompt(
                 include_names=skill_names_for_tools(allowed_tool_set),
@@ -1416,7 +2321,6 @@ class AgentRuntime:
             "tenant_id": record.tenant_id,
             "user_id": record.user_id,
             "role": record.role,
-            "seller_id": record.seller_id,
             "model_id": model_id,
             "required_modalities": {"text", "image"} if has_images else {"text"},
             "pending_calls": [],
@@ -1429,7 +2333,13 @@ class AgentRuntime:
             "allowed_tools": (
                 sorted(allowed_tool_set) if allowed_tool_set is not None else None
             ),
-            "delegation_depth": 0,
+            "agent_id": agent_id,
+            "delegation_depth": int(
+                (created.payload.get("delegation_depth") if created else 0) or 0
+            ),
+            "connection_ids": state_connection_ids,
+            "resource_scope": state_resource_scope,
+            "connection_scope_enforced": self.connection_registry is not None,
             "waiting_approval": False,
             "pending_approval_ids": [],
             "cancellation_event": None,

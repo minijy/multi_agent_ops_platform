@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .config import Settings
+from .runtime.model_errors import ModelProviderError
 
 
-ModelProvider = Literal["mock", "openai", "zhipu"]
+ModelProvider = Literal["mock", "openai", "zhipu", "qwen", "deepseek"]
+ConfigurableModelProvider = Literal["openai", "zhipu", "qwen", "deepseek"]
 SECRET_MASK = "********"
+QWEN_COMPATIBLE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+DEEPSEEK_COMPATIBLE_BASE_URL = "https://api.deepseek.com"
 
 
 class ModelDefinition(BaseModel):
@@ -22,9 +25,14 @@ class ModelDefinition(BaseModel):
     api_key: str = Field(default="", max_length=512)
     base_url: str = Field(default="", max_length=256)
     vision_model_name: str = Field(default="", max_length=120)
+    supports_image_input: bool = False
+    supports_audio_input: bool = False
     enabled: bool = True
     is_default: bool = False
     temperature: float | None = Field(default=None, ge=0, le=2)
+    enable_thinking: bool | None = None
+    thinking_budget: int | None = Field(default=None, ge=1, le=38912)
+    reasoning_effort: Literal["low", "high", "max"] | None = None
     builtin: bool = False
 
     @field_validator("id")
@@ -32,30 +40,62 @@ class ModelDefinition(BaseModel):
     def normalize_id(cls, value: str) -> str:
         return value.strip().lower()
 
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_vision_capability(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "supports_image_input" not in value:
+            value = dict(value)
+            value["supports_image_input"] = bool(value.get("vision_model_name"))
+        return value
+
+    @model_validator(mode="after")
+    def apply_provider_defaults(self) -> "ModelDefinition":
+        if self.provider == "qwen" and not str(self.base_url or "").strip():
+            self.base_url = QWEN_COMPATIBLE_BASE_URL
+        if self.provider == "deepseek" and not str(self.base_url or "").strip():
+            self.base_url = DEEPSEEK_COMPATIBLE_BASE_URL
+        return self
+
+    def api_key_configured(self) -> bool:
+        return self.provider == "mock" or bool(self.api_key.strip())
+
+    def callable(self) -> bool:
+        return self.enabled and self.api_key_configured()
+
 
 class ModelCreateRequest(BaseModel):
     id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9._-]*$")
     name: str = Field(min_length=1, max_length=120)
-    provider: ModelProvider
+    provider: ConfigurableModelProvider
     model_name: str = Field(min_length=1, max_length=120)
     api_key: str = Field(default="", max_length=512)
     base_url: str = Field(default="", max_length=256)
     vision_model_name: str = Field(default="", max_length=120)
+    supports_image_input: bool = False
+    supports_audio_input: bool = False
     enabled: bool = True
     is_default: bool = False
     temperature: float | None = Field(default=None, ge=0, le=2)
+    enable_thinking: bool | None = None
+    thinking_budget: int | None = Field(default=None, ge=1, le=38912)
+    reasoning_effort: Literal["low", "high", "max"] | None = None
 
 
 class ModelUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
-    provider: ModelProvider | None = None
+    provider: ConfigurableModelProvider | None = None
     model_name: str | None = Field(default=None, min_length=1, max_length=120)
     api_key: str | None = Field(default=None, max_length=512)
     base_url: str | None = None
     vision_model_name: str | None = Field(default=None, max_length=120)
+    supports_image_input: bool | None = None
+    supports_audio_input: bool | None = None
     enabled: bool | None = None
     is_default: bool | None = None
     temperature: float | None = Field(default=None, ge=0, le=2)
+    enable_thinking: bool | None = None
+    thinking_budget: int | None = Field(default=None, ge=1, le=38912)
+    reasoning_effort: Literal["low", "high", "max"] | None = None
 
 
 def default_models_from_settings(settings: Settings) -> list[ModelDefinition]:
@@ -72,6 +112,8 @@ def default_models_from_settings(settings: Settings) -> list[ModelDefinition]:
                 enabled=True,
                 is_default=True,
                 temperature=settings.model_temperature,
+                enable_thinking=True,
+                reasoning_effort="high",
                 builtin=True,
             )
         ]
@@ -89,17 +131,52 @@ def default_models_from_settings(settings: Settings) -> list[ModelDefinition]:
                 builtin=True,
             )
         ]
-    return [
-        ModelDefinition(
-            id="mock-default",
-            name="Mock 模型",
-            provider="mock",
-            model_name="mock-function-calling",
-            enabled=True,
-            is_default=True,
-            builtin=True,
-        )
-    ]
+    if settings.model_provider == "qwen":
+        return [
+            ModelDefinition(
+                id="qwen-default",
+                name="通义千问默认模型",
+                provider="qwen",
+                model_name=settings.qwen_model_name,
+                api_key=settings.dashscope_api_key,
+                base_url=settings.qwen_base_url,
+                enabled=True,
+                is_default=True,
+                temperature=settings.model_temperature,
+                enable_thinking=True,
+                builtin=True,
+            )
+        ]
+    if settings.model_provider == "deepseek":
+        return [
+            ModelDefinition(
+                id="deepseek-default",
+                name="DeepSeek 默认模型",
+                provider="deepseek",
+                model_name=settings.deepseek_model_name,
+                api_key=settings.deepseek_api_key,
+                base_url=settings.deepseek_base_url,
+                enabled=True,
+                is_default=True,
+                temperature=settings.model_temperature,
+                enable_thinking=True,
+                reasoning_effort="high",
+                builtin=True,
+            )
+        ]
+    if settings.model_provider == "mock":
+        return [
+            ModelDefinition(
+                id="mock-default",
+                name="Mock 模型",
+                provider="mock",
+                model_name="mock-function-calling",
+                enabled=True,
+                is_default=True,
+                builtin=True,
+            )
+        ]
+    raise ValueError("尚未配置模型，请通过系统设置页添加模型")
 
 
 def mask_model_definition(model: ModelDefinition) -> dict[str, Any]:
@@ -107,7 +184,10 @@ def mask_model_definition(model: ModelDefinition) -> dict[str, Any]:
     secret = str(payload.get("api_key") or "")
     payload["api_key"] = SECRET_MASK if secret else ""
     payload["api_key_configured"] = bool(secret)
-    payload["supports_vision"] = bool(model.vision_model_name)
+    payload["callable"] = model.callable()
+    payload["supports_vision"] = model.supports_image_input
+    payload["supports_image"] = model.supports_image_input
+    payload["supports_audio"] = model.supports_audio_input
     return payload
 
 
@@ -119,33 +199,33 @@ class ModelRegistry:
         self.reload()
 
     def reload(self) -> None:
-        defaults = {item.id: item for item in default_models_from_settings(self.settings)}
         stored = self._read_file()
         merged: dict[str, ModelDefinition] = {}
-        for model_id, default in defaults.items():
-            override = stored.get(model_id, {})
-            if override:
-                merged[model_id] = default.model_copy(
-                    update={
-                        key: value
-                        for key, value in override.items()
-                        if key in ModelDefinition.model_fields and key != "id"
-                    }
-                )
-            else:
-                merged[model_id] = default
+        migrated = False
         for model_id, override in stored.items():
-            if model_id in merged:
-                continue
             try:
-                merged[model_id] = ModelDefinition.model_validate(
+                model = ModelDefinition.model_validate(
                     {"id": model_id, **override}
                 )
+                # Remove the bootstrap entry created by older releases. Mock
+                # remains an internal test adapter, never a page model.
+                if model.provider == "mock" and (
+                    model.id == "mock-default" or model.builtin
+                ):
+                    migrated = True
+                    continue
+                if model.builtin:
+                    model = model.model_copy(update={"builtin": False})
+                    migrated = True
+                merged[model_id] = model
             except Exception:
                 continue
+        # An empty registry is a valid first-run state. Production must never
+        # silently become usable through the offline Mock adapter: an admin has
+        # to create a real provider configuration from the settings page.
         self._ensure_default(merged)
         self._models = merged
-        if not self.path.is_file():
+        if not self.path.is_file() or migrated:
             self.save()
 
     def save(self) -> None:
@@ -216,8 +296,34 @@ class ModelRegistry:
                 raise KeyError(model_id)
             if not model.enabled:
                 raise ValueError(f"model is disabled: {model_id}")
+            if not model.api_key_configured():
+                raise ValueError(
+                    f"模型 {model_id} 未配置 API Key，无法调用"
+                )
             return model.id
-        return self.default_model_id()
+        callable_models = [item for item in self.list() if item.callable()]
+        if not callable_models:
+            raise ModelProviderError(
+                provider="configuration",
+                code="model_configuration_required",
+                user_message=(
+                    "尚未配置可用模型，请管理员前往系统设置 → "
+                    "模型配置添加并启用模型。"
+                ),
+                status_code=503,
+                retry_after_seconds=1,
+                automatic_retry=False,
+            )
+        default = next(
+            (item for item in callable_models if item.is_default),
+            callable_models[0],
+        )
+        return default.id
+
+    @staticmethod
+    def _validate_activation(model: ModelDefinition) -> None:
+        if model.enabled and not model.api_key_configured():
+            raise ValueError("启用模型前必须配置 API Key")
 
     def create(self, payload: ModelCreateRequest) -> ModelDefinition:
         model_id = payload.id.strip().lower()
@@ -226,6 +332,7 @@ class ModelRegistry:
         created = ModelDefinition.model_validate(
             {**payload.model_dump(), "id": model_id, "builtin": False}
         )
+        self._validate_activation(created)
         if created.is_default:
             self._clear_default()
         self._models[model_id] = created
@@ -240,7 +347,10 @@ class ModelRegistry:
         patch = payload.model_dump(exclude_unset=True)
         if "api_key" in patch and not str(patch["api_key"] or "").strip():
             patch.pop("api_key")
-        updated = current.model_copy(update=patch)
+        updated = ModelDefinition.model_validate(
+            {**current.model_dump(), **patch, "id": model_id}
+        )
+        self._validate_activation(updated)
         if patch.get("is_default"):
             self._clear_default(except_id=model_id)
         self._models[model_id] = updated
@@ -252,8 +362,6 @@ class ModelRegistry:
         current = self._models.get(model_id)
         if current is None:
             raise KeyError(model_id)
-        if current.builtin and len(self._models) == 1:
-            raise ValueError("cannot delete the only model")
         del self._models[model_id]
         self._ensure_default(self._models)
         self.save()

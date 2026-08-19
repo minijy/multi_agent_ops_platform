@@ -10,7 +10,7 @@ from .domain import (
     KingdeeQueryRequest,
     KingdeeQueryResponse,
 )
-from .query_tool import KingdeeQueryTool, document_label
+from .query_tool import KingdeeQueryTool
 
 
 SYSTEM_PROMPT = """
@@ -27,7 +27,9 @@ SYSTEM_PROMPT = """
 - bill_no：指定单据编号时填写
 - limit：返回条数，默认 50，最大 1000
 - start_row：分页起始行，默认 0
-- extra_filter：仅在用户明确要求额外过滤时填写合法金蝶过滤表达式
+- customer_name：客户名称
+- organization_name：销售/库存组织名称（应收单不支持）
+- document_status：单据状态枚举 A/B/C/D/Z
 
 根据用户意图选择最匹配的单据类型。用户说「出库」选 sale_outstock；说「应收/欠款」选 ar_receivable；
 说「费用应收/其他应收」选 ar_expense_receivable；说「销售订单/SO」选 sale_order。
@@ -56,8 +58,10 @@ class KingdeeCloudAgent:
     def set_integration(self, integration: KingdeeIntegrationConfig) -> None:
         self.integration = integration
 
-    def _client(self) -> KingdeeClient:
-        cfg = self.integration
+    def _client(
+        self, integration: KingdeeIntegrationConfig | None = None
+    ) -> KingdeeClient:
+        cfg = integration or self.integration
         if not (
             cfg.server_url.strip()
             and cfg.acct_id.strip()
@@ -94,13 +98,16 @@ class KingdeeCloudAgent:
             f"{' 单号 ' + plan.bill_no if plan.bill_no else ''}"
         )
 
-    def run(self, request: KingdeeQueryRequest) -> KingdeeQueryResponse:
-        plan = self.model.structured(
-            KingdeeQueryPlan,
-            system_prompt=self.system_prompt,
-            payload={"objective": request.question},
+    def run(
+        self,
+        request: KingdeeQueryRequest,
+        *,
+        integration: KingdeeIntegrationConfig | None = None,
+    ) -> KingdeeQueryResponse:
+        plan = self.plan(request)
+        rows, label, form_id, columns = self.query_tool.execute(
+            self._client(integration), plan
         )
-        rows, label, form_id, columns = self.query_tool.execute(self._client(), plan)
         return KingdeeQueryResponse(
             question=request.question,
             plan=plan,
@@ -111,3 +118,11 @@ class KingdeeCloudAgent:
             summary=self._summary(plan, label, rows),
             total=len(rows),
         )
+
+    def plan(self, request: KingdeeQueryRequest) -> KingdeeQueryPlan:
+        plan = self.model.structured(
+            KingdeeQueryPlan,
+            system_prompt=self.system_prompt,
+            payload={"objective": request.question},
+        )
+        return plan

@@ -8,7 +8,7 @@ from .query_tool import ProfitReportQueryTool
 
 
 SYSTEM_PROMPT = """
-你是利润报表查询 Agent。数据来自 PostgreSQL 表 lingxing_profit_order_transactions（领星订单维度 transaction 导出）。
+你是利润报表查询 Agent。数据来自“领星利润分析数据（分析仓）”。禁止输出物理表名、Schema、DSN 或 SQL。
 
 把用户问题转换成受约束查询计划，不要生成 SQL。
 
@@ -60,15 +60,22 @@ class ProfitReportAgent:
         }
         return f"返回 {len(rows)} {labels[plan.metric]}，原始数据共 {total} 行。"
 
-    def run(self, request: ProfitReportQueryRequest) -> ProfitReportQueryResponse:
-        plan = self.model.structured(
-            ProfitReportQueryPlan,
-            system_prompt=self.system_prompt,
-            payload={"objective": request.question},
-        )
-        if request.currency_code and not plan.currency_code:
-            plan = plan.model_copy(update={"currency_code": request.currency_code.upper()})
-        rows, total = self.query_tool.execute(plan)
+    def run(
+        self,
+        request: ProfitReportQueryRequest,
+        *,
+        allowed_store_names: set[str] | None = None,
+        query_tool: ProfitReportQueryTool | None = None,
+    ) -> ProfitReportQueryResponse:
+        plan = self.plan(request)
+        if allowed_store_names is not None:
+            if plan.store_name and plan.store_name not in allowed_store_names:
+                raise PermissionError("store_name is not authorized for tenant")
+            if not plan.store_name:
+                if len(allowed_store_names) != 1:
+                    raise PermissionError("store_name must be specified for tenant")
+                plan = plan.model_copy(update={"store_name": next(iter(allowed_store_names))})
+        rows, total = (query_tool or self.query_tool).execute(plan)
         return ProfitReportQueryResponse(
             question=request.question,
             plan=plan,
@@ -77,3 +84,16 @@ class ProfitReportAgent:
             summary=self._summary(plan, rows, total),
             total_rows=total,
         )
+
+    def plan(self, request: ProfitReportQueryRequest) -> ProfitReportQueryPlan:
+        if request.plan is not None:
+            plan = request.plan
+        else:
+            plan = self.model.structured(
+                ProfitReportQueryPlan,
+                system_prompt=self.system_prompt,
+                payload={"objective": request.question},
+            )
+        if request.currency_code and not plan.currency_code:
+            plan = plan.model_copy(update={"currency_code": request.currency_code.upper()})
+        return plan

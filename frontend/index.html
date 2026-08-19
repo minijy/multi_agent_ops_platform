@@ -4,9 +4,61 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ArkFlow · Agent Operations</title>
-  <link rel="stylesheet" href="/ui/styles.css?v=p8-kingdee">
+  <link rel="stylesheet" href="/ui/styles.css?v=p30-auth-boot">
+  <style>
+    html.auth-restoring .auth-card,
+    html.auth-restoring .auth-error{visibility:hidden!important;pointer-events:none}
+    .auth-restore-hint{display:none}
+    html.auth-restoring .auth-restore-hint{display:block}
+  </style>
+  <script>
+    try{
+      if(localStorage.getItem('arkflow.accessToken')||localStorage.getItem('arkflow.refreshToken')){
+        document.documentElement.classList.add('auth-restoring');
+      }
+    }catch(_error){}
+  </script>
 </head>
 <body>
+  <div class="auth-gate open" id="auth-gate">
+    <p class="auth-restore-hint">正在进入…</p>
+    <section class="auth-card">
+      <div class="auth-brand"><div class="brand-mark">A</div><div><strong>ArkFlow</strong><span>安全账户中心</span></div></div>
+      <div id="auth-login-pane">
+        <p class="eyebrow">WELCOME BACK</p><h1>登录账户</h1><p>登录后进入 Agent Operations 控制台。</p>
+        <form id="login-form">
+          <label>Tenant<input id="login-tenant" value="tenant-a" autocomplete="organization" required></label>
+          <label>User ID<input id="login-user" autocomplete="username" required></label>
+          <label>密码<input id="login-password" type="password" autocomplete="current-password" required></label>
+          <button class="primary auth-submit" type="submit">登录</button>
+        </form>
+        <button class="auth-switch text-button" id="show-register" type="button">还没有账户？注册</button>
+      </div>
+      <div id="auth-register-pane" hidden>
+        <p class="eyebrow">CREATE TENANT ACCOUNT</p><h1>注册账户</h1><p>创建新租户的首个管理员账户。加入已有租户请联系管理员获取临时密码。</p>
+        <form id="register-form">
+          <label>Tenant<input id="register-tenant" value="tenant-a" required pattern="[A-Za-z0-9_.-]+"></label>
+          <label>User ID<input id="register-user" autocomplete="username" required pattern="[A-Za-z0-9_.@-]+"></label>
+          <label>显示名<input id="register-name" required></label>
+          <label>密码<input id="register-password" type="password" autocomplete="new-password" minlength="10" required></label>
+          <label>确认密码<input id="register-confirm" type="password" autocomplete="new-password" minlength="10" required></label>
+          <p class="form-hint">至少 10 位，并包含大写字母、小写字母和数字。</p>
+          <button class="primary auth-submit" type="submit">注册并登录</button>
+        </form>
+        <button class="auth-switch text-button" id="show-login" type="button">已有账户？返回登录</button>
+      </div>
+      <div id="auth-password-pane" hidden>
+        <p class="eyebrow">PASSWORD UPDATE</p><h1>设置新密码</h1><p>这是临时密码的首次登录。完成修改后才能进入系统。</p>
+        <form id="change-password-form">
+          <label>当前临时密码<input id="change-current-password" type="password" required></label>
+          <label>新密码<input id="change-new-password" type="password" minlength="10" required></label>
+          <label>确认新密码<input id="change-confirm-password" type="password" minlength="10" required></label>
+          <button class="primary auth-submit" type="submit">修改密码并进入</button>
+        </form>
+      </div>
+      <p class="auth-error" id="auth-error" role="alert"></p>
+    </section>
+  </div>
   <div class="app-shell">
     <aside class="sidebar">
       <div class="brand">
@@ -15,19 +67,24 @@
       </div>
       <div class="environment"><i></i><span>Development</span><b>LOCAL</b></div>
       <nav id="navigation">
-        <button class="nav-item active" data-page="dashboard"><span>◫</span>运行概览</button>
-        <button class="nav-item" data-page="approvals"><span>◇</span>审批中心<i id="approval-badge">0</i></button>
+        <button class="nav-item active" data-page="dashboard" data-role-allow="admin"><span>◫</span>运行概览</button>
+        <button class="nav-item" data-page="approvals" data-role-allow="admin approver"><span>◇</span>审批中心<i id="approval-badge">0</i></button>
         <div class="nav-label">BUILD</div>
-        <button class="nav-item" data-page="agent-chat"><span>◉</span>Agent 对话</button>
-        <button class="nav-item" data-page="agents"><span>✣</span>Agents & 工具</button>
+        <button class="nav-item" data-page="agent-chat"><span>◉</span>任务</button>
+        <button class="nav-item" data-page="agents"><span>✣</span>Agents</button>
+        <button class="nav-item" data-page="tools"><span>⚒</span>工具</button>
+        <button class="nav-item" data-page="connectors" data-role-allow="admin"><span>☍</span>连接器</button>
         <button class="nav-item" data-page="knowledge"><span>▤</span>知识库</button>
-        <div class="nav-label">MANAGE</div>
-        <button class="nav-item" data-page="audit"><span>≡</span>审计日志</button>
-        <button class="nav-item" data-page="settings"><span>⚙</span>系统设置</button>
+        <div class="nav-label" data-role-allow="admin">MANAGE</div>
+        <button class="nav-item" data-page="memory" data-role-allow="admin"><span>◉</span>长期记忆</button>
+        <button class="nav-item" data-page="access" data-role-allow="admin"><span>◈</span>用户与权限</button>
+        <button class="nav-item" data-page="audit" data-role-allow="admin"><span>≡</span>审计日志</button>
+        <button class="nav-item" data-page="settings" data-role-allow="admin"><span>⚙</span>系统设置</button>
       </nav>
       <div class="sidebar-footer">
-        <div class="avatar">LA</div>
-        <div><strong>Local Admin</strong><span>tenant-a · ADMIN</span></div>
+        <div class="avatar" id="account-avatar">LA</div>
+        <div class="account-summary"><strong id="account-name">Local Admin</strong><span id="account-meta">tenant-a · ADMIN</span></div>
+        <button class="sidebar-logout" id="logout-button" type="button" title="退出登录">↪</button>
       </div>
     </aside>
 
@@ -65,9 +122,9 @@
       <section class="page" id="page-agent-chat">
         <div class="page-heading chat-heading">
           <div>
-            <p class="eyebrow">FUNCTION CALLING RUNTIME</p>
-            <h1>Agent 对话</h1>
-            <p>多轮会话、图片输入、Skills 与工具执行轨迹。</p>
+            <p class="eyebrow">TASK THREAD</p>
+            <h1>任务</h1>
+            <p>像 Codex 一样下任务：思考、调用工具、给出结果。同一会话可继续追问。</p>
           </div>
           <div class="chat-session-meta">
             <span class="session-pill" id="agent-session-pill" title="新会话"><i></i><span class="mono" id="agent-session-id">新会话</span></span>
@@ -90,20 +147,22 @@
             <div class="chat-main-head">
               <div>
                 <strong id="agent-chat-title">新会话</strong>
-                <span id="agent-live-status">流式输出 · 工具轨迹可见</span>
+                <span id="agent-live-status">等待任务</span>
               </div>
+              <span class="runtime-mode-badge" id="agent-runtime-mode">读取运行模式…</span>
             </div>
             <div id="agent-message-list" class="chat-messages"></div>
             <form id="agent-chat-form" class="chat-composer">
               <div class="composer-card">
-                <textarea id="agent-question" name="question" required minlength="2" rows="2" placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea>
+                <textarea id="agent-question" name="question" required minlength="2" rows="2" placeholder="描述一个任务，Enter 运行，Shift+Enter 换行"></textarea>
                 <div class="composer-bar">
                   <label class="model-field">模型<select id="agent-model-select" name="model_id"></select></label>
-                  <label class="seller-field">Seller<input id="agent-seller-id" name="seller_id" placeholder="可选"></label>
                   <input type="file" id="agent-image-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
                   <button type="button" class="ghost-button" id="agent-attach-image">添加图片</button>
                   <div id="agent-image-preview" class="composer-preview"></div>
-                  <button type="submit" class="primary" id="agent-send-button">发送</button>
+                  <button type="button" class="danger-button" id="agent-interrupt-button" hidden>停止</button>
+                  <button type="button" class="primary" id="agent-resume-button" hidden>继续</button>
+                  <button type="submit" class="primary" id="agent-send-button">运行</button>
                 </div>
               </div>
             </form>
@@ -112,10 +171,129 @@
       </section>
 
       <section class="page" id="page-agents">
-        <div class="page-heading"><div><p class="eyebrow">AGENT STUDIO</p><h1>Agents & 工具</h1><p>利润报表拆分为两个独立 Agent：领星开放平台实时接口与 PostgreSQL 本地仓查询。</p></div></div>
+        <div class="page-heading"><div><p class="eyebrow">AGENT STUDIO</p><h1>Agents</h1><p>决策核：Coordinator 拆任务并委派，Analyst 使用工具查数。凭证在连接器页配置，工具绑定在工具页选择。</p></div></div>
+        <article class="panel analyst-mode-panel">
+          <div>
+            <h2>Analyst 运行模式</h2>
+            <p>通用模式使用一个通用 Analyst；专业模式按领域选择专业 Analyst，同一会话最多并行 3 个。</p>
+          </div>
+          <form id="analyst-mode-form">
+            <label>委派策略
+              <select id="analyst-mode-select" name="mode">
+                <option value="general">通用 Analyst</option>
+                <option value="specialized_parallel">并行专业 Analyst（最多 3 个）</option>
+              </select>
+            </label>
+            <button type="submit" class="primary">保存并立即生效</button>
+          </form>
+        </article>
         <div id="agent-sections"></div>
-        <h2 class="section-title">工具策略</h2><div class="tool-grid" id="tool-grid"></div>
       </section>
+
+      <section class="page" id="page-tools">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">TOOL CATALOG</p>
+            <h1>工具</h1>
+            <p>查看 Runtime 已注册工具、风险策略，并为数据查询工具选择 Connection。</p>
+          </div>
+          <button class="secondary" type="button" data-go="connectors">前往连接器 →</button>
+        </div>
+        <div class="tool-grid" id="tool-grid"></div>
+      </section>
+
+      <section class="page" id="page-connectors">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">CONNECTORS</p>
+            <h1>连接器</h1>
+            <p>独立管理业务系统、数据库和向量数据库凭证，并在工具或知识库中选择使用。</p>
+          </div>
+          <button class="primary small" id="connection-add-button" type="button">＋ 添加连接</button>
+        </div>
+        <div class="connector-guide">
+          <article class="setting-card">
+            <h3>PostgreSQL 数据库</h3>
+            <p>配置只读 DSN。Amazon 结算与利润表查询走此连接。</p>
+          </article>
+          <article class="setting-card">
+            <h3>领星 OpenAPI</h3>
+            <p>在领星 ERP「设置 → 业务配置 → 开放接口」获取 App ID / Secret，并把本机出口 IP 加入白名单。</p>
+          </article>
+          <article class="setting-card">
+            <h3>金蝶云星空</h3>
+            <p>在「基础管理 → 公共设置 → Web API」完成第三方登录授权，服务地址以 /K3Cloud 结尾。</p>
+          </article>
+          <article class="setting-card">
+            <h3>Qdrant / Milvus</h3>
+            <p>配置向量数据库地址和访问凭证，然后在「知识库」中创建知识空间。</p>
+          </article>
+        </div>
+        <div class="agent-grid" id="connection-grid"></div>
+      </section>
+
+      <div class="drawer-backdrop" id="connection-editor-drawer">
+        <aside class="drawer">
+          <button class="modal-close" data-close-connection-editor type="button">×</button>
+          <p class="eyebrow">CONNECTOR CONFIG</p>
+          <h2 id="connection-editor-title">添加连接器</h2>
+          <p id="connection-editor-subtitle">在页面中保存连接凭证和可访问数据范围</p>
+          <form id="connection-editor-form">
+            <label>连接名称<input id="connection-edit-name" required maxlength="120" placeholder="例如 华东生产库"></label>
+            <label>连接类型<select id="connection-edit-type"><option value="analytics">数据分析数据库</option><option value="lingxing">领星 OpenAPI</option><option value="kingdee">金蝶云星空</option><option value="dingtalk">钉钉</option><option value="qdrant">Qdrant 向量数据库</option><option value="milvus">Milvus 向量数据库</option></select></label>
+            <label class="context-toggle"><input id="connection-edit-enabled" type="checkbox" checked>启用此连接</label>
+            <div id="connection-fields-analytics">
+              <label>数据库类型<select id="connection-edit-database-type" onchange="updateAnalyticsDatabaseFields()"><option value="postgresql">PostgreSQL</option><option value="mysql">MySQL</option></select></label>
+              <label><span id="connection-edit-dsn-label">PostgreSQL DSN</span><input id="connection-edit-dsn" type="password" autocomplete="new-password" placeholder="postgresql://user:password@host/db"></label>
+            </div>
+            <div id="connection-fields-lingxing" hidden>
+              <label>App ID<input id="connection-edit-lingxing-app-id" maxlength="128"></label>
+              <label>App Secret<input id="connection-edit-lingxing-secret" type="password" autocomplete="new-password"></label>
+              <label>API Base URL<input id="connection-edit-lingxing-url" maxlength="256" value="https://openapi.lingxing.com"></label>
+            </div>
+            <div id="connection-fields-kingdee" hidden>
+              <label>服务地址<input id="connection-edit-kingdee-url" maxlength="256" placeholder="https://erp.example.com/K3Cloud"></label>
+              <label>账套 ID<input id="connection-edit-kingdee-acct" maxlength="128"></label>
+              <label>应用 ID<input id="connection-edit-kingdee-app-id" maxlength="128"></label>
+              <label>应用密钥<input id="connection-edit-kingdee-secret" type="password" autocomplete="new-password"></label>
+              <label>集成用户名<input id="connection-edit-kingdee-user" maxlength="128"></label>
+              <label>语言 LCID<input id="connection-edit-kingdee-lcid" type="number" min="1" max="9999" value="2052"></label>
+            </div>
+            <div id="connection-fields-dingtalk" hidden>
+              <label>AppKey<input id="connection-edit-dingtalk-app-key" maxlength="128" placeholder="dingxxxxxxxx"></label>
+              <label>AppSecret<input id="connection-edit-dingtalk-secret" type="password" autocomplete="new-password"></label>
+              <label>RobotCode<input id="connection-edit-dingtalk-robot-code" maxlength="128" placeholder="企业内部应用机器人编码，通常与 AppKey 一致"></label>
+              <label>默认待办创建者 UnionId<input id="connection-edit-dingtalk-owner" maxlength="128" placeholder="可留空，调用时指定"></label>
+              <label>API Base URL<input id="connection-edit-dingtalk-url" maxlength="256" value="https://api.dingtalk.com" readonly></label>
+            </div>
+            <div id="connection-fields-qdrant" hidden>
+              <label>Qdrant URL<input id="connection-edit-qdrant-url" maxlength="512" placeholder="https://your-cluster.qdrant.io"></label>
+              <label>API Key<input id="connection-edit-qdrant-key" type="password" autocomplete="new-password" placeholder="本地无鉴权实例可留空"></label>
+            </div>
+            <div id="connection-fields-milvus" hidden>
+              <label>Milvus URI<input id="connection-edit-milvus-uri" maxlength="512" placeholder="http://127.0.0.1:19530"></label>
+              <label>Token<input id="connection-edit-milvus-token" type="password" autocomplete="new-password" placeholder="例如 root:Milvus，无鉴权可留空"></label>
+              <label>Database<input id="connection-edit-milvus-database" maxlength="128" value="default"></label>
+            </div>
+            <div id="connection-scopes-data">
+              <label>可访问店铺<input id="connection-edit-stores" placeholder="逗号分隔，* 表示全部"></label>
+              <label>可访问领星店铺 ID<input id="connection-edit-sids" placeholder="逗号分隔，* 表示全部"></label>
+            </div>
+            <div id="connection-scopes-dingtalk" hidden>
+              <label>允许单聊的用户 UserId<input id="connection-edit-dingtalk-user-ids" placeholder="逗号分隔，建议明确列出"></label>
+              <label>允许发送的群 openConversationId<input id="connection-edit-dingtalk-conversation-ids" placeholder="逗号分隔，建议明确列出"></label>
+              <label>允许待办的人员 UnionId<input id="connection-edit-dingtalk-union-ids" placeholder="包括创建者、执行人和参与人"></label>
+              <p class="form-hint">留空表示不允许向该类目标推送；仅在确需全量时使用 *。</p>
+            </div>
+            <p class="form-hint">运行时只使用本页保存的连接；保存后请到“工具”页选择该连接。</p>
+            <div class="modal-actions">
+              <button type="button" class="danger-button" id="connection-edit-delete" hidden>删除</button>
+              <button type="button" class="secondary" data-close-connection-editor>取消</button>
+              <button type="submit" class="primary" id="connection-edit-save">保存连接</button>
+            </div>
+          </form>
+        </aside>
+      </div>
 
       <div class="drawer-backdrop" id="agent-editor-drawer">
         <aside class="drawer">
@@ -129,39 +307,6 @@
             <label>说明<textarea id="agent-edit-description" name="description" rows="3" maxlength="2000"></textarea></label>
             <label class="context-toggle"><input id="agent-edit-enabled" name="enabled" type="checkbox">启用此 Agent</label>
             <label>System Prompt<textarea id="agent-edit-system-prompt" name="system_prompt" rows="12" maxlength="12000"></textarea></label>
-            <div id="agent-edit-integration-wrap" hidden>
-              <div id="agent-edit-lingxing-wrap" class="tool-picker" hidden>
-                <div class="tool-picker-head">
-                  <strong>领星开放平台凭证</strong>
-                  <p class="form-hint">完成下列步骤后再保存凭证，否则接口会返回鉴权或白名单错误。</p>
-                </div>
-                <ol class="integration-setup-steps">
-                  <li>在领星 ERP <strong>设置 → 业务配置 → 开放接口</strong> 获取 <strong>App ID</strong> 与 <strong>App Secret</strong></li>
-                  <li>将<strong>本服务器出口 IP</strong> 加入领星开放接口白名单</li>
-                  <li>在下方填写凭证，勾选<strong>启用此 Agent</strong>，并点击保存配置</li>
-                </ol>
-                <label>App ID<input id="agent-edit-lingxing-app-id" name="integration_app_id" maxlength="128" autocomplete="off"></label>
-                <label>App Secret<input id="agent-edit-lingxing-app-secret" name="integration_app_secret" type="password" maxlength="256" autocomplete="new-password" placeholder="留空则保持原密钥"></label>
-                <label>API Base URL<input id="agent-edit-lingxing-base-url" name="integration_base_url" maxlength="256" placeholder="https://openapi.lingxing.com"></label>
-              </div>
-              <div id="agent-edit-kingdee-wrap" class="tool-picker" hidden>
-                <div class="tool-picker-head">
-                  <strong>金蝶云星空 WebAPI 凭证</strong>
-                  <p class="form-hint">私有云 DynamicFormService 对接。请先在金蝶后台完成第三方系统登录授权。</p>
-                </div>
-                <ol class="integration-setup-steps">
-                  <li>在金蝶云星空 <strong>基础管理 → 公共设置 → Web API</strong> 配置第三方系统登录授权</li>
-                  <li>获取 <strong>账套 ID、应用 ID、应用密钥、集成用户名</strong></li>
-                  <li>填写服务地址（以 <strong>/K3Cloud</strong> 结尾），勾选<strong>启用此 Agent</strong> 并保存</li>
-                </ol>
-                <label>服务地址<input id="agent-edit-kingdee-server-url" name="integration_server_url" maxlength="256" placeholder="https://erp.example.com/K3Cloud"></label>
-                <label>账套 ID<input id="agent-edit-kingdee-acct-id" name="integration_acct_id" maxlength="128" autocomplete="off"></label>
-                <label>应用 ID<input id="agent-edit-kingdee-app-id" name="integration_app_id" maxlength="128" autocomplete="off"></label>
-                <label>应用密钥<input id="agent-edit-kingdee-app-secret" name="integration_app_secret" type="password" maxlength="256" autocomplete="new-password" placeholder="留空则保持原密钥"></label>
-                <label>集成用户名<input id="agent-edit-kingdee-username" name="integration_username" maxlength="128" autocomplete="off"></label>
-                <label>语言 LCID<input id="agent-edit-kingdee-lcid" name="integration_lcid" type="number" min="1" max="9999" value="2052"></label>
-              </div>
-            </div>
             <div id="agent-edit-tools-wrap" hidden>
               <div class="tool-picker">
                 <div class="tool-picker-head">
@@ -202,12 +347,24 @@
           <form id="model-editor-form">
             <label id="model-edit-id-wrap">模型 ID<input id="model-edit-id" name="id" pattern="[a-z0-9][a-z0-9._-]*" maxlength="64" placeholder="例如 zhipu-glm4"></label>
             <label>显示名称<input id="model-edit-name" name="name" required maxlength="120"></label>
-            <label>Provider<select id="model-edit-provider" name="provider"><option value="zhipu">zhipu</option><option value="openai">openai</option><option value="mock">mock</option></select></label>
-            <label>模型名称<input id="model-edit-model-name" name="model_name" required maxlength="120" placeholder="glm-4-flash"></label>
+            <label>Provider<select id="model-edit-provider" name="provider"><option value="zhipu">zhipu（智谱）</option><option value="qwen">qwen（通义千问）</option><option value="deepseek">deepseek</option><option value="openai">openai</option></select></label>
+            <label>模型名称<input id="model-edit-model-name" name="model_name" required maxlength="120" placeholder="glm-5.2"></label>
             <label>API Key<input id="model-edit-api-key" name="api_key" type="password" maxlength="512" autocomplete="new-password" placeholder="留空则保持原密钥"></label>
             <label>Base URL<input id="model-edit-base-url" name="base_url" maxlength="256" placeholder="可选，智谱默认留空"></label>
-            <label>Vision 模型<input id="model-edit-vision-model" name="vision_model_name" maxlength="120" placeholder="可选，支持图片时填写"></label>
+            <fieldset class="model-capability-fieldset">
+              <legend>输入能力</legend>
+              <label class="context-toggle"><input id="model-edit-supports-image" name="supports_image_input" type="checkbox">支持图片输入</label>
+              <label class="context-toggle"><input id="model-edit-supports-audio" name="supports_audio_input" type="checkbox">支持语音输入</label>
+              <p class="form-hint">未开启的输入类型会在调用模型前被拦截。</p>
+            </fieldset>
+            <label id="model-edit-vision-model-wrap" hidden>图片模型（可选）<input id="model-edit-vision-model" name="vision_model_name" maxlength="120" placeholder="与文本模型不同时填写"></label>
             <label>Temperature<input id="model-edit-temperature" name="temperature" type="number" min="0" max="2" step="0.1" placeholder="留空使用默认"></label>
+            <div id="model-edit-thinking-wrap" hidden>
+              <label class="context-toggle"><input id="model-edit-enable-thinking" name="enable_thinking" type="checkbox">启用思考模式（thinking）</label>
+              <p id="model-edit-thinking-hint" class="form-hint">多轮对话会保留问答和工具结果，但不会把上一轮思考过程回传给模型。</p>
+              <label id="model-edit-thinking-budget-wrap">思考预算 thinking_budget<input id="model-edit-thinking-budget" name="thinking_budget" type="number" min="1" max="38912" placeholder="8192"></label>
+              <label id="model-edit-reasoning-effort-wrap" hidden>思考强度 reasoning_effort<select id="model-edit-reasoning-effort" name="reasoning_effort"><option value="high">high（默认）</option><option value="low">low</option><option value="max">max</option></select></label>
+            </div>
             <label class="context-toggle"><input id="model-edit-enabled" name="enabled" type="checkbox">启用此模型</label>
             <label class="context-toggle"><input id="model-edit-default" name="is_default" type="checkbox">设为默认模型</label>
             <div class="modal-actions">
@@ -220,13 +377,82 @@
       </div>
 
       <section class="page" id="page-knowledge">
-        <div class="page-heading"><div><p class="eyebrow">GROUNDING</p><h1>知识库</h1><p>检索后端、集合和 Embedding 配置。</p></div></div>
-        <div class="settings-grid" id="knowledge-settings"></div>
+        <div class="page-heading"><div><p class="eyebrow">GROUNDING</p><h1>知识库</h1><p>为每个知识空间选择向量数据库，并配置集合与检索参数。</p></div><button class="primary small" id="knowledge-add-button" type="button">＋ 添加知识空间</button></div>
+        <article class="info-banner"><b>配置顺序</b><span>先在「连接器」中创建 Qdrant 或 Milvus 连接，再在这里绑定 Collection 和 Embedding 参数。</span></article>
+        <h2 class="section-title">知识空间</h2>
+        <div class="agent-grid" id="knowledge-settings"></div>
       </section>
+
+      <div class="drawer-backdrop" id="knowledge-editor-drawer">
+        <aside class="drawer access-editor">
+          <button class="modal-close" data-close-knowledge-editor type="button">×</button>
+          <p class="eyebrow">KNOWLEDGE SPACE</p>
+          <h2 id="knowledge-editor-title">添加知识空间</h2>
+          <p>选择向量数据库连接和已存在的 Collection。</p>
+          <form id="knowledge-editor-form">
+            <label>空间名称<input id="knowledge-edit-name" required maxlength="120" placeholder="例如 运营制度库"></label>
+            <label>向量数据库<select id="knowledge-edit-connection" required></select></label>
+            <label>Collection<input id="knowledge-edit-collection" required maxlength="255" placeholder="knowledge_chunks"></label>
+            <label>Embedding 模型<input id="knowledge-edit-embedding" required maxlength="255" value="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"></label>
+            <div class="form-row"><label>向量维度<input id="knowledge-edit-dimension" type="number" min="1" max="65536" value="384"></label><label>Top K<input id="knowledge-edit-top-k" type="number" min="1" max="100" value="5"></label></div>
+            <label>向量字段（可选）<input id="knowledge-edit-vector-field" maxlength="128" placeholder="Qdrant 默认向量可留空"></label>
+            <div class="form-row"><label>文本字段<input id="knowledge-edit-text-field" required maxlength="128" value="text"></label><label>分类字段<input id="knowledge-edit-category-field" required maxlength="128" value="category"></label></div>
+            <div class="form-row"><label>租户过滤字段<input id="knowledge-edit-tenant-field" maxlength="128" value="tenant_id"></label><label>知识库过滤字段<input id="knowledge-edit-kb-field" maxlength="128" value="knowledge_base_id"></label></div>
+            <label>知识库 ID<input id="knowledge-edit-kb-id" maxlength="160" value="default"></label>
+            <label class="context-toggle"><input id="knowledge-edit-enabled" type="checkbox" checked>启用此知识空间</label>
+            <div class="modal-actions"><button type="button" class="danger-button" id="knowledge-edit-delete" hidden>删除</button><button type="button" class="secondary" data-close-knowledge-editor>取消</button><button type="submit" class="primary" id="knowledge-edit-save">保存配置</button></div>
+          </form>
+        </aside>
+      </div>
+
+      <div class="drawer-backdrop" id="knowledge-content-drawer">
+        <aside class="drawer knowledge-content-drawer">
+          <button class="modal-close" data-close-knowledge-content type="button">×</button>
+          <p class="eyebrow">KNOWLEDGE CONTENT</p>
+          <h2 id="knowledge-content-title">知识库内容</h2>
+          <p id="knowledge-content-summary" class="form-hint"></p>
+          <div class="knowledge-category-bar" id="knowledge-category-bar"></div>
+          <div class="knowledge-content-list" id="knowledge-content-list"></div>
+          <div class="knowledge-content-actions"><button class="secondary" id="knowledge-content-more" type="button" hidden>加载更多</button></div>
+        </aside>
+      </div>
 
       <section class="page" id="page-audit">
         <div class="page-heading"><div><p class="eyebrow">GOVERNANCE</p><h1>审计日志</h1><p>记录 Agent 查询、人工决策和关键资源操作。</p></div></div>
         <article class="panel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>资源</th><th>详情</th></tr></thead><tbody id="audit-table"></tbody></table></div></article>
+      </section>
+
+      <section class="page" id="page-access">
+        <div class="page-heading">
+          <div><p class="eyebrow">TENANT RBAC</p><h1>用户与权限</h1><p>用户加入权限组，在权限组中直接配置可使用的业务 Tool。</p></div>
+        </div>
+        <article class="info-banner"><b>生效边界</b><span>记忆、Skill、沙箱和子 Agent 委派属于系统基础 Tool，所有已启用用户默认拥有，不进入权限规则选择。Admin 默认拥有全部业务 Tool 权限；其他角色的最终数据权限 = 用户规则允许的业务 Tool ∩ Tool 绑定的数据范围 ∩ Connection 允许的数据范围。</span></article>
+        <div class="access-create-actions" aria-label="新增权限对象">
+          <div><b>权限对象</b><span>新增用户或权限组，然后在权限组中多选 Tool 权限。</span></div>
+          <div class="access-create-buttons">
+            <button class="secondary" type="button" data-open-access-editor="user">＋ 添加用户</button>
+            <button class="secondary" type="button" data-open-access-editor="group">＋ 添加权限组</button>
+          </div>
+        </div>
+        <h2 class="section-title">用户与组</h2><div class="agent-grid" id="access-user-grid"></div>
+        <h2 class="section-title">权限组与 Tool 权限（M : N）</h2><div class="agent-grid" id="access-group-grid"></div>
+        <h2 class="section-title">规则明细（只读）</h2><div class="agent-grid" id="access-rule-grid"></div>
+      </section>
+
+      <section class="page" id="page-memory">
+        <div class="page-heading">
+          <div><p class="eyebrow">LONG-TERM MEMORY</p><h1>长期记忆</h1><p>管理用户、组织和 Agent 记忆，审核自动候选并执行纠错或合规删除。</p></div>
+          <button class="primary" id="memory-add-button" type="button">＋ 添加记忆</button>
+        </div>
+        <div class="metric-grid" id="memory-metrics"></div>
+        <article class="panel memory-toolbar">
+          <label>状态<select id="memory-filter-status"><option value="">全部</option><option value="candidate">待确认</option><option value="conflicted">有冲突</option><option value="active">已生效</option><option value="superseded">已替代</option><option value="deleted">已删除</option></select></label>
+          <label>范围<select id="memory-filter-scope"><option value="">全部</option><option value="user">用户</option><option value="profile">用户画像</option><option value="tenant">组织知识</option><option value="agent">Agent</option></select></label>
+          <label>用户 ID<input id="memory-filter-user" placeholder="全部用户"></label>
+          <label class="memory-search">语义检索<input id="memory-filter-query" placeholder="输入关键词或语义问题"></label>
+          <button class="secondary" id="memory-search-button" type="button">筛选</button>
+        </article>
+        <div class="memory-list" id="memory-list"></div>
       </section>
 
       <section class="page" id="page-settings">
@@ -263,12 +489,72 @@
           <div class="agent-grid" id="model-grid"></div>
         </article>
         <div class="settings-grid" id="system-settings"></div>
-        <article class="panel api-access"><div><h2>开发身份</h2><p>本地控制台使用请求头模拟 tenant 和角色。生产环境必须替换为 OIDC/JWT 服务端声明。</p></div><div class="form-row"><label>API Key<input id="api-key-input" type="password" placeholder="未配置"></label><label>Tenant<input id="tenant-input" value="tenant-a"></label><label>角色<select id="role-input"><option>admin</option><option>operator</option><option>approver</option><option>viewer</option></select></label><button class="secondary" id="save-session">保存会话</button></div></article>
+        <article class="panel api-access"><div><h2>开发身份</h2><p>本地控制台使用请求头模拟 tenant、user 和角色。生产环境必须替换为 OIDC/JWT 服务端声明。</p></div><div class="form-row"><label>API Key<input id="api-key-input" type="password" placeholder="未配置"></label><label>Tenant<input id="tenant-input" value="tenant-a"></label><label>User ID<input id="user-id-input" value="local-admin"></label><label>角色<select id="role-input"><option>admin</option><option>operator</option><option>approver</option><option>viewer</option></select></label><button class="secondary" id="save-session">保存会话</button></div></article>
       </section>
     </main>
   </div>
 
+  <div class="drawer-backdrop" id="result-viewer-drawer">
+    <aside class="drawer result-viewer">
+      <button class="modal-close" data-close-result-viewer type="button">×</button>
+      <p class="eyebrow">MATERIALIZED RESULT</p>
+      <h2 id="result-viewer-title">完整查询结果</h2>
+      <p id="result-viewer-summary"></p>
+      <div class="result-stat-grid" id="result-viewer-stats"></div>
+      <div class="table-wrap result-table-wrap"><table><thead id="result-viewer-head"></thead><tbody id="result-viewer-body"></tbody></table></div>
+      <div class="result-pagination"><span id="result-viewer-page"></span><div><button class="secondary" id="result-viewer-prev" type="button">上一页</button><button class="secondary" id="result-viewer-next" type="button">下一页</button></div></div>
+    </aside>
+  </div>
+
+  <div class="drawer-backdrop" id="access-editor-drawer">
+    <aside class="drawer access-editor">
+      <button class="modal-close" data-close-access-editor type="button" aria-label="关闭">×</button>
+      <p class="eyebrow">ACCESS CONTROL</p>
+      <h2 id="access-editor-title">添加用户</h2>
+      <p id="access-editor-description">创建一个可加入权限组的用户身份。</p>
+      <form id="access-user-form" data-access-form="user">
+        <label>User ID<input id="access-user-id" required></label>
+        <label>显示名<input id="access-user-name" required></label>
+        <label>账户角色<select id="access-user-role"><option value="viewer">Viewer · 只读</option><option value="operator">Operator · 操作员</option><option value="approver">Approver · 审批员</option><option value="admin">Admin · 管理员</option></select></label>
+        <label>临时密码<input id="access-user-password" type="password" minlength="10" autocomplete="new-password" placeholder="至少 10 位，包含大小写字母和数字"></label>
+        <label class="context-toggle"><input id="access-user-generate-password" type="checkbox">由系统生成安全临时密码</label>
+        <p class="form-hint">临时密码只在创建/重置后显示一次。用户首次登录必须修改密码。</p>
+        <label class="context-toggle"><input id="access-user-enabled" type="checkbox" checked>启用</label>
+        <div class="modal-actions"><button class="secondary" type="button" data-close-access-editor>取消</button><button class="primary" type="submit">保存用户</button></div>
+      </form>
+      <form id="access-group-form" data-access-form="group" hidden>
+        <label>名称<input id="access-group-name" required></label>
+        <label>说明<input id="access-group-description"></label>
+        <div class="modal-actions"><button class="secondary" type="button" data-close-access-editor>取消</button><button class="primary" id="access-group-submit" type="submit">创建权限组</button></div>
+      </form>
+    </aside>
+  </div>
+
+  <div class="drawer-backdrop" id="memory-editor-drawer">
+    <aside class="drawer">
+      <button class="modal-close" data-close-memory-editor type="button" aria-label="关闭">×</button>
+      <p class="eyebrow">MEMORY ITEM</p>
+      <h2>添加长期记忆</h2>
+      <p>后台管理员可创建用户、组织或 Agent 范围的已确认记忆。</p>
+      <form id="memory-editor-form">
+        <label>内容<textarea id="memory-content" rows="5" minlength="2" required></textarea></label>
+        <label>规范键<input id="memory-key" maxlength="160" placeholder="例如 report-currency"></label>
+        <div class="form-row">
+          <label>范围<select id="memory-scope"><option value="user">用户</option><option value="profile">用户画像</option><option value="tenant">组织知识</option><option value="agent">Agent</option></select></label>
+          <label>类型<select id="memory-kind"><option value="fact">事实</option><option value="preference">偏好</option><option value="profile">画像</option><option value="organization">组织知识</option><option value="agent">Agent 知识</option></select></label>
+        </div>
+        <label id="memory-owner-field">用户 ID<input id="memory-owner-user" placeholder="默认当前管理员"></label>
+        <label id="memory-agent-field" hidden>Agent ID<input id="memory-agent-id" placeholder="例如 profit-analyst"></label>
+        <div class="form-row">
+          <label>重要度（0~1）<input id="memory-importance" type="number" min="0" max="1" step="0.05" value="0.5"></label>
+          <label>有效天数<input id="memory-expiry" type="number" min="1" max="3650" placeholder="永久"></label>
+        </div>
+        <div class="modal-actions"><button class="secondary" data-close-memory-editor type="button">取消</button><button class="primary" type="submit">保存记忆</button></div>
+      </form>
+    </aside>
+  </div>
+
   <div class="toast" id="toast"></div>
-  <script src="/ui/app.js?v=p8-kingdee" defer></script>
+  <script src="/ui/app.js?v=p30-auth-boot" defer></script>
 </body>
 </html>
