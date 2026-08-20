@@ -3,11 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ArkFlow · Agent Operations</title>
+  <title>ArkFlow · 任务</title>
   <link rel="icon" href="/ui/favicon.svg?v=ark-a1" type="image/svg+xml">
   <link rel="icon" href="/favicon.ico?v=ark-a1" sizes="32x32">
   <link rel="apple-touch-icon" href="/ui/apple-touch-icon.png?v=ark-a1">
-  <link rel="stylesheet" href="/ui/styles.css?v=p30-auth-boot">
+  <link rel="stylesheet" href="/ui/styles.css?v=prod-ui-53">
+  <link rel="stylesheet" href="/ui/transitions.css?v=prod-ui-53">
   <style>
     html.auth-restoring .auth-card,
     html.auth-restoring .auth-error{visibility:hidden!important;pointer-events:none}
@@ -23,149 +24,168 @@
   </script>
 </head>
 <body>
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
   <div class="auth-gate open" id="auth-gate">
     <p class="auth-restore-hint">正在进入…</p>
-    <section class="auth-card">
-      <div class="auth-brand"><div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#F2B946"/><path fill="#102F31" d="M16 4.8 27.8 28h-5.6l-1.6-4H11.4l-1.6 4H4.2L16 4.8zm-3.2 14.6h6.4L16 12.4l-3.2 7z"/><path fill="none" stroke="#167262" stroke-width="2.15" stroke-linecap="round" d="M7.2 23.2c2.9-2.1 5.2 1.4 8.8-.5 3.6-1.9 5.8 1.6 8.8-.4"/></svg></div><div><strong>ArkFlow</strong><span>安全账户中心</span></div></div>
+    <section class="auth-card t-modal is-open" id="auth-card">
+      <div class="auth-brand"><div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#F2B946"/><path fill="#102F31" d="M16 4.8 27.8 28h-5.6l-1.6-4H11.4l-1.6 4H4.2L16 4.8zm-3.2 14.6h6.4L16 12.4l-3.2 7z"/><path fill="none" stroke="#167262" stroke-width="2.15" stroke-linecap="round" d="M7.2 23.2c2.9-2.1 5.2 1.4 8.8-.5 3.6-1.9 5.8 1.6 8.8-.4"/></svg></div><div><strong>ArkFlow</strong><span>运营工作台</span></div></div>
       <div id="auth-login-pane">
-        <p class="eyebrow">WELCOME BACK</p><h1>登录账户</h1><p>登录后进入 Agent Operations 控制台。</p>
+        <h1>登录</h1><p>使用管理员下发的账号进入工作台。</p>
         <form id="login-form">
-          <label>Tenant<input id="login-tenant" value="tenant-a" autocomplete="organization" required></label>
-          <label>User ID<input id="login-user" autocomplete="username" required></label>
-          <label>密码<input id="login-password" type="password" autocomplete="current-password" required></label>
+          <label>租户<input id="login-tenant" autocomplete="organization" required></label>
+          <label>账号<input id="login-user" autocomplete="username" required></label>
+          <label>密码<span class="password-wrap"><input id="login-password" type="password" autocomplete="current-password" required><button type="button" class="password-toggle" data-toggle-password="login-password" aria-label="显示密码">显示</button></span></label>
           <button class="primary auth-submit" type="submit">登录</button>
         </form>
-        <button class="auth-switch text-button" id="show-register" type="button">还没有账户？注册</button>
+        <button class="auth-switch text-button" id="show-register" type="button" data-dev-only hidden>本地首次部署？创建管理员</button>
       </div>
       <div id="auth-register-pane" hidden>
-        <p class="eyebrow">CREATE TENANT ACCOUNT</p><h1>注册账户</h1><p>创建新租户的首个管理员账户。加入已有租户请联系管理员获取临时密码。</p>
+        <h1>创建管理员</h1><p>仅用于本地首次部署。加入已有组织请联系管理员开通账号。</p>
         <form id="register-form">
-          <label>Tenant<input id="register-tenant" value="tenant-a" required pattern="[A-Za-z0-9_.-]+"></label>
-          <label>User ID<input id="register-user" autocomplete="username" required pattern="[A-Za-z0-9_.@-]+"></label>
+          <label>租户<input id="register-tenant" required pattern="[A-Za-z0-9_.-]+"></label>
+          <label>账号<input id="register-user" autocomplete="username" required pattern="[A-Za-z0-9_.@-]+"></label>
           <label>显示名<input id="register-name" required></label>
           <label>密码<input id="register-password" type="password" autocomplete="new-password" minlength="10" required></label>
           <label>确认密码<input id="register-confirm" type="password" autocomplete="new-password" minlength="10" required></label>
           <p class="form-hint">至少 10 位，并包含大写字母、小写字母和数字。</p>
-          <button class="primary auth-submit" type="submit">注册并登录</button>
+          <button class="primary auth-submit" type="submit">创建并登录</button>
         </form>
-        <button class="auth-switch text-button" id="show-login" type="button">已有账户？返回登录</button>
+        <button class="auth-switch text-button" id="show-login" type="button">返回登录</button>
       </div>
       <div id="auth-password-pane" hidden>
-        <p class="eyebrow">PASSWORD UPDATE</p><h1>设置新密码</h1><p>这是临时密码的首次登录。完成修改后才能进入系统。</p>
+        <h1 id="auth-password-title">设置新密码</h1><p id="auth-password-copy">首次登录需修改临时密码后才能进入系统。</p>
         <form id="change-password-form">
-          <label>当前临时密码<input id="change-current-password" type="password" required></label>
+          <label><span id="change-current-label">当前密码</span><input id="change-current-password" type="password" required></label>
           <label>新密码<input id="change-new-password" type="password" minlength="10" required></label>
           <label>确认新密码<input id="change-confirm-password" type="password" minlength="10" required></label>
-          <button class="primary auth-submit" type="submit">修改密码并进入</button>
+          <button class="primary auth-submit" type="submit">保存密码</button>
         </form>
+        <button class="auth-switch text-button" id="cancel-password" type="button" hidden>取消</button>
       </div>
       <p class="auth-error" id="auth-error" role="alert"></p>
     </section>
   </div>
   <div class="app-shell">
     <aside class="sidebar">
-      <div class="brand">
+      <button class="brand" id="brand-home" type="button" title="运行概览">
         <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#F2B946"/><path fill="#102F31" d="M16 4.8 27.8 28h-5.6l-1.6-4H11.4l-1.6 4H4.2L16 4.8zm-3.2 14.6h6.4L16 12.4l-3.2 7z"/><path fill="none" stroke="#167262" stroke-width="2.15" stroke-linecap="round" d="M7.2 23.2c2.9-2.1 5.2 1.4 8.8-.5 3.6-1.9 5.8 1.6 8.8-.4"/></svg></div>
-        <div><strong>ArkFlow</strong><span>Agent Operations</span></div>
-      </div>
-      <div class="environment"><i></i><span>Development</span><b>LOCAL</b></div>
+        <div><strong>ArkFlow</strong><span>运营工作台</span></div>
+      </button>
+      <div class="environment" id="env-badge" hidden><i></i><span>测试环境</span></div>
       <nav id="navigation">
-        <button class="nav-item active" data-page="dashboard" data-role-allow="admin"><span>◫</span>运行概览</button>
-        <button class="nav-item" data-page="approvals" data-role-allow="admin approver"><span>◇</span>审批中心<i id="approval-badge">0</i></button>
-        <div class="nav-label">BUILD</div>
-        <button class="nav-item" data-page="agent-chat"><span>◉</span>任务</button>
-        <button class="nav-item" data-page="agents"><span>✣</span>Agents</button>
-        <button class="nav-item" data-page="tools"><span>⚒</span>工具</button>
-        <button class="nav-item" data-page="connectors" data-role-allow="admin"><span>☍</span>连接器</button>
-        <button class="nav-item" data-page="knowledge"><span>▤</span>知识库</button>
-        <div class="nav-label" data-role-allow="admin">MANAGE</div>
-        <button class="nav-item" data-page="memory" data-role-allow="admin"><span>◉</span>长期记忆</button>
-        <button class="nav-item" data-page="access" data-role-allow="admin"><span>◈</span>用户与权限</button>
-        <button class="nav-item" data-page="audit" data-role-allow="admin"><span>≡</span>审计日志</button>
-        <button class="nav-item" data-page="settings" data-role-allow="admin"><span>⚙</span>系统设置</button>
+        <div class="nav-label">工作</div>
+        <button class="nav-item active" data-page="guide"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M4.2 3.2h7.6v10.2H4.2z" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M6 6.2h4M6 8.6h4M6 11h2.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span>使用指南</button>
+        <button class="nav-item" data-page="agent-chat"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M3 4.5h10M3 8h7M3 11.5h5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span>任务</button>
+        <button class="nav-item" data-page="approvals" data-role-allow="admin approver"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M4 3.5h8v9H4z" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="m6 8 1.4 1.4L10.5 6.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></span>审批中心<i id="approval-badge" hidden>0</i></button>
+        <button class="nav-item" data-page="knowledge" data-role-allow="admin"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M4 3.2h8v9.6H4z" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M6 6h4M6 8.5h4M6 11h2.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span>知识库</button>
+        <div class="nav-label" data-role-allow="admin">管理</div>
+        <button class="nav-item" data-page="dashboard" data-role-allow="admin"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M3 12V8h3v4H3zm4 0V4h3v8H7zm4 0V6h3v6h-3z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg></span>运行概览</button>
+        <button class="nav-item" data-page="agents"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><circle cx="8" cy="5.5" r="2.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M3.5 13c.6-2.2 2.3-3.4 4.5-3.4S12 10.8 12.5 13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span>助手</button>
+        <button class="nav-item" data-page="tools"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M9.2 3.6 12.4 6.8 7 12.2H3.8V9z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg></span>工具</button>
+        <button class="nav-item" data-page="connectors" data-role-allow="admin"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M6 8h4M4.2 5.2 2.8 6.6a2 2 0 0 0 0 2.8L4.2 10.8M11.8 5.2l1.4 1.4a2 2 0 0 1 0 2.8l-1.4 1.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span>连接器</button>
+        <button class="nav-item" data-page="memory" data-role-allow="admin"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M4 12.5V5.2A2.2 2.2 0 0 1 8 5.2a2.2 2.2 0 0 1 4 0v7.3H4z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg></span>长期记忆</button>
+        <button class="nav-item" data-page="access" data-role-allow="admin"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><circle cx="6" cy="6" r="2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M3 12.2c.4-1.8 1.6-2.7 3-2.7s2.6.9 3 2.7M11 7.2v4.6M9 9.5h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span>用户与权限</button>
+        <button class="nav-item" data-page="audit" data-role-allow="admin"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M4 3.5h8v9H4z" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M6 6.5h4M6 9h4M6 11.5h2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span>审计日志</button>
+        <button class="nav-item" data-page="settings" data-role-allow="admin"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.1" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 2.8v1.4M8 11.8v1.4M2.8 8h1.4M11.8 8h1.4M4.2 4.2l1 1M10.8 10.8l1 1M11.8 4.2l-1 1M5.2 10.8l-1 1" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span>系统设置</button>
       </nav>
-      <div class="sidebar-footer">
-        <div class="avatar" id="account-avatar">LA</div>
-        <div class="account-summary"><strong id="account-name">Local Admin</strong><span id="account-meta">tenant-a · ADMIN</span></div>
-        <button class="sidebar-logout" id="logout-button" type="button" title="退出登录">↪</button>
+      <div class="sidebar-footer account-menu">
+        <button class="account-menu-trigger" id="account-menu-button" type="button" aria-haspopup="menu" aria-expanded="false">
+          <div class="avatar" id="account-avatar">—</div>
+          <div class="account-summary"><strong id="account-name">未登录</strong><span id="account-meta">—</span></div>
+        </button>
+        <div class="account-menu-panel t-dropdown" id="account-menu-panel" data-origin="bottom-left">
+          <button type="button" class="account-menu-item" id="change-password-button">修改密码</button>
+          <button type="button" class="account-menu-item danger" id="logout-button">退出登录</button>
+        </div>
       </div>
     </aside>
 
-    <main class="main">
+    <main class="main" id="main-content">
       <header class="topbar">
-        <button class="mobile-menu" id="mobile-menu">☰</button>
-        <div class="breadcrumbs"><span>ArkFlow</span><b>/</b><strong id="page-breadcrumb">运行概览</strong></div>
+        <button class="sidebar-toggle" id="sidebar-toggle" type="button" aria-label="折叠侧栏" title="折叠侧栏" aria-expanded="true">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.5 4.2 6.7 8l3.8 3.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button class="mobile-menu" id="mobile-menu" type="button" aria-label="打开菜单">☰</button>
+        <div class="breadcrumbs"><strong id="page-breadcrumb">任务</strong></div>
         <div class="top-actions">
-          <span class="health-dot" id="health-dot"></span><span id="health-label">正在连接</span>
+          <span class="health-chip"><span class="health-dot" id="health-dot"></span><span id="health-label">正在连接</span></span>
           <button class="icon-button" id="refresh-button" title="刷新">↻</button>
         </div>
       </header>
 
-      <section class="page active" id="page-dashboard">
-        <div class="page-heading">
-          <div><p class="eyebrow">OPERATIONS OVERVIEW</p><h1>运行概览</h1><p>查看 Agent Runtime 指标、待审批工具调用与审计概况。</p></div>
-          <div class="time-range">最近 30 天⌄</div>
-        </div>
+      <section class="page" id="page-guide">
+        <div id="guide-root"></div>
+      </section>
+
+      <section class="page" id="page-dashboard">
+        <article class="page-hero" id="dashboard-hero">
+          <span class="dash-ico lg" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M4.4 16.2 9 11.8l3.2 2.6 7.4-8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M14.8 6.4h4.8v4.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M4.4 19.2h15.2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>
+          <div class="page-hero-copy">
+            <p class="page-hero-kicker">运行概览</p>
+            <h2>看看现在跑得怎样</h2>
+            <p id="dashboard-hero-copy">审批、失败和用量在卡片里；趋势是近 14 日（UTC）。</p>
+          </div>
+          <div class="page-hero-aside">
+            <button class="secondary" type="button" data-go="agent-chat">去任务</button>
+          </div>
+        </article>
+        <div id="attention-strip" class="attention-strip" hidden></div>
         <div class="metric-grid" id="metric-grid"></div>
-        <h2 class="section-title">Runtime 观测</h2>
+        <h2 class="section-title"><span class="dash-ico sm" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><rect x="4.4" y="13.2" width="3.2" height="6.4" rx="1" stroke="currentColor" stroke-width="1.6"/><rect x="10.4" y="9.2" width="3.2" height="10.4" rx="1" stroke="currentColor" stroke-width="1.6"/><rect x="16.4" y="5.6" width="3.2" height="14" rx="1" stroke="currentColor" stroke-width="1.6"/></svg></span>用量</h2>
         <div class="metric-grid" id="runtime-metric-grid"></div>
-        <div class="dashboard-grid">
-          <article class="panel focus-panel span-2">
-            <div class="panel-title"><div><h2>需要你处理</h2><p>逐次工具审批</p></div><button class="text-button" data-go="approvals">前往审批中心 →</button></div>
-            <div id="attention-list"></div>
-          </article>
-        </div>
+        <h2 class="section-title"><span class="dash-ico sm" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M4.4 16.2 9 11.8l3.2 2.6 7.4-8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M14.8 6.4h4.8v4.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M4.4 19.2h15.2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>趋势</h2>
+        <div class="dashboard-charts" id="dashboard-charts"></div>
+        <p class="page-foot" id="dashboard-foot">指标按当前租户累计。折线按 UTC 自然日补齐近 14 天，没有任务的日期为 0。</p>
       </section>
 
       <section class="page" id="page-approvals">
-        <div class="page-heading"><div><p class="eyebrow">HUMAN IN THE LOOP</p><h1>审批中心</h1><p>检查高风险工具调用参数，再决定是否批准本次执行。</p></div></div>
+        <div class="page-toolbar">
+          <p class="page-lead">检查高风险工具参数后，再批准或拒绝本次执行。</p>
+        </div>
         <div id="approval-list" class="approval-list"></div>
       </section>
 
-      <section class="page" id="page-agent-chat">
-        <div class="page-heading chat-heading">
-          <div>
-            <p class="eyebrow">TASK THREAD</p>
-            <h1>任务</h1>
-            <p>像 Codex 一样下任务：思考、调用工具、给出结果。同一会话可继续追问。</p>
-          </div>
-          <div class="chat-session-meta">
-            <span class="session-pill" id="agent-session-pill" title="新会话"><i></i><span class="mono" id="agent-session-id">新会话</span></span>
-            <button class="secondary" id="agent-new-session">＋ 新会话</button>
-            <button class="danger-button" id="agent-delete-session" disabled>删除</button>
-          </div>
-        </div>
+      <section class="page active" id="page-agent-chat">
         <div class="chat-layout">
-          <aside class="chat-sidebar">
+          <aside class="chat-sidebar" id="chat-sidebar">
             <div class="chat-sidebar-head">
-              <div><h2>会话</h2><p>最近使用</p></div>
+              <div><h2>会话</h2></div>
+              <button class="ghost-button" id="agent-new-session" type="button">新会话</button>
             </div>
+            <label class="session-search-wrap">
+              <input class="session-search" id="agent-session-search" type="text" placeholder="搜索" autocomplete="off" autocorrect="off" spellcheck="false" data-lpignore="true">
+            </label>
             <div id="agent-session-list" class="agent-session-list"></div>
             <div class="chat-sidebar-foot">
-              <div class="chat-sidebar-head"><div><h2>后台任务</h2><p>预算、状态与取消</p></div></div>
+              <div class="chat-sidebar-head"><div><h2>后台任务</h2></div></div>
               <div id="agent-subagent-list"></div>
             </div>
           </aside>
           <article class="chat-main">
             <div class="chat-main-head">
-              <div>
+              <button class="ghost-button chat-sessions-toggle" id="chat-sessions-toggle" type="button">会话</button>
+              <div class="chat-main-identity">
                 <strong id="agent-chat-title">新会话</strong>
                 <span id="agent-live-status">等待任务</span>
+                <span class="session-pill" id="agent-session-pill" hidden></span>
               </div>
-              <span class="runtime-mode-badge" id="agent-runtime-mode">读取运行模式…</span>
+              <div class="chat-main-tools">
+                <label class="model-field">模型<select id="agent-model-select" name="model_id" form="agent-chat-form"></select></label>
+                <span class="runtime-mode-badge" id="agent-runtime-mode">读取运行模式…</span>
+                <button class="danger-button" id="agent-delete-session" type="button" disabled>删除</button>
+              </div>
             </div>
             <div id="agent-message-list" class="chat-messages"></div>
             <form id="agent-chat-form" class="chat-composer">
               <div class="composer-card">
-                <textarea id="agent-question" name="question" required minlength="2" rows="2" placeholder="描述一个任务，Enter 运行，Shift+Enter 换行"></textarea>
+                <textarea id="agent-question" name="question" required minlength="2" rows="2" placeholder="描述任务，Enter 发送，Shift+Enter 换行"></textarea>
                 <div class="composer-bar">
-                  <label class="model-field">模型<select id="agent-model-select" name="model_id"></select></label>
                   <input type="file" id="agent-image-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
                   <button type="button" class="ghost-button" id="agent-attach-image">添加图片</button>
                   <div id="agent-image-preview" class="composer-preview"></div>
                   <button type="button" class="danger-button" id="agent-interrupt-button" hidden>停止</button>
                   <button type="button" class="primary" id="agent-resume-button" hidden>继续</button>
-                  <button type="submit" class="primary" id="agent-send-button">运行</button>
+                  <button type="submit" class="primary" id="agent-send-button">发送</button>
                 </div>
               </div>
             </form>
@@ -174,80 +194,77 @@
       </section>
 
       <section class="page" id="page-agents">
-        <div class="page-heading"><div><p class="eyebrow">AGENT STUDIO</p><h1>Agents</h1><p>决策核：Coordinator 拆任务并委派，Analyst 使用工具查数。凭证在连接器页配置，工具绑定在工具页选择。</p></div></div>
-        <article class="panel analyst-mode-panel">
-          <div>
-            <h2>Analyst 运行模式</h2>
-            <p>通用模式使用一个通用 Analyst；专业模式按领域选择专业 Analyst，同一会话最多并行 3 个。</p>
-          </div>
-          <form id="analyst-mode-form">
+        <div class="page-toolbar">
+          <p class="page-lead">协调助手拆任务，分析助手查数。凭证在连接器配置，工具绑定在工具页选择。</p>
+          <form id="analyst-mode-form" class="toolbar-form">
             <label>委派策略
-              <select id="analyst-mode-select" name="mode">
-                <option value="general">通用 Analyst</option>
-                <option value="specialized_parallel">并行专业 Analyst（最多 3 个）</option>
-              </select>
+              <span class="toolbar-field">
+                <select id="analyst-mode-select" name="mode">
+                  <option value="general">通用分析助手</option>
+                  <option value="specialized_parallel">并行专业分析（最多 3 个）</option>
+                </select>
+                <button type="submit" class="secondary small">保存</button>
+              </span>
             </label>
-            <button type="submit" class="primary">保存并立即生效</button>
           </form>
-        </article>
+        </div>
         <div id="agent-sections"></div>
       </section>
 
       <section class="page" id="page-tools">
-        <div class="page-heading">
-          <div>
-            <p class="eyebrow">TOOL CATALOG</p>
-            <h1>工具</h1>
-            <p>查看 Runtime 已注册工具、风险策略，并为数据查询工具选择 Connection。</p>
-          </div>
-          <button class="secondary" type="button" data-go="connectors">前往连接器 →</button>
+        <div class="page-toolbar">
+          <p class="page-lead">已注册工具、风险策略，以及数据查询工具绑定的连接。</p>
+          <button class="secondary small" type="button" data-go="connectors">连接器</button>
         </div>
-        <div class="tool-grid" id="tool-grid"></div>
+        <div id="tool-groups"></div>
       </section>
 
+      <div class="drawer-backdrop" id="tool-binding-drawer">
+        <aside class="drawer t-panel-slide" data-open="false">
+          <button class="modal-close" data-close-tool-binding type="button" aria-label="关闭">×</button>
+          <p class="eyebrow">工具</p>
+          <h2 id="tool-binding-title">配置工具</h2>
+          <p id="tool-binding-subtitle" class="form-hint"></p>
+          <form id="tool-binding-form">
+            <label class="context-toggle" id="tool-binding-enable-wrap" hidden>
+              <input id="tool-binding-enabled" type="checkbox">启用此工具
+            </label>
+            <div id="tool-binding-connection-wrap" hidden>
+              <label>连接<select id="tool-binding-connection"></select></label>
+              <label id="tool-binding-scope-wrap" hidden>数据范围 · <span id="tool-binding-scope-name"></span>
+                <input id="tool-binding-scope" placeholder="逗号分隔，* 表示全部">
+              </label>
+              <p class="form-hint" id="tool-binding-scope-hint" hidden>只能缩小连接中已配置的范围。</p>
+              <p class="form-hint" id="tool-binding-empty-hint" hidden>还没有可用连接。先到连接器页创建，再回到这里绑定。</p>
+            </div>
+            <p class="form-hint" id="tool-binding-builtin-hint" hidden>系统内置工具不需要绑定连接，也不占用权限组。</p>
+            <div class="modal-actions">
+              <button type="button" class="secondary" id="tool-binding-to-connectors">去连接器</button>
+              <button type="button" class="secondary" data-close-tool-binding>取消</button>
+              <button type="submit" class="primary" id="tool-binding-save">保存</button>
+            </div>
+          </form>
+        </aside>
+      </div>
+
       <section class="page" id="page-connectors">
-        <div class="page-heading">
-          <div>
-            <p class="eyebrow">CONNECTORS</p>
-            <h1>连接器</h1>
-            <p>独立管理业务系统、数据库和向量数据库凭证，并在工具或知识库中选择使用。</p>
-          </div>
-          <button class="primary small" id="connection-add-button" type="button">＋ 添加连接</button>
-        </div>
-        <div class="connector-guide">
-          <article class="setting-card">
-            <h3>PostgreSQL 数据库</h3>
-            <p>配置只读 DSN。Amazon 结算与利润表查询走此连接。</p>
-          </article>
-          <article class="setting-card">
-            <h3>领星 OpenAPI</h3>
-            <p>在领星 ERP「设置 → 业务配置 → 开放接口」获取 App ID / Secret，并把本机出口 IP 加入白名单。</p>
-          </article>
-          <article class="setting-card">
-            <h3>金蝶云星空</h3>
-            <p>在「基础管理 → 公共设置 → Web API」完成第三方登录授权，服务地址以 /K3Cloud 结尾。</p>
-          </article>
-          <article class="setting-card">
-            <h3>Tavily 网页搜索</h3>
-            <p>保存 API Key 后，Coordinator 可通过 web_search 检索公开网页。内部制度仍走文枢知识库。</p>
-          </article>
-          <article class="setting-card">
-            <h3>Qdrant / Milvus</h3>
-            <p>仅用于 Agent 个人记忆等向量后端。知识文档的解析和检索走文枢，不在这里对接 Collection。</p>
-          </article>
+        <div class="page-toolbar">
+          <p class="page-lead">管理业务系统、数据库和检索服务的凭证，供工具或知识库选用。</p>
+          <button class="primary small" id="connection-add-button" type="button">添加连接</button>
         </div>
         <div class="agent-grid" id="connection-grid"></div>
       </section>
 
       <div class="drawer-backdrop" id="connection-editor-drawer">
-        <aside class="drawer">
-          <button class="modal-close" data-close-connection-editor type="button">×</button>
-          <p class="eyebrow">CONNECTOR CONFIG</p>
+        <aside class="drawer t-panel-slide" data-open="false">
+          <button class="modal-close" data-close-connection-editor type="button" aria-label="关闭">×</button>
+          <p class="eyebrow">连接器</p>
           <h2 id="connection-editor-title">添加连接器</h2>
           <p id="connection-editor-subtitle">在页面中保存连接凭证和可访问数据范围</p>
           <form id="connection-editor-form">
             <label>连接名称<input id="connection-edit-name" required maxlength="120" placeholder="例如 华东生产库"></label>
             <label>连接类型<select id="connection-edit-type"><option value="analytics">数据分析数据库</option><option value="lingxing">领星 OpenAPI</option><option value="kingdee">金蝶云星空</option><option value="dingtalk">钉钉</option><option value="tavily">Tavily 网页搜索</option><option value="qdrant">Qdrant 向量数据库</option><option value="milvus">Milvus 向量数据库</option></select></label>
+            <p class="form-hint" id="connection-type-hint"></p>
             <label class="context-toggle"><input id="connection-edit-enabled" type="checkbox" checked>启用此连接</label>
             <div id="connection-fields-analytics">
               <label>数据库类型<select id="connection-edit-database-type" onchange="updateAnalyticsDatabaseFields()"><option value="postgresql">PostgreSQL</option><option value="mysql">MySQL</option></select></label>
@@ -308,17 +325,20 @@
       </div>
 
       <div class="drawer-backdrop" id="agent-editor-drawer">
-        <aside class="drawer">
-          <button class="modal-close" data-close-agent-editor type="button">×</button>
-          <p class="eyebrow">AGENT CONFIG</p>
+        <aside class="drawer t-panel-slide" data-open="false">
+          <button class="modal-close" data-close-agent-editor type="button" aria-label="关闭">×</button>
+          <p class="eyebrow">Agent</p>
           <h2 id="agent-editor-title">编辑 Agent</h2>
           <p id="agent-editor-subtitle" class="mono"></p>
           <form id="agent-editor-form">
             <label>显示名称<input id="agent-edit-name" name="name" required maxlength="120"></label>
             <label>职责摘要<input id="agent-edit-role" name="role" required maxlength="500"></label>
             <label>说明<textarea id="agent-edit-description" name="description" rows="3" maxlength="2000"></textarea></label>
-            <label class="context-toggle"><input id="agent-edit-enabled" name="enabled" type="checkbox">启用此 Agent</label>
-            <label>System Prompt<textarea id="agent-edit-system-prompt" name="system_prompt" rows="12" maxlength="12000"></textarea></label>
+            <label class="context-toggle"><input id="agent-edit-enabled" name="enabled" type="checkbox">启用此助手</label>
+            <details class="fold-guide nested">
+              <summary>高级 · 系统提示词</summary>
+              <label>系统提示词<textarea id="agent-edit-system-prompt" name="system_prompt" rows="10" maxlength="12000"></textarea></label>
+            </details>
             <div id="agent-edit-tools-wrap" hidden>
               <div class="tool-picker">
                 <div class="tool-picker-head">
@@ -333,8 +353,8 @@
                   <span class="tool-picker-label">额外允许</span>
                   <div id="agent-optional-tools" class="tool-chip-list"></div>
                   <div class="tool-picker-add">
-                    <button type="button" class="secondary" id="agent-add-tool-button">＋ 添加工具</button>
-                    <div class="tool-picker-menu" id="agent-tool-menu" hidden>
+                    <button type="button" class="secondary" id="agent-add-tool-button">添加工具</button>
+                    <div class="tool-picker-menu t-dropdown" id="agent-tool-menu" data-origin="top-left">
                       <div class="tool-picker-menu-head">选择已注册工具</div>
                       <div id="agent-tool-menu-list"></div>
                     </div>
@@ -351,9 +371,9 @@
       </div>
 
       <div class="drawer-backdrop" id="model-editor-drawer">
-        <aside class="drawer">
-          <button class="modal-close" data-close-model-editor type="button">×</button>
-          <p class="eyebrow">MODEL CONFIG</p>
+        <aside class="drawer t-panel-slide" data-open="false">
+          <button class="modal-close" data-close-model-editor type="button" aria-label="关闭">×</button>
+          <p class="eyebrow">模型</p>
           <h2 id="model-editor-title">编辑模型</h2>
           <p id="model-editor-subtitle" class="mono"></p>
           <form id="model-editor-form">
@@ -389,19 +409,30 @@
       </div>
 
       <section class="page" id="page-knowledge">
-        <div class="page-heading"><div><p class="eyebrow">GROUNDING</p><h1>知识库</h1><p>从下拉框选择文枢空间即可对接；解析仍由文枢完成。</p></div><div class="page-heading-actions"><button class="secondary small" id="knowledge-create-space-button" type="button">新建空间</button><button class="primary small" id="knowledge-upload-button" type="button">上传文档</button></div></div>
-        <article class="info-banner" id="knowledge-setup-banner"><b>文枢知识库</b><span>运营平台通过知识管理 API 展示文档。完整解析工作台仍在文枢。</span></article>
+        <div class="page-toolbar">
+          <p class="page-lead">选择文枢空间后浏览文档；解析和向量化仍由文枢完成。</p>
+          <div class="page-toolbar-actions">
+            <button class="secondary small" id="knowledge-create-space-button" type="button">新建空间</button>
+            <button class="primary small" id="knowledge-upload-button" type="button">上传文档</button>
+          </div>
+        </div>
+        <article class="info-banner compact" id="knowledge-setup-banner" hidden><b>文枢知识库</b><span>运营平台通过知识管理 API 展示文档。完整解析工作台仍在文枢。</span></article>
         <div id="knowledge-unconfigured" class="panel empty" hidden><b>尚未连接文枢</b><span>在运营平台 .env 设置 KNOWLEDGE_API_URL（例如 http://127.0.0.1:8000）和 KNOWLEDGE_API_TOKEN，并与文枢相同令牌后重启两边服务。</span></div>
         <div class="knowledge-library" id="knowledge-library" hidden>
           <aside class="knowledge-library-nav">
             <label>对接知识空间<select id="knowledge-space-select"></select></label>
             <div class="knowledge-tree" id="knowledge-tree"></div>
-            <form id="knowledge-category-form" class="knowledge-category-form">
-              <label>新建分类<input id="knowledge-category-name" maxlength="80" required placeholder="例如 财务制度"></label>
-              <label>父分类<select id="knowledge-category-parent"><option value="">作为一级分类</option></select></label>
-              <button class="secondary small" type="submit">添加分类</button>
-            </form>
-            <button class="secondary small" id="knowledge-reindex-button" type="button">按新 payload 重建向量</button>
+            <details class="knowledge-manage">
+              <summary>分类与重建</summary>
+              <div class="knowledge-manage-body">
+                <form id="knowledge-category-form" class="knowledge-category-form">
+                  <label>新建分类<input id="knowledge-category-name" maxlength="80" required placeholder="例如 财务制度"></label>
+                  <label>父分类<select id="knowledge-category-parent"><option value="">作为一级分类</option></select></label>
+                  <button class="secondary small" type="submit">添加分类</button>
+                </form>
+                <button class="secondary small" id="knowledge-reindex-button" type="button">重建向量</button>
+              </div>
+            </details>
           </aside>
           <div class="knowledge-library-main">
             <form id="knowledge-search-form" class="knowledge-search-form">
@@ -410,21 +441,40 @@
               <button class="secondary small" id="knowledge-search-clear" type="button">返回文档</button>
             </form>
             <div id="knowledge-search-results" class="knowledge-search-results" hidden></div>
-            <div class="table-wrap" id="knowledge-docs-wrap">
-              <table>
-                <thead><tr><th>文档</th><th>类型</th><th>分类</th><th>版本</th><th>解析</th><th>索引</th><th>切片</th></tr></thead>
+            <div class="table-wrap clickable-rows knowledge-docs-wrap" id="knowledge-docs-wrap">
+              <table class="knowledge-table">
+                <colgroup>
+                  <col class="col-doc">
+                  <col class="col-cat">
+                  <col class="col-parse">
+                  <col class="col-index">
+                  <col class="col-chunks">
+                </colgroup>
+                <thead><tr><th>文档</th><th>分类</th><th>解析</th><th>向量化</th><th class="num">切片</th></tr></thead>
                 <tbody id="knowledge-docs"></tbody>
               </table>
               <article class="empty" id="knowledge-docs-empty" hidden><b>这个分类还没有文档</b><span>点击右上角上传，或到文枢工作台导入。</span></article>
             </div>
+            <nav class="knowledge-pager" id="knowledge-docs-pager" hidden>
+              <span id="knowledge-docs-pager-meta">共 0 篇</span>
+              <div class="knowledge-docs-nav">
+                <div id="knowledge-docs-pages" class="knowledge-docs-pages"></div>
+                <button class="knowledge-page-num knowledge-page-step" id="knowledge-docs-prev" type="button" aria-label="上一页" title="上一页">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.2 9.8 8 6l3.8 3.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+                <button class="knowledge-page-num knowledge-page-step" id="knowledge-docs-next" type="button" aria-label="下一页" title="下一页">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.2 6.2 8 10l3.8-3.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+              </div>
+            </nav>
           </div>
         </div>
       </section>
 
       <div class="drawer-backdrop" id="knowledge-space-drawer">
-        <aside class="drawer access-editor">
-          <button class="modal-close" data-close-knowledge-space type="button">×</button>
-          <p class="eyebrow">SPACE</p>
+        <aside class="drawer access-editor t-panel-slide" data-open="false">
+          <button class="modal-close" data-close-knowledge-space type="button" aria-label="关闭">×</button>
+          <p class="eyebrow">知识空间</p>
           <h2>新建知识空间</h2>
           <p>只需名称和 Embedding 模型。Qdrant Collection 由文枢自动创建，不必手工对接。</p>
           <form id="knowledge-space-form">
@@ -437,9 +487,9 @@
       </div>
 
       <div class="drawer-backdrop" id="knowledge-upload-drawer">
-        <aside class="drawer access-editor">
-          <button class="modal-close" data-close-knowledge-upload type="button">×</button>
-          <p class="eyebrow">UPLOAD</p>
+        <aside class="drawer access-editor t-panel-slide" data-open="false">
+          <button class="modal-close" data-close-knowledge-upload type="button" aria-label="关闭">×</button>
+          <p class="eyebrow">上传</p>
           <h2>上传文档</h2>
           <p>文件会保存到文枢对象存储，并排队解析、向量化。</p>
           <form id="knowledge-upload-form">
@@ -454,9 +504,9 @@
       </div>
 
       <div class="drawer-backdrop" id="knowledge-content-drawer">
-        <aside class="drawer knowledge-content-drawer">
-          <button class="modal-close" data-close-knowledge-content type="button">×</button>
-          <p class="eyebrow">DOCUMENT</p>
+        <aside class="drawer knowledge-content-drawer t-panel-slide" data-open="false">
+          <button class="modal-close" data-close-knowledge-content type="button" aria-label="关闭">×</button>
+          <p class="eyebrow">文档</p>
           <h2 id="knowledge-content-title">文档</h2>
           <p id="knowledge-content-summary" class="form-hint"></p>
           <div class="knowledge-content-list" id="knowledge-content-list"></div>
@@ -464,49 +514,69 @@
       </div>
 
       <section class="page" id="page-audit">
-        <div class="page-heading"><div><p class="eyebrow">GOVERNANCE</p><h1>审计日志</h1><p>记录 Agent 查询、人工决策和关键资源操作。</p></div></div>
-        <article class="panel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>资源</th><th>详情</th></tr></thead><tbody id="audit-table"></tbody></table></div></article>
+        <div class="page-toolbar">
+          <p class="page-lead">Agent 查询、人工决策和关键资源操作记录。</p>
+          <input class="filter-input" id="audit-filter" type="search" placeholder="筛选操作者、动作或资源" autocomplete="off">
+        </div>
+        <article class="panel tight"><div class="table-wrap"><table><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>资源</th><th>详情</th></tr></thead><tbody id="audit-table"></tbody></table></div></article>
       </section>
 
       <section class="page" id="page-access">
-        <div class="page-heading">
-          <div><p class="eyebrow">TENANT RBAC</p><h1>用户与权限</h1><p>用户加入权限组，在权限组中直接配置可使用的业务 Tool。</p></div>
-        </div>
-        <article class="info-banner"><b>生效边界</b><span>记忆、Skill、沙箱和子 Agent 委派属于系统基础 Tool，所有已启用用户默认拥有，不进入权限规则选择。Admin 默认拥有全部业务 Tool 权限；其他角色的最终数据权限 = 用户规则允许的业务 Tool ∩ Tool 绑定的数据范围 ∩ Connection 允许的数据范围。</span></article>
-        <div class="access-create-actions" aria-label="新增权限对象">
-          <div><b>权限对象</b><span>新增用户或权限组，然后在权限组中多选 Tool 权限。</span></div>
-          <div class="access-create-buttons">
-            <button class="secondary" type="button" data-open-access-editor="user">＋ 添加用户</button>
-            <button class="secondary" type="button" data-open-access-editor="group">＋ 添加权限组</button>
+        <div class="page-toolbar">
+          <p class="page-lead">用户加入权限组，在组内勾选业务工具。记忆、沙箱等系统工具默认开放；管理员拥有全部业务工具。</p>
+          <div class="page-toolbar-actions">
+            <button class="secondary small" type="button" data-open-access-editor="user">添加用户</button>
+            <button class="secondary small" type="button" data-open-access-editor="group">添加权限组</button>
           </div>
         </div>
-        <h2 class="section-title">用户与组</h2><div class="agent-grid" id="access-user-grid"></div>
-        <h2 class="section-title">权限组与 Tool 权限（M : N）</h2><div class="agent-grid" id="access-group-grid"></div>
-        <h2 class="section-title">规则明细（只读）</h2><div class="agent-grid" id="access-rule-grid"></div>
+        <h2 class="section-title">用户</h2>
+        <div class="table-wrap panel tight">
+          <table>
+            <thead><tr><th>用户</th><th>状态</th><th>权限组</th><th>加入组</th><th></th></tr></thead>
+            <tbody id="access-user-grid"></tbody>
+          </table>
+        </div>
+        <h2 class="section-title">权限组</h2>
+        <div id="access-group-grid" class="stack-list"></div>
+        <details class="fold-guide">
+          <summary>规则明细（只读）</summary>
+          <div id="access-rule-grid" class="stack-list compact-stack"></div>
+        </details>
       </section>
 
       <section class="page" id="page-memory">
-        <div class="page-heading">
-          <div><p class="eyebrow">LONG-TERM MEMORY</p><h1>长期记忆</h1><p>管理用户、组织和 Agent 记忆，审核自动候选并执行纠错或合规删除。</p></div>
-          <button class="primary" id="memory-add-button" type="button">＋ 添加记忆</button>
+        <div class="page-toolbar">
+          <p class="page-lead">审核自动候选，纠正或合规删除用户、组织和 Agent 记忆。</p>
+          <button class="primary small" id="memory-add-button" type="button">添加记忆</button>
         </div>
         <div class="metric-grid" id="memory-metrics"></div>
         <article class="panel memory-toolbar">
+          <label class="memory-search">搜索<input id="memory-filter-query" placeholder="关键词或语义问题"></label>
           <label>状态<select id="memory-filter-status"><option value="">全部</option><option value="candidate">待确认</option><option value="conflicted">有冲突</option><option value="active">已生效</option><option value="superseded">已替代</option><option value="deleted">已删除</option></select></label>
-          <label>范围<select id="memory-filter-scope"><option value="">全部</option><option value="user">用户</option><option value="profile">用户画像</option><option value="tenant">组织知识</option><option value="agent">Agent</option></select></label>
-          <label>用户 ID<input id="memory-filter-user" placeholder="全部用户"></label>
-          <label class="memory-search">语义检索<input id="memory-filter-query" placeholder="输入关键词或语义问题"></label>
-          <button class="secondary" id="memory-search-button" type="button">筛选</button>
+          <label>范围<select id="memory-filter-scope"><option value="">全部</option><option value="user">用户</option><option value="profile">用户画像</option><option value="tenant">组织知识</option><option value="agent">助手</option></select></label>
+          <label>用户<input id="memory-filter-user" placeholder="全部用户"></label>
+          <button class="secondary small" id="memory-search-button" type="button">筛选</button>
         </article>
         <div class="memory-list" id="memory-list"></div>
       </section>
 
       <section class="page" id="page-settings">
-        <div class="page-heading"><div><p class="eyebrow">ENVIRONMENT</p><h1>系统设置</h1><p>查看当前运行配置。敏感信息不会通过 API 返回。</p></div></div>
+        <div class="page-toolbar">
+          <p class="page-lead">当前运行配置。敏感信息不会通过 API 返回。</p>
+        </div>
+        <h2 class="section-title">模型</h2>
+        <article class="panel model-config-panel">
+          <div class="page-toolbar">
+            <p class="page-lead">对话可用的模型。保存后立即生效。</p>
+            <button type="button" class="primary small" id="model-add-button">添加模型</button>
+          </div>
+          <div class="agent-grid" id="model-grid"></div>
+        </article>
+        <h2 class="section-title">对话上下文</h2>
         <article class="panel context-window-panel">
           <div>
-            <h2>对话上下文滑动窗口</h2>
-            <p>发给模型的历史按最近轮次滑动截断，系统提示始终保留。完整会话仍保存在事件库，只影响模型输入。Token 预算是另一套熔断，超限会停止本回合。</p>
+            <h2>滑动窗口</h2>
+            <p>发给模型的历史按最近轮次截断，系统提示始终保留。完整会话仍保存在事件库。</p>
           </div>
           <form id="context-window-form">
             <label class="context-toggle"><input id="context-window-enabled" name="enabled" type="checkbox">启用滑动窗口</label>
@@ -520,30 +590,21 @@
               <label>旧工具结果最大字符<input id="context-tool-chars" name="tool_max_chars" type="number" min="500" max="80000" required></label>
             </div>
             <div class="modal-actions" style="justify-content:flex-start;margin-top:16px">
-              <button type="submit" class="primary" id="save-context-window">保存并立即生效</button>
+              <button type="submit" class="primary" id="save-context-window">保存</button>
             </div>
           </form>
         </article>
-        <article class="panel model-config-panel">
-          <div class="page-heading" style="margin-bottom:16px">
-            <div>
-              <h2>模型配置</h2>
-              <p>管理对话可用的 LLM 模型。保存后立即生效，无需重启服务。</p>
-            </div>
-            <button type="button" class="primary" id="model-add-button">添加模型</button>
-          </div>
-          <div class="agent-grid" id="model-grid"></div>
-        </article>
+        <h2 class="section-title">运行环境</h2>
         <div class="settings-grid" id="system-settings"></div>
-        <article class="panel api-access"><div><h2>开发身份</h2><p>本地控制台使用请求头模拟 tenant、user 和角色。生产环境必须替换为 OIDC/JWT 服务端声明。</p></div><div class="form-row"><label>API Key<input id="api-key-input" type="password" placeholder="未配置"></label><label>Tenant<input id="tenant-input" value="tenant-a"></label><label>User ID<input id="user-id-input" value="local-admin"></label><label>角色<select id="role-input"><option>admin</option><option>operator</option><option>approver</option><option>viewer</option></select></label><button class="secondary" id="save-session">保存会话</button></div></article>
+        <article class="panel api-access" id="dev-identity-panel" data-dev-only hidden><div><h2>开发身份</h2><p>仅本地调试：用请求头模拟租户和角色。生产环境不会显示此项。</p></div><div class="form-row"><label>API Key<input id="api-key-input" type="password" placeholder="未配置"></label><label>租户<input id="tenant-input"></label><label>账号<input id="user-id-input"></label><label>角色<select id="role-input"><option>admin</option><option>operator</option><option>approver</option><option>viewer</option></select></label><button class="secondary" id="save-session">保存会话</button></div></article>
       </section>
     </main>
   </div>
 
   <div class="drawer-backdrop" id="result-viewer-drawer">
-    <aside class="drawer result-viewer">
-      <button class="modal-close" data-close-result-viewer type="button">×</button>
-      <p class="eyebrow">MATERIALIZED RESULT</p>
+    <aside class="drawer result-viewer t-panel-slide" data-open="false">
+          <button class="modal-close" data-close-result-viewer type="button" aria-label="关闭">×</button>
+          <p class="eyebrow">查询结果</p>
       <h2 id="result-viewer-title">完整查询结果</h2>
       <p id="result-viewer-summary"></p>
       <div class="result-stat-grid" id="result-viewer-stats"></div>
@@ -553,9 +614,9 @@
   </div>
 
   <div class="drawer-backdrop" id="access-editor-drawer">
-    <aside class="drawer access-editor">
+    <aside class="drawer access-editor t-panel-slide" data-open="false">
       <button class="modal-close" data-close-access-editor type="button" aria-label="关闭">×</button>
-      <p class="eyebrow">ACCESS CONTROL</p>
+          <p class="eyebrow">权限</p>
       <h2 id="access-editor-title">添加用户</h2>
       <p id="access-editor-description">创建一个可加入权限组的用户身份。</p>
       <form id="access-user-form" data-access-form="user">
@@ -577,9 +638,9 @@
   </div>
 
   <div class="drawer-backdrop" id="memory-editor-drawer">
-    <aside class="drawer">
+    <aside class="drawer t-panel-slide" data-open="false">
       <button class="modal-close" data-close-memory-editor type="button" aria-label="关闭">×</button>
-      <p class="eyebrow">MEMORY ITEM</p>
+          <p class="eyebrow">记忆</p>
       <h2>添加长期记忆</h2>
       <p>后台管理员可创建用户、组织或 Agent 范围的已确认记忆。</p>
       <form id="memory-editor-form">
@@ -600,7 +661,19 @@
     </aside>
   </div>
 
-  <div class="toast" id="toast"></div>
-  <script src="/ui/app.js?v=p30-auth-boot" defer></script>
+  <div class="app-dialog-backdrop" id="app-dialog">
+    <section class="app-dialog t-modal" role="dialog" aria-modal="true" aria-labelledby="app-dialog-title">
+      <h2 id="app-dialog-title">请确认</h2>
+      <p id="app-dialog-message"></p>
+      <label id="app-dialog-field" hidden>备注<textarea id="app-dialog-input" rows="3"></textarea></label>
+      <div class="modal-actions">
+        <button type="button" class="secondary" id="app-dialog-cancel">取消</button>
+        <button type="button" class="primary" id="app-dialog-ok">确定</button>
+      </div>
+    </section>
+  </div>
+  <div class="toast t-toast" id="toast"></div>
+  <script src="/ui/guide.js?v=prod-ui-53" defer></script>
+  <script src="/ui/app.js?v=prod-ui-53" defer></script>
 </body>
 </html>

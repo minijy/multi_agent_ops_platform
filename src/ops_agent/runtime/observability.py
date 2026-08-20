@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -54,6 +54,18 @@ class TurnMetric(BaseModel):
     created_at: str
 
 
+DAILY_WINDOW_DAYS = 14
+FAILED_STATUSES = ("failed", "timed_out", "cancelled", "budget_exceeded")
+
+
+class DailyRuntimePoint(BaseModel):
+    date: str
+    turns: int = 0
+    failed: int = 0
+    tokens: int = 0
+    avg_latency_ms: float = 0.0
+
+
 class RuntimeMetricsSummary(BaseModel):
     turn_count: int = 0
     failed_turns: int = 0
@@ -65,6 +77,62 @@ class RuntimeMetricsSummary(BaseModel):
     tool_errors: int = 0
     by_status: dict[str, int] = Field(default_factory=dict)
     by_model: dict[str, int] = Field(default_factory=dict)
+    daily: list[DailyRuntimePoint] = Field(default_factory=list)
+
+
+def daily_window_start(days: int = DAILY_WINDOW_DAYS) -> date:
+    return datetime.now(timezone.utc).date() - timedelta(days=days - 1)
+
+
+def fill_daily_points(
+    rows: list[Any],
+    *,
+    days: int = DAILY_WINDOW_DAYS,
+) -> list[DailyRuntimePoint]:
+    by_day: dict[str, Any] = {}
+    for row in rows:
+        key = str(row["day"] if row["day"] is not None else "")[:10]
+        if key:
+            by_day[key] = row
+    start = daily_window_start(days)
+    points: list[DailyRuntimePoint] = []
+    for offset in range(days):
+        key = (start + timedelta(days=offset)).isoformat()
+        row = by_day.get(key)
+        points.append(
+            DailyRuntimePoint(
+                date=key,
+                turns=int(row["turns"] if row else 0),
+                failed=int(row["failed"] if row else 0),
+                tokens=int(row["tokens"] if row else 0),
+                avg_latency_ms=round(float(row["avg_latency_ms"] if row else 0), 3),
+            )
+        )
+    return points
+
+
+def runtime_summary_from_aggregates(
+    *,
+    by_status: dict[str, int],
+    by_model: dict[str, int],
+    totals: Any,
+    daily_rows: list[Any],
+) -> RuntimeMetricsSummary:
+    failed = sum(by_status.get(name, 0) for name in FAILED_STATUSES)
+    turn_count = int(totals["turn_count"] or 0)
+    return RuntimeMetricsSummary(
+        turn_count=turn_count,
+        failed_turns=failed,
+        failure_rate=round(failed / turn_count, 4) if turn_count else 0.0,
+        total_tokens=int(totals["total_tokens"] or 0),
+        estimated_cost_usd=round(float(totals["estimated_cost_usd"] or 0), 8),
+        avg_latency_ms=round(float(totals["avg_latency_ms"] or 0), 3),
+        tool_calls=int(totals["tool_calls"] or 0),
+        tool_errors=int(totals["tool_errors"] or 0),
+        by_status=by_status,
+        by_model=by_model,
+        daily=fill_daily_points(daily_rows),
+    )
 
 
 class MetricsStore(Protocol):
@@ -195,6 +263,7 @@ class SQLiteMetricsStore:
             )
 
     def summarize(self, tenant_id: str) -> RuntimeMetricsSummary:
+        since = daily_window_start().isoformat()
         with self._connect() as connection:
             rows = connection.execute(
                 """
@@ -223,23 +292,26 @@ class SQLiteMetricsStore:
                 """,
                 (tenant_id,),
             ).fetchone()
-        by_status = {row["status"]: int(row["amount"]) for row in rows}
-        failed = sum(
-            by_status.get(name, 0)
-            for name in ("failed", "timed_out", "cancelled", "budget_exceeded")
-        )
-        turn_count = int(totals["turn_count"] or 0)
-        return RuntimeMetricsSummary(
-            turn_count=turn_count,
-            failed_turns=failed,
-            failure_rate=round(failed / turn_count, 4) if turn_count else 0.0,
-            total_tokens=int(totals["total_tokens"] or 0),
-            estimated_cost_usd=round(float(totals["estimated_cost_usd"] or 0), 8),
-            avg_latency_ms=round(float(totals["avg_latency_ms"] or 0), 3),
-            tool_calls=int(totals["tool_calls"] or 0),
-            tool_errors=int(totals["tool_errors"] or 0),
-            by_status=by_status,
+            daily_rows = connection.execute(
+                """
+                SELECT
+                    substr(created_at, 1, 10) AS day,
+                    COUNT(*) AS turns,
+                    COALESCE(SUM(CASE WHEN status IN ('failed','timed_out','cancelled','budget_exceeded') THEN 1 ELSE 0 END), 0) AS failed,
+                    COALESCE(SUM(total_tokens), 0) AS tokens,
+                    COALESCE(AVG(latency_ms), 0) AS avg_latency_ms
+                FROM agent_runtime_metrics
+                WHERE tenant_id=? AND substr(created_at, 1, 10) >= ?
+                GROUP BY substr(created_at, 1, 10)
+                ORDER BY 1
+                """,
+                (tenant_id, since),
+            ).fetchall()
+        return runtime_summary_from_aggregates(
+            by_status={row["status"]: int(row["amount"]) for row in rows},
             by_model={row["model"]: int(row["amount"]) for row in models},
+            totals=totals,
+            daily_rows=daily_rows,
         )
 
 
@@ -314,6 +386,9 @@ class PostgresMetricsStore:
             )
 
     def summarize(self, tenant_id: str) -> RuntimeMetricsSummary:
+        since = datetime.combine(
+            daily_window_start(), datetime.min.time(), tzinfo=timezone.utc
+        )
         with self._connect() as connection:
             rows = connection.execute(
                 """
@@ -342,23 +417,26 @@ class PostgresMetricsStore:
                 """,
                 (tenant_id,),
             ).fetchone()
-        by_status = {row["status"]: int(row["amount"]) for row in rows}
-        failed = sum(
-            by_status.get(name, 0)
-            for name in ("failed", "timed_out", "cancelled", "budget_exceeded")
-        )
-        turn_count = int(totals["turn_count"] or 0)
-        return RuntimeMetricsSummary(
-            turn_count=turn_count,
-            failed_turns=failed,
-            failure_rate=round(failed / turn_count, 4) if turn_count else 0.0,
-            total_tokens=int(totals["total_tokens"] or 0),
-            estimated_cost_usd=round(float(totals["estimated_cost_usd"] or 0), 8),
-            avg_latency_ms=round(float(totals["avg_latency_ms"] or 0), 3),
-            tool_calls=int(totals["tool_calls"] or 0),
-            tool_errors=int(totals["tool_errors"] or 0),
-            by_status=by_status,
+            daily_rows = connection.execute(
+                """
+                SELECT
+                    to_char((created_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
+                    COUNT(*) AS turns,
+                    COALESCE(SUM(CASE WHEN status IN ('failed','timed_out','cancelled','budget_exceeded') THEN 1 ELSE 0 END), 0) AS failed,
+                    COALESCE(SUM(total_tokens), 0) AS tokens,
+                    COALESCE(AVG(latency_ms), 0) AS avg_latency_ms
+                FROM agent_runtime_metrics
+                WHERE tenant_id=%s AND created_at >= %s
+                GROUP BY 1
+                ORDER BY 1
+                """,
+                (tenant_id, since),
+            ).fetchall()
+        return runtime_summary_from_aggregates(
+            by_status={row["status"]: int(row["amount"]) for row in rows},
             by_model={row["model"]: int(row["amount"]) for row in models},
+            totals=totals,
+            daily_rows=daily_rows,
         )
 
 

@@ -293,13 +293,20 @@ def register_knowledge_library_routes(
         space_id: str,
         request: Request,
         category_id: str = "",
+        limit: int = 20,
+        offset: int = 0,
         x_api_key: str | None = Header(default=None),
         x_tenant_id: str | None = Header(default=None),
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> Any:
         principal = _principal(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
-        params = {"category_id": category_id} if category_id else None
+        params: dict[str, Any] = {
+            "limit": max(1, min(int(limit), 100)),
+            "offset": max(0, int(offset)),
+        }
+        if category_id:
+            params["category_id"] = category_id
         return _call(
             _gateway(request),
             "GET",

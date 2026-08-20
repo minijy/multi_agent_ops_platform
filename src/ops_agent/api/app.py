@@ -574,6 +574,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @application.post("/v1/auth/register", status_code=201)
     def register_account(payload: AccountRegisterRequest, request: Request) -> dict[str, Any]:
+        if request.app.state.settings.app_env == "production":
+            raise HTTPException(status_code=403, detail="self-service registration is disabled")
         service = request.app.state.account_service
         try:
             account = service.register(
@@ -2409,7 +2411,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         for user in result["users"]:
             user["account"] = accounts.get(user["id"])
         result["tool_catalog"] = [
-            tool for tool in request.app.state.runtime_tool_registry.catalog()
+            {"id": tool["id"], "name": tool["name"]}
+            for tool in request.app.state.runtime_tool_registry.catalog()
             if tool["id"] not in SYSTEM_DEFAULT_TOOL_NAMES
         ]
         result["default_tool_names"] = sorted(SYSTEM_DEFAULT_TOOL_NAMES)

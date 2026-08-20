@@ -6,7 +6,7 @@ from ops_agent.api.app import create_app
 from ops_agent.config import Settings
 
 
-def _settings(tmp_path: Path) -> Settings:
+def _settings(tmp_path: Path, **overrides) -> Settings:
     return Settings(
         _env_file=None,
         platform_db_path=tmp_path / "platform.sqlite3",
@@ -22,6 +22,7 @@ def _settings(tmp_path: Path) -> Settings:
         attachment_path=tmp_path / "attachments",
         skills_paths=str(tmp_path / "skills"),
         mcp_config_path=tmp_path / "mcp.json",
+        **overrides,
     )
 
 
@@ -119,3 +120,23 @@ def test_admin_temporary_password_requires_change_and_reset(tmp_path: Path):
         )
         assert reset.status_code == 200
         assert reset.json()["account"]["must_change_password"] is True
+
+
+def test_production_disables_self_service_registration(tmp_path: Path):
+    settings = _settings(
+        tmp_path,
+        app_env="production",
+        jwt_secret="test-production-jwt-secret",
+    )
+    with TestClient(create_app(settings)) as client:
+        blocked = client.post(
+            "/v1/auth/register",
+            json={
+                "tenant_id": "tenant-a",
+                "user_id": "owner",
+                "display_name": "Owner",
+                "password": "StrongPass123",
+            },
+        )
+        assert blocked.status_code == 403
+        assert blocked.json()["detail"] == "self-service registration is disabled"

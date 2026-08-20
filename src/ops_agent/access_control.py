@@ -227,14 +227,26 @@ class AccessControlStore:
 
     def list_users(self, tenant_id: str) -> list[dict[str, Any]]:
         with self._connect() as connection:
-            ids = [
-                row[0]
-                for row in connection.execute(
-                    "SELECT user_id FROM access_users WHERE tenant_id=? ORDER BY name,user_id",
-                    (tenant_id,),
-                ).fetchall()
-            ]
-        return [item for user_id in ids if (item := self.get_user(tenant_id, user_id))]
+            users = connection.execute(
+                "SELECT user_id,name,enabled FROM access_users WHERE tenant_id=? ORDER BY name,user_id",
+                (tenant_id,),
+            ).fetchall()
+            memberships = connection.execute(
+                "SELECT user_id,group_id FROM user_permission_groups WHERE tenant_id=? ORDER BY group_id",
+                (tenant_id,),
+            ).fetchall()
+        groups_by_user: dict[str, list[str]] = {}
+        for row in memberships:
+            groups_by_user.setdefault(row["user_id"], []).append(row["group_id"])
+        return [
+            {
+                "id": row["user_id"],
+                "name": row["name"],
+                "enabled": bool(row["enabled"]),
+                "group_ids": groups_by_user.get(row["user_id"], []),
+            }
+            for row in users
+        ]
 
     def delete_user(self, tenant_id: str, user_id: str) -> bool:
         with self._connect() as connection:
@@ -299,14 +311,35 @@ class AccessControlStore:
 
     def list_groups(self, tenant_id: str) -> list[dict[str, Any]]:
         with self._connect() as connection:
-            ids = [
-                row[0]
-                for row in connection.execute(
-                    "SELECT group_id FROM permission_groups WHERE tenant_id=? ORDER BY name,group_id",
-                    (tenant_id,),
-                ).fetchall()
-            ]
-        return [item for group_id in ids if (item := self.get_group(tenant_id, group_id))]
+            groups = connection.execute(
+                "SELECT group_id,name,description FROM permission_groups WHERE tenant_id=? ORDER BY name,group_id",
+                (tenant_id,),
+            ).fetchall()
+            rules = connection.execute(
+                "SELECT group_id,rule_id FROM permission_rules WHERE tenant_id=? AND group_id IS NOT NULL ORDER BY rule_id",
+                (tenant_id,),
+            ).fetchall()
+            tools = connection.execute(
+                """SELECT group_id,tool_name FROM group_tool_permissions
+                   WHERE tenant_id=? ORDER BY tool_name""",
+                (tenant_id,),
+            ).fetchall()
+        rules_by_group: dict[str, list[str]] = {}
+        tools_by_group: dict[str, list[str]] = {}
+        for row in rules:
+            rules_by_group.setdefault(row["group_id"], []).append(row["rule_id"])
+        for row in tools:
+            tools_by_group.setdefault(row["group_id"], []).append(row["tool_name"])
+        return [
+            {
+                "id": row["group_id"],
+                "name": row["name"],
+                "description": row["description"],
+                "rule_ids": rules_by_group.get(row["group_id"], []),
+                "tool_names": tools_by_group.get(row["group_id"], []),
+            }
+            for row in groups
+        ]
 
     def delete_group(self, tenant_id: str, group_id: str) -> bool:
         with self._connect() as connection:
@@ -382,14 +415,21 @@ class AccessControlStore:
 
     def list_rules(self, tenant_id: str) -> list[dict[str, Any]]:
         with self._connect() as connection:
-            ids = [
-                row[0]
-                for row in connection.execute(
-                    "SELECT rule_id FROM permission_rules WHERE tenant_id=? ORDER BY name,rule_id",
-                    (tenant_id,),
-                ).fetchall()
-            ]
-        return [item for rule_id in ids if (item := self.get_rule(tenant_id, rule_id))]
+            rows = connection.execute(
+                """SELECT rule_id,group_id,name,description,tool_names_json
+                   FROM permission_rules WHERE tenant_id=? ORDER BY name,rule_id""",
+                (tenant_id,),
+            ).fetchall()
+        return [
+            {
+                "id": row["rule_id"],
+                "group_id": row["group_id"],
+                "name": row["name"],
+                "description": row["description"],
+                "tool_names": json.loads(row["tool_names_json"] or "[]"),
+            }
+            for row in rows
+        ]
 
     def delete_rule(self, tenant_id: str, rule_id: str) -> bool:
         with self._connect() as connection:
@@ -503,9 +543,10 @@ class AccessControlStore:
         )
 
     def snapshot(self, tenant_id: str) -> dict[str, Any]:
+        users = self.list_users(tenant_id)
         return {
-            "configured": bool(self.list_users(tenant_id)),
-            "users": self.list_users(tenant_id),
+            "configured": bool(users),
+            "users": users,
             "groups": self.list_groups(tenant_id),
             "rules": self.list_rules(tenant_id),
         }
@@ -674,11 +715,26 @@ class PostgresAccessControlStore:
 
     def list_users(self, tenant_id: str) -> list[dict[str, Any]]:
         with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT user_id FROM ops_access_users WHERE tenant_id=%s ORDER BY name,user_id",
+            users = connection.execute(
+                "SELECT user_id,name,enabled FROM ops_access_users WHERE tenant_id=%s ORDER BY name,user_id",
                 (tenant_id,),
             ).fetchall()
-        return [self.get_user(tenant_id, row["user_id"]) for row in rows]
+            memberships = connection.execute(
+                "SELECT user_id,group_id FROM ops_user_permission_groups WHERE tenant_id=%s ORDER BY group_id",
+                (tenant_id,),
+            ).fetchall()
+        groups_by_user: dict[str, list[str]] = {}
+        for row in memberships:
+            groups_by_user.setdefault(row["user_id"], []).append(row["group_id"])
+        return [
+            {
+                "id": row["user_id"],
+                "name": row["name"],
+                "enabled": row["enabled"],
+                "group_ids": groups_by_user.get(row["user_id"], []),
+            }
+            for row in users
+        ]
 
     def delete_user(self, tenant_id: str, user_id: str) -> bool:
         with self._connect() as connection:
@@ -745,11 +801,35 @@ class PostgresAccessControlStore:
 
     def list_groups(self, tenant_id: str) -> list[dict[str, Any]]:
         with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT group_id FROM ops_permission_groups WHERE tenant_id=%s ORDER BY name,group_id",
+            groups = connection.execute(
+                "SELECT group_id,name,description FROM ops_permission_groups WHERE tenant_id=%s ORDER BY name,group_id",
                 (tenant_id,),
             ).fetchall()
-        return [self.get_group(tenant_id, row["group_id"]) for row in rows]
+            rules = connection.execute(
+                "SELECT group_id,rule_id FROM ops_permission_rules WHERE tenant_id=%s AND group_id IS NOT NULL ORDER BY rule_id",
+                (tenant_id,),
+            ).fetchall()
+            tools = connection.execute(
+                """SELECT group_id,tool_name FROM ops_group_tool_permissions
+                   WHERE tenant_id=%s ORDER BY tool_name""",
+                (tenant_id,),
+            ).fetchall()
+        rules_by_group: dict[str, list[str]] = {}
+        tools_by_group: dict[str, list[str]] = {}
+        for row in rules:
+            rules_by_group.setdefault(row["group_id"], []).append(row["rule_id"])
+        for row in tools:
+            tools_by_group.setdefault(row["group_id"], []).append(row["tool_name"])
+        return [
+            {
+                "id": row["group_id"],
+                "name": row["name"],
+                "description": row["description"],
+                "rule_ids": rules_by_group.get(row["group_id"], []),
+                "tool_names": tools_by_group.get(row["group_id"], []),
+            }
+            for row in groups
+        ]
 
     def delete_group(self, tenant_id: str, group_id: str) -> bool:
         with self._connect() as connection:
@@ -847,10 +927,20 @@ class PostgresAccessControlStore:
     def list_rules(self, tenant_id: str) -> list[dict[str, Any]]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT rule_id FROM ops_permission_rules WHERE tenant_id=%s ORDER BY name,rule_id",
+                """SELECT rule_id,group_id,name,description,tool_names_json
+                   FROM ops_permission_rules WHERE tenant_id=%s ORDER BY name,rule_id""",
                 (tenant_id,),
             ).fetchall()
-        return [self.get_rule(tenant_id, row["rule_id"]) for row in rows]
+        return [
+            {
+                "id": row["rule_id"],
+                "group_id": row["group_id"],
+                "name": row["name"],
+                "description": row["description"],
+                "tool_names": row["tool_names_json"] or [],
+            }
+            for row in rows
+        ]
 
     def delete_rule(self, tenant_id: str, rule_id: str) -> bool:
         with self._connect() as connection:
@@ -964,9 +1054,10 @@ class PostgresAccessControlStore:
         )
 
     def snapshot(self, tenant_id: str) -> dict[str, Any]:
+        users = self.list_users(tenant_id)
         return {
-            "configured": bool(self.list_users(tenant_id)),
-            "users": self.list_users(tenant_id),
+            "configured": bool(users),
+            "users": users,
             "groups": self.list_groups(tenant_id),
             "rules": self.list_rules(tenant_id),
         }

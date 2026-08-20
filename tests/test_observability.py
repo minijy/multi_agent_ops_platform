@@ -11,7 +11,7 @@ from ops_agent.api.app import create_app
 from ops_agent.config import Settings
 from ops_agent.evals import default_eval_path, load_eval_cases, run_eval_case
 from ops_agent.evals import _offline_runtime
-from ops_agent.runtime.observability import estimate_cost
+from ops_agent.runtime.observability import SQLiteMetricsStore, TurnMetric, estimate_cost
 from ops_agent.runtime.session_events import SessionEvent
 from ops_agent.evals import project_replay
 
@@ -86,6 +86,49 @@ def test_golden_eval_cases_pass(tmp_path: Path):
     assert failed == []
 
 
+def test_metrics_daily_series_fills_fourteen_days(tmp_path: Path):
+    from datetime import datetime, timedelta, timezone
+
+    store = SQLiteMetricsStore(tmp_path / "metrics.sqlite3")
+    now = datetime.now(timezone.utc)
+    yesterday = now - timedelta(days=1)
+    store.record(
+        TurnMetric(
+            metric_id="m-today",
+            session_id="s1",
+            tenant_id="tenant-a",
+            user_id="user-a",
+            provider="mock",
+            model="mock-function-calling",
+            status="completed",
+            total_tokens=120,
+            latency_ms=40,
+            created_at=now.isoformat(),
+        )
+    )
+    store.record(
+        TurnMetric(
+            metric_id="m-yesterday",
+            session_id="s1",
+            tenant_id="tenant-a",
+            user_id="user-a",
+            provider="mock",
+            model="mock-function-calling",
+            status="failed",
+            total_tokens=30,
+            latency_ms=90,
+            created_at=yesterday.isoformat(),
+        )
+    )
+    summary = store.summarize("tenant-a")
+    assert len(summary.daily) == 14
+    assert summary.daily[-1].turns == 1
+    assert summary.daily[-1].tokens == 120
+    assert summary.daily[-2].failed == 1
+    assert summary.by_status["completed"] == 1
+    assert summary.by_model["mock-function-calling"] == 2
+
+
 def test_agent_query_records_runtime_metrics(tmp_path: Path):
     with TestClient(create_app(_settings(tmp_path))) as client:
         created = client.post(
@@ -100,6 +143,7 @@ def test_agent_query_records_runtime_metrics(tmp_path: Path):
         assert body["avg_latency_ms"] >= 0
         dashboard = client.get("/v1/dashboard/summary").json()
         assert dashboard["runtime"]["turn_count"] >= 1
+        assert len(dashboard["runtime"]["daily"]) == 14
 
 
 def test_jwt_bearer_token_sets_tenant(tmp_path: Path):
