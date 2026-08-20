@@ -1,0 +1,77 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ops_agent
+      POSTGRES_USER: ops_agent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - ops-agent-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ops_agent -d ops_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    restart: unless-stopped
+    env_file: .env.production
+    environment:
+      POSTGRES_DSN: postgresql://ops_agent:${POSTGRES_PASSWORD}@postgres:5432/ops_agent
+      SANDBOX_WORKSPACE_ROOT: /app/workspace
+    ports:
+      - "8100:8100"
+    volumes:
+      - ops-agent-data:/app/data
+      - ops-agent-workspace:/app/workspace
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/health/ready', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  subagent-worker:
+    build: .
+    restart: unless-stopped
+    entrypoint: []
+    command: ["ops-agent-subagent-worker"]
+    env_file: .env.production
+    environment:
+      POSTGRES_DSN: postgresql://ops_agent:${POSTGRES_PASSWORD}@postgres:5432/ops_agent
+      SANDBOX_WORKSPACE_ROOT: /app/workspace
+    volumes:
+      - ops-agent-data:/app/data
+      - ops-agent-workspace:/app/workspace
+    depends_on:
+      api:
+        condition: service_healthy
+
+  memory-worker:
+    build: .
+    restart: unless-stopped
+    entrypoint: []
+    command: ["ops-agent-memory-worker"]
+    env_file: .env.production
+    environment:
+      POSTGRES_DSN: postgresql://ops_agent:${POSTGRES_PASSWORD}@postgres:5432/ops_agent
+    volumes:
+      - ops-agent-data:/app/data
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  ops-agent-postgres:
+  ops-agent-data:
+  ops-agent-workspace:

@@ -246,15 +246,56 @@ class AgentUpdateRequest(BaseModel):
 
 
 class AgentRegistry:
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self,
+        path: Path | None = None,
+        *,
+        store: Any | None = None,
+    ) -> None:
         self.path = path
+        self.store = store
         self._agents: dict[str, AgentDefinition] = {}
         self.reload()
 
     def reload(self) -> None:
         defaults = {item.id: item for item in default_agent_definitions()}
+        if self.store is not None:
+            stored_items = {
+                item["id"]: item for item in self.store.list_agents() if item.get("id")
+            }
+            merged: dict[str, AgentDefinition] = {}
+            for agent_id, default in defaults.items():
+                override = stored_items.get(agent_id, {})
+                if override:
+                    if agent_id == COORDINATOR_AGENT_ID:
+                        override = _migrate_coordinator_override(default, override)
+                    merged[agent_id] = default.model_copy(
+                        update={
+                            key: (
+                                sanitize_public_text(value)
+                                if key in {"role", "description", "system_prompt"}
+                                and isinstance(value, str)
+                                else value
+                            )
+                            for key, value in override.items()
+                            if key in AgentDefinition.model_fields and key != "id"
+                        }
+                    )
+                else:
+                    merged[agent_id] = default
+            # Keep any custom (non-default) agents stored in DB.
+            for agent_id, payload in stored_items.items():
+                if agent_id in merged:
+                    continue
+                try:
+                    merged[agent_id] = AgentDefinition.model_validate(payload)
+                except Exception:
+                    continue
+            self._agents = merged
+            return
+
         stored = self._read_file()
-        merged: dict[str, AgentDefinition] = {}
+        merged = {}
         for agent_id, default in defaults.items():
             override = stored.get(agent_id, {})
             if override:
@@ -275,10 +316,16 @@ class AgentRegistry:
             else:
                 merged[agent_id] = default
         self._agents = merged
-        if not self.path.is_file():
+        if self.path is not None and not self.path.is_file():
             self.save()
 
     def save(self) -> None:
+        if self.store is not None:
+            for agent in self._agents.values():
+                self.store.upsert_agent(agent.model_dump(mode="json"))
+            return
+        if self.path is None:
+            raise RuntimeError("agent registry has no persistence backend")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             agent_id: agent.model_dump(mode="json")
@@ -290,7 +337,7 @@ class AgentRegistry:
         )
 
     def _read_file(self) -> dict[str, dict[str, Any]]:
-        if not self.path.is_file():
+        if self.path is None or not self.path.is_file():
             return {}
         try:
             loaded = json.loads(self.path.read_text(encoding="utf-8"))
@@ -397,7 +444,11 @@ class AgentRegistry:
         return items
 
 
-def create_agent_registry(path: Path) -> AgentRegistry:
+def create_agent_registry(path: Path | None = None, *, store: Any | None = None) -> AgentRegistry:
+    if store is not None:
+        return AgentRegistry(store=store)
+    if path is None:
+        raise ValueError("create_agent_registry requires path or store")
     return AgentRegistry(path.expanduser().resolve())
 
 

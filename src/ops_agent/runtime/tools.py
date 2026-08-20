@@ -91,6 +91,9 @@ class ToolRegistry:
             raise ValueError(f"tool already registered: {definition.name}")
         self._tools[definition.name] = definition
 
+    def replace(self, definition: ToolDefinition) -> None:
+        self._tools[definition.name] = definition
+
     def get(
         self, name: str, context: ToolExecutionContext | None = None
     ) -> ToolDefinition:

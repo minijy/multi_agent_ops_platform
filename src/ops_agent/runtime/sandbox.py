@@ -57,9 +57,11 @@ class SandboxRunner:
         if platform.system() == "Darwin" and self.seatbelt.is_file():
             probe = subprocess.run(
                 [
-                    str(self.seatbelt), "-p",
+                    str(self.seatbelt),
+                    "-p",
                     "(version 1)(allow default)(deny file-write*)",
-                    "--", "/usr/bin/true",
+                    "--",
+                    "/usr/bin/true",
                 ],
                 capture_output=True,
                 timeout=5,
@@ -69,10 +71,19 @@ class SandboxRunner:
         else:
             self.restricted_available = False
 
-    _SKIP_DIRS = frozenset({
-        ".venv", "node_modules", ".git", "data", "__pycache__",
-        ".pytest_cache", "dist", "build", ".ruff_cache",
-    })
+    _SKIP_DIRS = frozenset(
+        {
+            ".venv",
+            "node_modules",
+            ".git",
+            "data",
+            "__pycache__",
+            ".pytest_cache",
+            "dist",
+            "build",
+            ".ruff_cache",
+        }
+    )
 
     def _cwd(self, relative: str) -> Path:
         candidate = (self.workspace_root / relative).resolve()
@@ -92,7 +103,7 @@ class SandboxRunner:
         lowered = text.lower()
         for prefix in ("sandbox:", "file://", "file:"):
             if lowered.startswith(prefix):
-                text = text[len(prefix):]
+                text = text[len(prefix) :]
                 break
         text = text.strip()
         if not text or text.startswith("~"):
@@ -151,11 +162,7 @@ class SandboxRunner:
         folder: Path | None = None,
     ) -> list[str]:
         after = self._workspace_snapshot(folder)
-        changed = [
-            name
-            for name, signature in after.items()
-            if before.get(name) != signature
-        ]
+        changed = [name for name, signature in after.items() if before.get(name) != signature]
         return changed[:20]
 
     def _materialize_echo_argv(self, command: list[str], cwd: Path) -> Path | None:
@@ -176,11 +183,7 @@ class SandboxRunner:
             return None
         payload = " ".join(args[:-1])
         if interpret:
-            payload = (
-                payload.replace("\\n", "\n")
-                .replace("\\t", "\t")
-                .replace("\\r", "\r")
-            )
+            payload = payload.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r")
         payload = self.unwrap_echo_payload(payload)
         destination = (cwd / filename).resolve()
         if not self._inside_workspace(destination):
@@ -258,7 +261,7 @@ class SandboxRunner:
             cell = cell[1:]
         elif cell.endswith('"') and cell.count('"') == 1:
             cell = cell[:-1]
-        if any(ch in cell for ch in ",\"\n"):
+        if any(ch in cell for ch in ',"\n'):
             return '"' + cell.replace('"', '""') + '"'
         return cell
 
@@ -300,21 +303,15 @@ class SandboxRunner:
                 Path(os.environ.get("TMPDIR", "/tmp")).resolve(),
             }
             for root in roots:
-                profile.append(
-                    f'(allow file-write* (subpath "{self._quote_profile_path(root)}"))'
-                )
+                profile.append(f'(allow file-write* (subpath "{self._quote_profile_path(root)}"))')
         return "".join(profile)
 
     def _argv(self, command: list[str], mode: SandboxMode) -> list[str]:
         if mode == "danger-full-access":
             return command
         if not self.restricted_available:
-            raise SandboxUnavailableError(
-                "restricted sandbox backend is unavailable"
-            )
-        return [
-            str(self.seatbelt), "-p", self._profile(mode), "--", *command
-        ]
+            raise SandboxUnavailableError("restricted sandbox backend is unavailable")
+        return [str(self.seatbelt), "-p", self._profile(mode), "--", *command]
 
     def _limits(self) -> None:
         cpu = max(1, math.ceil(self.timeout_seconds) + 1)
@@ -367,9 +364,7 @@ class SandboxRunner:
         if mode != "read-only" and exit_code == 0 and not timed_out:
             self._materialize_echo_argv(command, resolved_cwd)
         written_files = (
-            self._changed_workspace_files(before, resolved_cwd)
-            if mode != "read-only"
-            else []
+            self._changed_workspace_files(before, resolved_cwd) if mode != "read-only" else []
         )
         return SandboxResult(
             mode=mode,
@@ -392,9 +387,8 @@ def register_sandbox_tools(
             arguments: SandboxCommandArguments,
             _context: ToolExecutionContext,
         ) -> SandboxResult:
-            return runner.run(
-                arguments.command, mode=mode, cwd=arguments.cwd
-            )
+            return runner.run(arguments.command, mode=mode, cwd=arguments.cwd)
+
         return execute
 
     common = {
@@ -403,39 +397,40 @@ def register_sandbox_tools(
         "source": "sandbox",
         "concurrency_safe": True,
     }
-    registry.register(
-        ToolDefinition(
-            name="sandbox_read_only",
-            description=(
-                "在无网络、禁止文件写入的本地沙箱中执行 argv 命令。"
-                "command 必须是参数数组，不经过 shell 拼接。"
-                "仅用于用户明确要求的本机命令，不要用来访问互联网。"
-            ),
-            handler=handler("read-only"),
-            risk="low",
-            builtin=True,
-            allowed_roles=frozenset({"operator", "admin"}),
-            **common,
+    if runner.restricted_available:
+        registry.register(
+            ToolDefinition(
+                name="sandbox_read_only",
+                description=(
+                    "在无网络、禁止文件写入的本地沙箱中执行 argv 命令。"
+                    "command 必须是参数数组，不经过 shell 拼接。"
+                    "仅用于用户明确要求的本机命令，不要用来访问互联网。"
+                ),
+                handler=handler("read-only"),
+                risk="low",
+                builtin=True,
+                allowed_roles=frozenset({"operator", "admin"}),
+                **common,
+            )
         )
-    )
-    registry.register(
-        ToolDefinition(
-            name="sandbox_workspace_write",
-            description=(
-                "在无网络、仅工作区和临时目录可写的沙箱中执行命令；每次均需人工审批。"
-                "command 是 argv 数组，不经过 shell。表格导出请写入 .csv。"
-                "若使用 echo/printf 且最后一个参数是文件名，运行时会把内容写入该工作区文件；"
-                "含制表符的内容会额外生成同名 .csv。"
-                "仅用于用户明确要求的本机写入，不要用来访问互联网。"
-            ),
-            handler=handler("workspace-write"),
-            risk="medium",
-            requires_approval=True,
-            builtin=True,
-            allowed_roles=frozenset({"operator", "admin"}),
-            **common,
+        registry.register(
+            ToolDefinition(
+                name="sandbox_workspace_write",
+                description=(
+                    "在无网络、仅工作区和临时目录可写的沙箱中执行命令；每次均需人工审批。"
+                    "command 是 argv 数组，不经过 shell。表格导出请写入 .csv。"
+                    "若使用 echo/printf 且最后一个参数是文件名，运行时会把内容写入该工作区文件；"
+                    "含制表符的内容会额外生成同名 .csv。"
+                    "仅用于用户明确要求的本机写入，不要用来访问互联网。"
+                ),
+                handler=handler("workspace-write"),
+                risk="medium",
+                requires_approval=True,
+                builtin=True,
+                allowed_roles=frozenset({"operator", "admin"}),
+                **common,
+            )
         )
-    )
     if settings.sandbox_full_access_enabled:
         registry.register(
             ToolDefinition(

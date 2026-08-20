@@ -149,6 +149,38 @@ def test_model_registry_creates_qwen_from_page_payload(tmp_path):
     assert created.supports_image_input is False
     assert created.supports_audio_input is True
     assert adapter.input_modalities == frozenset({"text", "audio"})
+    public = json.loads(settings.model_definitions_path.read_text(encoding="utf-8"))
+    secrets = json.loads(
+        settings.model_definitions_path.with_name("model_secrets.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "api_key" not in public["qwen-ui"]
+    assert secrets["model/qwen-ui"]["api_key"] == "sk-from-page"
+    assert (
+        settings.model_definitions_path.with_name("model_secrets.json").stat().st_mode
+        & 0o777
+    ) == 0o600
+
+
+def test_registry_migrates_embedded_model_secret(tmp_path):
+    definitions = tmp_path / "models.json"
+    definitions.write_text(json.dumps({
+        "deepseek-main": {
+            "name": "DeepSeek", "provider": "deepseek",
+            "model_name": "deepseek-chat", "api_key": "legacy-secret",
+            "enabled": True, "is_default": True,
+        }
+    }), encoding="utf-8")
+    settings = Settings(_env_file=None, model_definitions_path=definitions)
+
+    registry = create_model_registry(definitions, settings)
+
+    assert registry.get("deepseek-main").api_key == "legacy-secret"
+    assert "api_key" not in json.loads(definitions.read_text())["deepseek-main"]
+    assert json.loads((tmp_path / "model_secrets.json").read_text())[
+        "model/deepseek-main"
+    ]["api_key"] == "legacy-secret"
 
 
 def test_model_registry_creates_deepseek_from_page_payload(tmp_path):

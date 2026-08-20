@@ -5,7 +5,7 @@
 
 面向生产化演进的 **Agent Runtime 平台**：通用 Function Calling 对话、工具审批、Subagent 外部队列、沙箱执行、可观测性，跨境电商 BI 查询 Agent（Amazon 结算、领星利润、金蝶云星空），以及 Coordinator 的知识库检索与公开网页搜索（Tavily）。项目提供商用控制台形态的 Dashboard、审批中心、Agent 对话、知识库、审计和设置页面。
 
-项目支持两种本地形态：`.env.example` 使用 SQLite + mock 模型，完全离线即可运行；生产形态可将控制面与 Session 事件切换到 PostgreSQL。分析类 Agent 可连接 PostgreSQL 或 MySQL 分析库；虚构样本数据由脚本生成后导入，不随仓库分发。
+项目支持两种运行形态：`.env.example` 使用 SQLite + mock 模型，完全离线即可运行；`APP_ENV=production` 会强制控制面、Session、长期记忆和任务队列使用 PostgreSQL，并强制 JWT 认证。分析类 Agent 可连接 PostgreSQL 或 MySQL 分析库；虚构样本数据由脚本生成后导入，不随仓库分发。
 
 ## 系统架构
 
@@ -240,6 +240,16 @@ RUN_POSTGRES_TESTS=1 pytest -q tests/test_postgres_integration.py
 docker compose -f docker-compose.postgres.yml up -d
 ```
 
+完整生产拓扑使用 API、Subagent Worker、记忆维护 Worker 和共享数据卷，避免数据库队列只有入队没有消费者：
+
+```bash
+cp .env.postgres.example .env.production
+# 填写生产密钥，并确保 APP_HOST=0.0.0.0
+POSTGRES_PASSWORD='replace-me' docker compose -f docker-compose.production.yml up -d --build
+```
+
+生产编排只由 API 容器执行一次 Alembic 迁移；Worker 在 API readiness 通过后启动。`data` 卷在 API 与 Worker 间共享模型及连接器配置。配置发生变化后应滚动重启 Worker；在注册表迁移到共享数据库前，API 副本数必须保持 1。
+
 ## 使用真实模型
 
 使用管理员账号进入“系统设置 → 模型配置”，新建 OpenAI、智谱、
@@ -262,7 +272,7 @@ docker compose -f docker-compose.postgres.yml up -d
 外部账号按 tenant 保存为 Connection；公开配置写入
 `data/connections.json`，凭证仅通过 `secret_ref` 从独立的
 `data/connection_secrets.json` 读取。本地 Secret 文件会设置为 `0600`；
-生产环境建议将 `LocalSecretStore` 替换为 Vault/KMS 实现。
+模型与连接凭证不会写入公开定义文件，本地 Secret 文件权限为 `0600`。生产环境仍建议将 `LocalSecretStore` 替换为 Vault/KMS 实现。
 
 ### 钉钉连接与推送
 
@@ -355,7 +365,7 @@ Agent，任务并发执行并在同一调用中返回精简结论。Runtime 还�
 不进入权限规则候选；Agent 职责白名单与沙箱策略仍会限制其实际使用范围。
 `search_knowledge` 与 `web_search` 仅 Coordinator 可调用。
 
-控制台同时提供 tenant 级账户认证。首次进入可在注册页创建账户；租户的
+控制台同时提供 tenant 级账户认证。开发环境首次进入可在注册页创建账户；生产环境必须在请求头 `X-Bootstrap-Token` 中提供与 `ACCOUNT_BOOTSTRAP_TOKEN` 相同的一次性引导令牌。租户的
 第一个注册账户自动成为 `admin`；已初始化的租户关闭公开注册，新用户由管理员在
 “添加用户”中选择角色并填写或生成临时密码，临时密码只返回一次，用户首次
 登录必须修改后才能访问业务接口。密码使用 scrypt 加盐存储，连续失败默认
@@ -365,7 +375,8 @@ Agent，任务并发执行并在同一调用中返回精简结论。Runtime 还�
 - `POST /v1/auth/register`、`/login`、`/refresh`、`/logout` — 账户和会话生命周期。
 - `GET /v1/auth/me`、`POST /v1/auth/change-password` — 当前账户与首次/主动改密。
 - `POST /v1/access-control/users/{user_id}/reset-password` — 管理员重置临时密码。
-- PostgreSQL 部署应配置共享的 `JWT_SECRET`，保证多副本签发与校验一致。
+- 生产部署必须配置 `JWT_REQUIRED=true`、共享的 `JWT_SECRET`、`JWT_ISSUER` 和 `JWT_AUDIENCE`。全新默认租户初始化时临时配置独立的 `ACCOUNT_BOOTSTRAP_TOKEN`，创建首个管理员后将其移除。
+- 当前模型、连接器、工具绑定和知识空间注册表仍是本地原子 JSON，因此生产校验暂时要求 `APP_REPLICA_COUNT=1`。禁止在未改为共享配置存储前宣称 API 多副本可用。
 
 - `GET /v1/access-control` — 返回用户、权限组、规则及 Tool 目录。
 - `PUT/DELETE /v1/access-control/users/{user_id}` — 管理用户与启用状态。
@@ -385,7 +396,7 @@ Agent，任务并发执行并在同一调用中返回精简结论。Runtime 还�
 这两个结果在任务创建时固化，后续配置变更不会放大运行中任务的权限。
 为了兼容旧环境，tenant 中尚未创建任何用户时使用开放兼容模式；
 一旦创建首个用户，未登记、已停用或没有规则的用户默认无 Tool 权限。
-本地 SQLite 和多副本 PostgreSQL 控制面均有对应关系表实现。
+本地 SQLite 和 PostgreSQL 控制面均有对应关系表实现。
 
 ## 知识库与向量数据库
 
@@ -409,7 +420,7 @@ Runtime 内置 tenant 隔离的 `memory_items` 存储和
 
 - 显式写入：只有本轮用户明确说“记住”时 `remember_fact` 才可执行。
 - 自动提取：偏好和画像只会以 `candidate` 产生；与同 key 生效记忆不同时进入 `conflicted`，需管理员确认或拒绝。
-- 检索：默认使用本地确定性向量；PostgreSQL 可选 `pgvector`，也可选 Qdrant。排序结合语义、词项、重要度和质量分。
+- 检索：默认使用本地确定性向量；PostgreSQL 可选 `pgvector`，也可在页面配置 Qdrant 或 Milvus。排序结合语义、词项、实体、时效、重要度、质量和用户反馈。
 - 作用域：用户记忆、自动聚合的用户画像、tenant 组织知识和 Agent 专属记忆分开授权。
 - 生命周期：支持重要度、置信度、质量分、过期时间、版本链、纠错代替与内容擦除。
 - 合规：单条遗忘与用户级合规删除都会清空内容和向量，并保留不含原文的审计记录。
@@ -417,6 +428,8 @@ Runtime 内置 tenant 隔离的 `memory_items` 存储和
 管理控制台的“长期记忆”页面可查看、语义检索、审核候选、
 纠正、删除和执行用户级合规擦除。PostgreSQL 部署先执行
 `ops-agent-migrate`；迁移会尝试建立 pgvector HNSW 索引，扩展不可用时保留 JSON 向量回退。
+
+完整数据流、治理策略、worker 和评测说明见 [docs/MEMORY_SYSTEM.md](docs/MEMORY_SYSTEM.md)。
 
 ## 项目结构
 

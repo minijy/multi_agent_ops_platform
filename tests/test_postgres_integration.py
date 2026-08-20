@@ -71,7 +71,7 @@ def test_postgres_agent_session_persists_across_restart():
 
             audit = client.get(
                 "/v1/audit-events",
-                headers={**headers, "X-User-Role": "viewer"},
+                headers={**headers, "X-User-Role": "admin"},
             ).json()
             assert audit["count"] >= 1
     finally:

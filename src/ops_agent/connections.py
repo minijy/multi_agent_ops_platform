@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
 import uuid
 from pathlib import Path
@@ -11,6 +10,7 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, Field
 
 from .integrations.tavily.client import validate_tavily_base_url
+from .persistence import write_json_atomic
 
 
 ConnectorType = Literal[
@@ -116,12 +116,7 @@ class LocalSecretStore:
                 **current,
                 **{key: value for key, value in values.items() if value != SECRET_MASK},
             }
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            os.chmod(self.path, 0o600)
+            write_json_atomic(self.path, payload, mode=0o600)
 
     def get(self, secret_ref: str) -> dict[str, str]:
         with self._lock:
@@ -133,11 +128,7 @@ class LocalSecretStore:
             if secret_ref not in payload:
                 return
             payload.pop(secret_ref, None)
-            self.path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            os.chmod(self.path, 0o600)
+            write_json_atomic(self.path, payload, mode=0o600)
 
 
 class ConnectionRegistry:
@@ -204,15 +195,9 @@ class ConnectionRegistry:
         }
 
     def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(
-                [item.model_dump(mode="json") for item in self._connections.values()],
-                ensure_ascii=False,
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
+        write_json_atomic(
+            self.path,
+            [item.model_dump(mode="json") for item in self._connections.values()],
         )
 
     def upsert(

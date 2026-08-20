@@ -100,14 +100,10 @@ def test_coordinator_allowlist_includes_web_search(tmp_path):
                 builtin=True,
             )
         )
-    allowed = resolve_agent_tool_allowlist(
-        agents.runtime_config(), agents, settings, registry
-    )
+    allowed = resolve_agent_tool_allowlist(agents.runtime_config(), agents, settings, registry)
     assert "web_search" in allowed
     assert "web_search" in agents.runtime_config().system_prompt
-    analyst = resolve_agent_tool_allowlist(
-        agents.analyst_config(), agents, settings, registry
-    )
+    analyst = resolve_agent_tool_allowlist(agents.analyst_config(), agents, settings, registry)
     assert "web_search" not in analyst
 
 
@@ -162,7 +158,9 @@ def test_top_level_session_picks_up_tavily_added_after_session_start(tmp_path):
                 return ModelTurn(provider=self.provider, model=self.model_name, content="检索完成")
             self.calls += 1
             if self.calls == 1:
-                return ModelTurn(provider=self.provider, model=self.model_name, content="先确认问题")
+                return ModelTurn(
+                    provider=self.provider, model=self.model_name, content="先确认问题"
+                )
             return ModelTurn(
                 provider=self.provider,
                 model=self.model_name,
@@ -178,9 +176,7 @@ def test_top_level_session_picks_up_tavily_added_after_session_start(tmp_path):
     runtime = AgentRuntime(
         router=ModelRouter({"fake": _Adapter()}, default_model_id="fake"),
         registry=tools,
-        executor=ToolExecutor(
-            tools, guards=[ConnectorAccessGuard(bindings, connections)]
-        ),
+        executor=ToolExecutor(tools, guards=[ConnectorAccessGuard(bindings, connections)]),
         event_store=SQLiteSessionEventStore(tmp_path / "events.sqlite3"),
         connection_registry=connections,
         tool_bindings=bindings,
@@ -203,7 +199,7 @@ def test_top_level_session_picks_up_tavily_added_after_session_start(tmp_path):
         item.startswith("tenant-a:tavily:") for item in created.payload["connection_ids"]
     )
 
-    tavily = connections.create(
+    connections.create(
         tenant_id="tenant-a",
         connector_type="tavily",
         name="网页搜索",
@@ -271,9 +267,7 @@ def test_delegated_session_does_not_gain_tavily_from_live_scope(tmp_path):
     runtime = AgentRuntime(
         router=ModelRouter({"fake": _Adapter()}, default_model_id="fake"),
         registry=tools,
-        executor=ToolExecutor(
-            tools, guards=[ConnectorAccessGuard(bindings, connections)]
-        ),
+        executor=ToolExecutor(tools, guards=[ConnectorAccessGuard(bindings, connections)]),
         event_store=SQLiteSessionEventStore(tmp_path / "events.sqlite3"),
         connection_registry=connections,
         tool_bindings=bindings,

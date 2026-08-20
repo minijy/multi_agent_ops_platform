@@ -8,6 +8,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from .connections import ConnectionRegistry
+from .persistence import write_json_atomic
 
 
 class KnowledgeSpaceCreate(BaseModel):
@@ -78,15 +79,9 @@ class KnowledgeSpaceRegistry:
             }
 
     def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(
-                [item.model_dump(mode="json") for item in self._items.values()],
-                ensure_ascii=False,
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
+        write_json_atomic(
+            self.path,
+            [item.model_dump(mode="json") for item in self._items.values()],
         )
 
     def _validate_connection(self, tenant_id: str, connection_id: str) -> None:

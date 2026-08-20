@@ -7,6 +7,11 @@ from typing import Iterator
 from ..config import Settings
 from ..access_control import AccessControlStore, create_access_control_store
 from ..agent_registry import AgentRegistry, create_agent_registry
+from ..agent_skill_store import (
+    create_agent_skill_store,
+    seed_agents_from_defaults,
+    seed_skills_from_paths,
+)
 from ..model_registry import ModelRegistry, create_model_registry
 from ..knowledge_gateway import KnowledgeGateway
 from ..knowledge_spaces import (
@@ -34,7 +39,12 @@ from .connectors import (
 )
 from .governance import RuntimeGovernanceStore, create_runtime_governance_store
 from .mcp_client import MCPClientManager
-from .memory import MemoryService, create_memory_service, register_memory_tools
+from .memory import (
+    MemoryService,
+    create_memory_service,
+    model_candidate_extractor,
+    register_memory_tools,
+)
 from .model_router import create_model_router_from_registry
 from .observability import create_metrics_store
 from .result_store import ResultStore, create_result_store
@@ -74,7 +84,13 @@ class RuntimeStack:
 def open_runtime_stack(settings: Settings) -> Iterator[RuntimeStack]:
     """Build the shared Agent Runtime stack used by API and external workers."""
     configure_tracing(settings)
-    agent_registry = create_agent_registry(settings.agent_definitions_path)
+    agent_skill_store = create_agent_skill_store(settings)
+    seed_agents_from_defaults(
+        agent_skill_store,
+        legacy_json=settings.agent_definitions_path,
+    )
+    seed_skills_from_paths(agent_skill_store, settings.skills_paths)
+    agent_registry = create_agent_registry(store=agent_skill_store)
     connection_registry = create_connection_registry(
         settings.connection_definitions_path,
         settings.connection_secrets_path,
@@ -86,9 +102,15 @@ def open_runtime_stack(settings: Settings) -> Iterator[RuntimeStack]:
     access_control = create_access_control_store(settings)
     connector_runtime = create_connector_runtime(connection_registry, tool_bindings)
     model_registry = create_model_registry(settings.model_definitions_path, settings)
+    model_router = create_model_router_from_registry(model_registry, settings)
     tool_registry = ToolRegistry()
-    memory_service = create_memory_service(settings) if settings.memory_enabled else None
+    memory_service = (
+        create_memory_service(settings, connection_registry)
+        if settings.memory_enabled
+        else None
+    )
     if memory_service is not None:
+        memory_service.set_candidate_extractor(model_candidate_extractor(model_router))
         register_memory_tools(tool_registry, memory_service)
     register_amazon_finance_tool(tool_registry, settings, connector_runtime)
     register_lingxing_profit_tool(tool_registry, connector_runtime, timeout_seconds=30.0)
@@ -98,7 +120,7 @@ def open_runtime_stack(settings: Settings) -> Iterator[RuntimeStack]:
     register_web_search_tool(tool_registry, connector_runtime, timeout_seconds=20.0)
     knowledge_gateway = KnowledgeGateway.from_settings(settings)
     register_search_knowledge_tool(tool_registry, knowledge_gateway)
-    skill_registry = SkillRegistry.from_paths(settings.skills_paths)
+    skill_registry = SkillRegistry.from_store(agent_skill_store)
     register_skill_tool(tool_registry, skill_registry)
     sandbox_runner = SandboxRunner(
         settings.sandbox_workspace_root,
@@ -118,7 +140,7 @@ def open_runtime_stack(settings: Settings) -> Iterator[RuntimeStack]:
         max_image_pixels=settings.attachment_max_image_pixels,
     )
     agent_runtime = AgentRuntime(
-        router=create_model_router_from_registry(model_registry, settings),
+        router=model_router,
         registry=tool_registry,
         executor=ToolExecutor(
             tool_registry,

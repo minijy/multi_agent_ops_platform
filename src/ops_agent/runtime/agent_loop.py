@@ -1965,7 +1965,11 @@ class AgentRuntime:
             and isinstance(created.payload.get("memory_snapshot"), list)
         ):
             memory_snapshot = list(created.payload.get("memory_snapshot") or [])
-        elif memory_snapshot is None and self.memory_service is not None:
+        elif (
+            memory_snapshot is None
+            and self.memory_service is not None
+            and request.memory_mode != "disabled"
+        ):
             memory_snapshot = self.memory_service.build_snapshot(
                 request.question,
                 tenant_id=tenant_id,
@@ -2005,6 +2009,7 @@ class AgentRuntime:
                     "resource_scope": resource_scope,
                     "token_budget": token_budget,
                     "memory_snapshot": memory_snapshot if parent_session_id else [],
+                    "memory_mode": request.memory_mode,
                 },
             )
         if not resume:
@@ -2045,7 +2050,14 @@ class AgentRuntime:
             user_id=user_id,
             role=role,
         )
-        system_prompt += memory_prompt(memory_snapshot)
+        system_prompt += memory_prompt(
+            memory_snapshot,
+            max_chars=(
+                self.settings.memory_snapshot_max_chars
+                if self.settings is not None
+                else 2400
+            ),
+        )
         if role != "admin" and self.access_control is not None:
             access = self.access_control.effective_access(tenant_id, user_id, role)
             if access.configured:
@@ -2155,8 +2167,14 @@ class AgentRuntime:
             "token_budget": token_budget,
             "tokens_used": 0,
             "status": "completed",
-            "explicit_memory_consent": explicit_remember_requested(request.question),
-            "explicit_memory_forget": explicit_forget_requested(request.question),
+            "explicit_memory_consent": (
+                request.memory_mode == "default"
+                and explicit_remember_requested(request.question)
+            ),
+            "explicit_memory_forget": (
+                request.memory_mode != "disabled"
+                and explicit_forget_requested(request.question)
+            ),
             "memory_snapshot": memory_snapshot,
         }
         if resume:
@@ -2237,6 +2255,7 @@ class AgentRuntime:
             and agent_id == COORDINATOR_AGENT_ID
             and not resume
             and result["status"] == "completed"
+            and request.memory_mode == "default"
         ):
             candidates = self.memory_service.extract_candidates(
                 request.question,
@@ -2249,6 +2268,24 @@ class AgentRuntime:
                     state,
                     "memory.candidates_extracted",
                     {"memory_ids": [item.id for item in candidates], "count": len(candidates)},
+                )
+            episode = self.memory_service.capture_episode(
+                question=request.question,
+                answer=answer,
+                tool_names=[
+                    str(item.get("tool_name") or "")
+                    for item in result["tool_results"]
+                    if item.get("ok") and item.get("tool_name")
+                ],
+                tenant_id=tenant_id,
+                user_id=user_id,
+                source_session_id=session_id,
+            )
+            if episode is not None:
+                self._append_event(
+                    state,
+                    "memory.episode_extracted",
+                    {"memory_id": episode.id},
                 )
         self.event_store.append(
             session_id=session_id,

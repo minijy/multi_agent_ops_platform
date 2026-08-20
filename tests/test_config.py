@@ -16,11 +16,46 @@ def test_sqlite_is_default_and_paths_are_absolute(tmp_path: Path, monkeypatch):
 
 
 def test_postgres_requires_dsn():
-    settings = Settings(
-        _env_file=None, control_plane_backend="postgres", postgres_dsn=""
-    )
+    settings = Settings(_env_file=None, control_plane_backend="postgres", postgres_dsn="")
     with pytest.raises(ValueError, match="POSTGRES_DSN"):
         settings.validate_runtime()
+
+
+def test_production_rejects_insecure_or_local_runtime():
+    with pytest.raises(ValueError, match="JWT_REQUIRED"):
+        Settings(
+            _env_file=None,
+            app_env="production",
+            jwt_secret="shared-secret-at-least-thirty-two-characters",
+        ).validate_runtime()
+
+    with pytest.raises(ValueError, match="CONTROL_PLANE_BACKEND"):
+        Settings(
+            _env_file=None,
+            app_env="production",
+            jwt_secret="shared-secret-at-least-thirty-two-characters",
+            jwt_required=True,
+            jwt_issuer="issuer",
+            jwt_audience="audience",
+            account_bootstrap_token="bootstrap-token-that-is-long-enough",
+        ).validate_runtime()
+
+
+def test_production_configuration_closes_shared_state_requirements():
+    settings = Settings(
+        _env_file=None,
+        app_env="production",
+        jwt_secret="shared-secret-at-least-thirty-two-characters",
+        jwt_required=True,
+        jwt_issuer="issuer",
+        jwt_audience="audience",
+        account_bootstrap_token="bootstrap-token-that-is-long-enough",
+        control_plane_backend="postgres",
+        session_event_backend="postgres",
+        memory_backend="postgres",
+        subagent_queue_backend="db",
+    )
+    settings.validate_runtime()
 
 
 def test_zhipu_requires_api_key():
@@ -61,9 +96,7 @@ def test_context_window_overrides_roundtrip(tmp_path: Path):
         runtime_overrides_path=tmp_path / "overrides.json",
         context_keep_recent_user_turns=16,
     )
-    snapshot = update_context_window(
-        settings, {"keep_recent_user_turns": 4, "max_messages": 20}
-    )
+    snapshot = update_context_window(settings, {"keep_recent_user_turns": 4, "max_messages": 20})
     assert snapshot["keep_recent_user_turns"] == 4
     assert snapshot["max_messages"] == 20
     reloaded = Settings(

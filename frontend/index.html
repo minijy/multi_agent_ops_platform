@@ -7,8 +7,8 @@
   <link rel="icon" href="/ui/favicon.svg?v=ark-a1" type="image/svg+xml">
   <link rel="icon" href="/favicon.ico?v=ark-a1" sizes="32x32">
   <link rel="apple-touch-icon" href="/ui/apple-touch-icon.png?v=ark-a1">
-  <link rel="stylesheet" href="/ui/styles.css?v=prod-ui-53">
-  <link rel="stylesheet" href="/ui/transitions.css?v=prod-ui-53">
+  <link rel="stylesheet" href="/ui/styles.css?v=prod-ui-55">
+  <link rel="stylesheet" href="/ui/transitions.css?v=prod-ui-55">
   <style>
     html.auth-restoring .auth-card,
     html.auth-restoring .auth-error{visibility:hidden!important;pointer-events:none}
@@ -81,9 +81,10 @@
         <div class="nav-label" data-role-allow="admin">管理</div>
         <button class="nav-item" data-page="dashboard" data-role-allow="admin"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M3 12V8h3v4H3zm4 0V4h3v8H7zm4 0V6h3v6h-3z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg></span>运行概览</button>
         <button class="nav-item" data-page="agents"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><circle cx="8" cy="5.5" r="2.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M3.5 13c.6-2.2 2.3-3.4 4.5-3.4S12 10.8 12.5 13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span>助手</button>
+        <button class="nav-item" data-page="skills" data-role-allow="admin"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M5 2.8h6l2 2.4v8H3V5.2L5 2.8z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M6 7.2h4M6 9.6h3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span>技能</button>
         <button class="nav-item" data-page="tools"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M9.2 3.6 12.4 6.8 7 12.2H3.8V9z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg></span>工具</button>
         <button class="nav-item" data-page="connectors" data-role-allow="admin"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M6 8h4M4.2 5.2 2.8 6.6a2 2 0 0 0 0 2.8L4.2 10.8M11.8 5.2l1.4 1.4a2 2 0 0 1 0 2.8l-1.4 1.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span>连接器</button>
-        <button class="nav-item" data-page="memory" data-role-allow="admin"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M4 12.5V5.2A2.2 2.2 0 0 1 8 5.2a2.2 2.2 0 0 1 4 0v7.3H4z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg></span>长期记忆</button>
+        <button class="nav-item" data-page="memory"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M4 12.5V5.2A2.2 2.2 0 0 1 8 5.2a2.2 2.2 0 0 1 4 0v7.3H4z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg></span>长期记忆</button>
         <button class="nav-item" data-page="access" data-role-allow="admin"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><circle cx="6" cy="6" r="2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M3 12.2c.4-1.8 1.6-2.7 3-2.7s2.6.9 3 2.7M11 7.2v4.6M9 9.5h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span>用户与权限</button>
         <button class="nav-item" data-page="audit" data-role-allow="admin"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M4 3.5h8v9H4z" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M6 6.5h4M6 9h4M6 11.5h2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span>审计日志</button>
         <button class="nav-item" data-page="settings" data-role-allow="admin"><span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.1" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 2.8v1.4M8 11.8v1.4M2.8 8h1.4M11.8 8h1.4M4.2 4.2l1 1M10.8 10.8l1 1M11.8 4.2l-1 1M5.2 10.8l-1 1" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span>系统设置</button>
@@ -183,6 +184,7 @@
                   <input type="file" id="agent-image-input" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
                   <button type="button" class="ghost-button" id="agent-attach-image">添加图片</button>
                   <div id="agent-image-preview" class="composer-preview"></div>
+                  <label class="model-field memory-mode-field">记忆<select id="agent-memory-mode"><option value="default">正常使用</option><option value="read_only">只读取</option><option value="disabled">临时会话</option></select></label>
                   <button type="button" class="danger-button" id="agent-interrupt-button" hidden>停止</button>
                   <button type="button" class="primary" id="agent-resume-button" hidden>继续</button>
                   <button type="submit" class="primary" id="agent-send-button">发送</button>
@@ -195,7 +197,7 @@
 
       <section class="page" id="page-agents">
         <div class="page-toolbar">
-          <p class="page-lead">协调助手拆任务，分析助手查数。凭证在连接器配置，工具绑定在工具页选择。</p>
+          <p class="page-lead">协调助手拆任务，分析助手查数。凭证在连接器配置，工具绑定在工具页选择。查数步骤说明在「技能」页维护。</p>
           <form id="analyst-mode-form" class="toolbar-form">
             <label>委派策略
               <span class="toolbar-field">
@@ -210,6 +212,36 @@
         </div>
         <div id="agent-sections"></div>
       </section>
+
+      <section class="page" id="page-skills">
+        <div class="page-toolbar">
+          <p class="page-lead">技能是分析助手按需加载的操作说明书（SKILL.md），保存在控制面数据库，可在此编辑。</p>
+          <button class="primary small" id="skill-add-button" type="button">新建技能</button>
+        </div>
+        <div class="agent-grid" id="skill-grid"></div>
+      </section>
+
+      <div class="drawer-backdrop" id="skill-editor-drawer">
+        <aside class="drawer t-panel-slide" data-open="false">
+          <button class="modal-close" data-close-skill-editor type="button" aria-label="关闭">×</button>
+          <p class="eyebrow">技能</p>
+          <h2 id="skill-editor-title">编辑技能</h2>
+          <p id="skill-editor-subtitle" class="form-hint mono"></p>
+          <form id="skill-editor-form">
+            <label>技能 ID（kebab-case）<input id="skill-edit-name" required pattern="[a-z0-9]+(?:-[a-z0-9]+)*" maxlength="64" placeholder="例如 amazon-settlement-analysis"></label>
+            <label>简介<input id="skill-edit-description" required maxlength="500" placeholder="给模型看的简短说明"></label>
+            <label class="context-toggle"><input id="skill-edit-model-invocable" type="checkbox" checked>允许模型调用 load_skill 加载</label>
+            <label class="context-toggle"><input id="skill-edit-user-invocable" type="checkbox" checked>允许用户侧引用</label>
+            <label>正文（Markdown，可含 frontmatter）<textarea id="skill-edit-content" rows="16" maxlength="100000" required placeholder="---&#10;name: example&#10;description: ...&#10;---&#10;&#10;# 标题"></textarea></label>
+            <p class="form-hint" id="skill-edit-builtin-hint" hidden>内置技能可编辑内容，但不能删除。</p>
+            <div class="modal-actions">
+              <button type="button" class="danger-button" id="skill-edit-delete" hidden>删除</button>
+              <button type="button" class="secondary" data-close-skill-editor>取消</button>
+              <button type="submit" class="primary" id="skill-edit-save">保存技能</button>
+            </div>
+          </form>
+        </aside>
+      </div>
 
       <section class="page" id="page-tools">
         <div class="page-toolbar">
@@ -546,11 +578,20 @@
 
       <section class="page" id="page-memory">
         <div class="page-toolbar">
-          <p class="page-lead">审核自动候选，纠正或合规删除用户、组织和 Agent 记忆。</p>
-          <button class="primary small" id="memory-add-button" type="button">添加记忆</button>
+          <p class="page-lead">查看和控制跨会话使用的事实、偏好与画像。</p>
+          <div class="page-toolbar-actions"><button class="secondary small" id="memory-export-button" type="button">导出我的记忆</button><button class="danger-button small" id="memory-clear-button" type="button">清空我的记忆</button><button class="primary small" id="memory-add-button" data-role-allow="admin" type="button">添加记忆</button></div>
         </div>
+        <article class="panel memory-preferences" id="memory-preferences-panel">
+          <div><h2>我的记忆设置</h2><p>关闭后不会读取或创建长期记忆；也可在单次任务中选择临时会话。</p></div>
+          <div class="form-row"><label class="context-toggle"><input id="memory-enabled" type="checkbox">启用长期记忆</label><label class="context-toggle"><input id="memory-auto-extract" type="checkbox">允许生成候选记忆</label><label>保留天数<input id="memory-retention-days" type="number" min="1" max="3650" placeholder="按组织默认"></label><label class="context-toggle"><input id="memory-allow-sensitive" type="checkbox">允许敏感候选进入审核</label><button class="secondary small" id="memory-preferences-save" type="button">保存设置</button></div>
+        </article>
+        <article class="panel memory-preferences" id="memory-policy-panel" data-role-allow="admin">
+          <div><h2>租户记忆策略</h2><p>控制候选提取、检索阈值、快照数量和敏感信息处理。</p></div>
+          <div class="form-row"><label>候选提取<select id="memory-policy-extraction"><option value="heuristic">规则提取</option><option value="llm">模型结构化提取</option></select></label><label>向量存储<select id="memory-policy-vector-backend"><option value="auto">自动选择页面连接</option><option value="qdrant">Qdrant</option><option value="milvus">Milvus</option><option value="local">仅本地数据库</option></select></label><label>向量模型<select id="memory-policy-embedding-provider"><option value="hash">兼容模式</option><option value="sentence_transformers">本地语义模型</option></select></label><label>Embedding模型<input id="memory-policy-embedding-model" placeholder="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"></label><label>相关度阈值<input id="memory-policy-threshold" type="number" min="0" max="1" step="0.01"></label><label>最多注入<input id="memory-policy-limit" type="number" min="1" max="50"></label><label>敏感信息<select id="memory-policy-sensitive"><option value="block">禁止保存</option><option value="review">进入审核</option></select></label></div>
+          <div class="modal-actions" style="justify-content:flex-start"><label class="context-toggle"><input id="memory-policy-candidates" type="checkbox">允许自动候选</label><button class="primary small" id="memory-policy-save" type="button">保存策略</button><button class="secondary small" id="memory-maintenance-run" type="button">执行维护与索引重试</button></div>
+        </article>
         <div class="metric-grid" id="memory-metrics"></div>
-        <article class="panel memory-toolbar">
+        <article class="panel memory-toolbar" data-role-allow="admin">
           <label class="memory-search">搜索<input id="memory-filter-query" placeholder="关键词或语义问题"></label>
           <label>状态<select id="memory-filter-status"><option value="">全部</option><option value="candidate">待确认</option><option value="conflicted">有冲突</option><option value="active">已生效</option><option value="superseded">已替代</option><option value="deleted">已删除</option></select></label>
           <label>范围<select id="memory-filter-scope"><option value="">全部</option><option value="user">用户</option><option value="profile">用户画像</option><option value="tenant">组织知识</option><option value="agent">助手</option></select></label>
@@ -648,7 +689,7 @@
         <label>规范键<input id="memory-key" maxlength="160" placeholder="例如 report-currency"></label>
         <div class="form-row">
           <label>范围<select id="memory-scope"><option value="user">用户</option><option value="profile">用户画像</option><option value="tenant">组织知识</option><option value="agent">Agent</option></select></label>
-          <label>类型<select id="memory-kind"><option value="fact">事实</option><option value="preference">偏好</option><option value="profile">画像</option><option value="organization">组织知识</option><option value="agent">Agent 知识</option></select></label>
+          <label>类型<select id="memory-kind"><option value="fact">事实</option><option value="preference">偏好</option><option value="profile">画像</option><option value="episodic">任务经历</option><option value="procedural">执行经验</option><option value="organization">组织知识</option><option value="agent">Agent 知识</option></select></label>
         </div>
         <label id="memory-owner-field">用户 ID<input id="memory-owner-user" placeholder="默认当前管理员"></label>
         <label id="memory-agent-field" hidden>Agent ID<input id="memory-agent-id" placeholder="例如 profit-analyst"></label>
@@ -673,7 +714,7 @@
     </section>
   </div>
   <div class="toast t-toast" id="toast"></div>
-  <script src="/ui/guide.js?v=prod-ui-53" defer></script>
-  <script src="/ui/app.js?v=prod-ui-53" defer></script>
+  <script src="/ui/guide.js?v=prod-ui-55" defer></script>
+  <script src="/ui/app.js?v=prod-ui-55" defer></script>
 </body>
 </html>

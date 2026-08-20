@@ -88,6 +88,18 @@ def test_health_and_dashboard(tmp_path: Path):
         assert health["status"] == "ok"
         assert health["session_events"] == "sqlite"
         assert health["agent_runtime"] == "ready"
+        assert client.get("/health/live").json() == {"status": "ok"}
+        readiness = client.get("/health/ready")
+        assert readiness.status_code == 200
+        assert readiness.json()["status"] == "ready"
+
+
+def test_stream_capacity_is_bounded(tmp_path: Path):
+    with TestClient(create_app(_settings(tmp_path))) as client:
+        client.app.state.stream_slots = threading.BoundedSemaphore(0)
+        response = client.post("/v1/agent/query/stream", json={"question": "容量保护测试"})
+        assert response.status_code == 429
+        assert response.json()["detail"]["code"] == "stream_capacity_exceeded"
 
 
 def test_fresh_install_requires_model_configuration(tmp_path: Path):
@@ -95,6 +107,9 @@ def test_fresh_install_requires_model_configuration(tmp_path: Path):
     with TestClient(create_app(settings)) as client:
         health = client.get("/health").json()
         assert health["model_provider"] == "unconfigured"
+        readiness = client.get("/health/ready")
+        assert readiness.status_code == 503
+        assert readiness.json()["checks"]["model"] is False
 
         configuration = client.get("/v1/configuration").json()
         assert configuration["model"]["configured"] is False
@@ -172,9 +187,7 @@ def test_knowledge_space_uses_tenant_vector_connection(tmp_path: Path):
                 "total": 1,
             }
         )
-        contents = client.get(
-            f"/v1/knowledge/spaces/{space['id']}/contents"
-        )
+        contents = client.get(f"/v1/knowledge/spaces/{space['id']}/contents")
         assert contents.status_code == 200
         assert contents.json()["categories"] == ["policy"]
         assert contents.json()["items"][0]["content"].startswith("Refunds")
@@ -262,15 +275,11 @@ def test_agent_session_user_isolation_within_tenant(tmp_path: Path):
         assert created.status_code == 200
         session_id = created.json()["session_id"]
 
-        owner_sessions = client.get(
-            "/v1/agent/sessions", headers=owner
-        ).json()
+        owner_sessions = client.get("/v1/agent/sessions", headers=owner).json()
         assert owner_sessions["count"] == 1
         assert owner_sessions["items"][0]["session_id"] == session_id
         assert owner_sessions["items"][0]["title"].startswith("你好")
-        assert client.get(
-            "/v1/agent/sessions", headers=other_user
-        ).json()["count"] == 0
+        assert client.get("/v1/agent/sessions", headers=other_user).json()["count"] == 0
 
         client.app.state.session_events.append(
             session_id="child-session-for-owner",
@@ -286,37 +295,45 @@ def test_agent_session_user_isolation_within_tenant(tmp_path: Path):
             event_type="user.message",
             payload={"content": "子 Agent 任务"},
         )
-        assert client.get(
-            "/v1/agent/sessions", headers=owner
-        ).json()["count"] == 1
+        assert client.get("/v1/agent/sessions", headers=owner).json()["count"] == 1
 
-        assert client.get(
-            f"/v1/agent/sessions/{session_id}/events", headers=other_user
-        ).status_code == 404
-        assert client.get(
-            f"/v1/agent/sessions/{session_id}/events",
-            headers={
-                "X-Tenant-ID": "tenant-a",
-                "X-User-ID": "other-admin",
-                "X-User-Role": "admin",
-            },
-        ).status_code == 404
-        assert client.post(
-            "/v1/agent/query/resume",
-            headers=other_user,
-            json={"session_id": session_id},
-        ).status_code == 404
-        assert client.post(
-            "/v1/agent/query",
-            headers=other_user,
-            json={"question": "继续", "session_id": session_id},
-        ).status_code == 404
-        assert client.delete(
-            f"/v1/agent/sessions/{session_id}", headers=other_user
-        ).status_code == 404
-        assert client.get(
-            f"/v1/agent/sessions/{session_id}/events", headers=owner
-        ).status_code == 200
+        assert (
+            client.get(f"/v1/agent/sessions/{session_id}/events", headers=other_user).status_code
+            == 404
+        )
+        assert (
+            client.get(
+                f"/v1/agent/sessions/{session_id}/events",
+                headers={
+                    "X-Tenant-ID": "tenant-a",
+                    "X-User-ID": "other-admin",
+                    "X-User-Role": "admin",
+                },
+            ).status_code
+            == 404
+        )
+        assert (
+            client.post(
+                "/v1/agent/query/resume",
+                headers=other_user,
+                json={"session_id": session_id},
+            ).status_code
+            == 404
+        )
+        assert (
+            client.post(
+                "/v1/agent/query",
+                headers=other_user,
+                json={"question": "继续", "session_id": session_id},
+            ).status_code
+            == 404
+        )
+        assert (
+            client.delete(f"/v1/agent/sessions/{session_id}", headers=other_user).status_code == 404
+        )
+        assert (
+            client.get(f"/v1/agent/sessions/{session_id}/events", headers=owner).status_code == 200
+        )
 
 
 def test_catalog_configuration_and_frontend_are_available(tmp_path: Path):
@@ -388,8 +405,8 @@ def test_direct_workflow_query_uses_shared_tool_executor(tmp_path: Path):
     with TestClient(create_app(settings)) as client:
         _create_analytics_connection(client)
         captured = {}
-        client.app.state.amazon_finance_agent.plan = lambda _payload: (
-            AmazonFinanceQueryPlan(metric="overview")
+        client.app.state.amazon_finance_agent.plan = lambda _payload: AmazonFinanceQueryPlan(
+            metric="overview"
         )
 
         def execute(call, context):
@@ -416,9 +433,7 @@ def test_direct_workflow_query_uses_shared_tool_executor(tmp_path: Path):
 
         assert response.status_code == 200
         assert captured["call"].name == "amazon_finance_query"
-        assert captured["context"].allowed_tool_names == frozenset(
-            {"amazon_finance_query"}
-        )
+        assert captured["context"].allowed_tool_names == frozenset({"amazon_finance_query"})
         assert captured["context"].connection_ids
         assert "seller_id" not in response.json()
 
@@ -427,6 +442,7 @@ def test_direct_query_skips_model_when_plan_provided(tmp_path: Path):
     settings = _settings(tmp_path)
     with TestClient(create_app(settings)) as client:
         _create_analytics_connection(client)
+
         def structured(*_args, **_kwargs):
             raise AssertionError("model should not be called when plan is provided")
 
@@ -480,9 +496,7 @@ def test_function_calling_runtime_and_event_api(tmp_path: Path):
         assert body["provider"] == "mock"
         assert body["event_count"] >= 5
 
-        events = client.get(
-            f"/v1/agent/sessions/{body['session_id']}/events"
-        )
+        events = client.get(f"/v1/agent/sessions/{body['session_id']}/events")
         assert events.status_code == 200
         assert events.json()["count"] == body["event_count"]
 
@@ -557,9 +571,7 @@ def test_agent_query_resume_replays_completed_session(tmp_path: Path):
                     session_id = payload["session_id"]
                     break
         assert session_id
-        missing = client.post(
-            "/v1/agent/query/resume", json={"session_id": "missing-session-id"}
-        )
+        missing = client.post("/v1/agent/query/resume", json={"session_id": "missing-session-id"})
         assert missing.status_code == 404
         with client.stream(
             "POST",
@@ -570,11 +582,7 @@ def test_agent_query_resume_replays_completed_session(tmp_path: Path):
         assert resumed.status_code == 200
         assert "event: done" in resume_body
         events = client.get(f"/v1/agent/sessions/{session_id}/events")
-        users = [
-            item
-            for item in events.json()["items"]
-            if item["event_type"] == "user.message"
-        ]
+        users = [item for item in events.json()["items"] if item["event_type"] == "user.message"]
         assert len(users) == 1
 
 
@@ -770,13 +778,19 @@ def test_stage_three_subagent_and_governance_api(tmp_path: Path):
             headers=other_user_headers,
         )
         assert hidden_tasks.json()["count"] == 0
-        assert client.get(
-            f"/v1/agent/subagents/{task['task_id']}", headers=other_user_headers
-        ).status_code == 404
-        assert client.post(
-            f"/v1/agent/subagents/{task['task_id']}/cancel",
-            headers=other_user_headers,
-        ).status_code == 404
+        assert (
+            client.get(
+                f"/v1/agent/subagents/{task['task_id']}", headers=other_user_headers
+            ).status_code
+            == 404
+        )
+        assert (
+            client.post(
+                f"/v1/agent/subagents/{task['task_id']}/cancel",
+                headers=other_user_headers,
+            ).status_code
+            == 404
+        )
 
         approvals = client.get("/v1/agent/approvals")
         assert approvals.status_code == 200
@@ -1058,9 +1072,7 @@ def test_model_configuration_can_be_managed_by_admin(tmp_path: Path):
         assert qwen_body["supports_image"] is True
         assert qwen_body["supports_audio"] is False
         qwen_chat = next(
-            item
-            for item in client.get("/v1/models").json()["items"]
-            if item["id"] == "qwen-test"
+            item for item in client.get("/v1/models").json()["items"] if item["id"] == "qwen-test"
         )
         assert qwen_chat["supports_image"] is True
         assert qwen_chat["supports_audio"] is False
@@ -1154,9 +1166,7 @@ def test_remote_model_without_key_cannot_be_enabled_or_selected(tmp_path: Path):
         )
         assert enabled.status_code == 200
         assert enabled.json()["callable"] is True
-        assert "zhipu-disabled" in {
-            item["id"] for item in client.get("/v1/models").json()["items"]
-        }
+        assert "zhipu-disabled" in {item["id"] for item in client.get("/v1/models").json()["items"]}
 
 
 def test_kingdee_connection_must_be_configured_on_connector_page(tmp_path: Path):
@@ -1217,14 +1227,10 @@ def test_connection_api_is_tenant_scoped_and_masks_credentials(tmp_path: Path):
         assert created.json()["dsn"] == "********"
         assert "seller_ids" not in created.json()["resource_scopes"]
         catalog = client.get("/v1/catalog").json()
-        amazon = next(
-            item for item in catalog["agents"] if item["id"] == "amazon-finance-query"
-        )
+        amazon = next(item for item in catalog["agents"] if item["id"] == "amazon-finance-query")
         assert amazon["status"] == "active"
 
-        foreign = client.get(
-            "/v1/connections", headers={"X-Tenant-ID": "tenant-b"}
-        )
+        foreign = client.get("/v1/connections", headers={"X-Tenant-ID": "tenant-b"})
         assert foreign.status_code == 200
         assert foreign.json()["count"] == 0
 
@@ -1244,9 +1250,7 @@ def test_mysql_connection_can_be_configured_from_api(tmp_path: Path):
                 "connector_type": "analytics",
                 "name": "MySQL 分析库",
                 "config": {"database_type": "mysql"},
-                "credentials": {
-                    "dsn": "mysql://reader:secret@mysql.example.com:3306/analytics"
-                },
+                "credentials": {"dsn": "mysql://reader:secret@mysql.example.com:3306/analytics"},
             },
         )
         assert created.status_code == 201
@@ -1292,8 +1296,7 @@ def test_dingtalk_connection_and_tool_bindings_are_exposed_by_api(tmp_path: Path
         assert created.json()["app_secret_configured"] is True
 
         bindings = {
-            item["tool_name"]: item
-            for item in client.get("/v1/tool-bindings").json()["items"]
+            item["tool_name"]: item for item in client.get("/v1/tool-bindings").json()["items"]
         }
         expected = {
             "dingtalk_send_direct_message": "dingtalk_user_ids",
@@ -1307,9 +1310,7 @@ def test_dingtalk_connection_and_tool_bindings_are_exposed_by_api(tmp_path: Path
                 f"/v1/tools/{tool_name}/connection",
                 json={
                     "connection_id": created.json()["id"],
-                    "resource_scopes": {
-                        scope_name: created.json()["resource_scopes"][scope_name]
-                    },
+                    "resource_scopes": {scope_name: created.json()["resource_scopes"][scope_name]},
                 },
             )
             assert bound.status_code == 200
@@ -1338,8 +1339,7 @@ def test_tavily_connection_and_web_search_binding_are_exposed_by_api(tmp_path: P
         assert created.json()["base_url"] == "https://api.tavily.com"
 
         bindings = {
-            item["tool_name"]: item
-            for item in client.get("/v1/tool-bindings").json()["items"]
+            item["tool_name"]: item for item in client.get("/v1/tool-bindings").json()["items"]
         }
         assert bindings["web_search"]["connector_type"] == "tavily"
         bound = client.put(
@@ -1382,18 +1382,14 @@ def test_multiple_connections_can_be_bound_to_individual_tools(tmp_path: Path):
         )
         assert bound.status_code == 200
         bindings = client.get("/v1/tool-bindings").json()["items"]
-        profit = next(
-            item for item in bindings if item["tool_name"] == "profit_report_query"
-        )
+        profit = next(item for item in bindings if item["tool_name"] == "profit_report_query")
         assert profit["connection_id"] == second.json()["id"]
         assert {item["name"] for item in profit["connections"]} == {
             "Amazon warehouse",
             "Profit warehouse",
         }
 
-        blocked_delete = client.delete(
-            f"/v1/connections/{second.json()['id']}"
-        )
+        blocked_delete = client.delete(f"/v1/connections/{second.json()['id']}")
         assert blocked_delete.status_code == 409
 
         foreign_bind = client.put(
@@ -1434,13 +1430,14 @@ def test_access_control_api_and_tool_binding_data_scope(tmp_path: Path):
         )
         assert widened.status_code == 400
 
-        assert client.put(
-            "/v1/access-control/users/alice",
-            json={"id": "alice", "name": "Alice", "enabled": True},
-        ).status_code == 200
-        group = client.post(
-            "/v1/access-control/groups", json={"name": "Finance"}
-        ).json()
+        assert (
+            client.put(
+                "/v1/access-control/users/alice",
+                json={"id": "alice", "name": "Alice", "enabled": True},
+            ).status_code
+            == 200
+        )
+        group = client.post("/v1/access-control/groups", json={"name": "Finance"}).json()
         rule = client.post(
             "/v1/access-control/rules",
             json={
@@ -1460,9 +1457,7 @@ def test_access_control_api_and_tool_binding_data_scope(tmp_path: Path):
         assert duplicate.status_code == 409
         assert duplicate.json()["detail"]["code"] == "tool_already_assigned"
         assert duplicate.json()["detail"]["conflicts"][0]["rule_id"] == rule["id"]
-        other_group = client.post(
-            "/v1/access-control/groups", json={"name": "Operations"}
-        ).json()
+        other_group = client.post("/v1/access-control/groups", json={"name": "Operations"}).json()
         reused = client.post(
             "/v1/access-control/rules",
             json={
@@ -1475,14 +1470,10 @@ def test_access_control_api_and_tool_binding_data_scope(tmp_path: Path):
         assert reused.json()["group_id"] == other_group["id"]
         direct_grant = client.put(
             f"/v1/access-control/groups/{group['id']}/tools",
-            json={
-                "tool_names": ["profit_report_query", "amazon_finance_query"]
-            },
+            json={"tool_names": ["profit_report_query", "amazon_finance_query"]},
         )
         assert direct_grant.status_code == 200
-        assert direct_grant.json()["tool_names"] == [
-            "amazon_finance_query", "profit_report_query"
-        ]
+        assert direct_grant.json()["tool_names"] == ["amazon_finance_query", "profit_report_query"]
         renamed = client.put(
             f"/v1/access-control/groups/{group['id']}",
             json={"name": "Finance Operations", "description": "Updated"},
@@ -1490,9 +1481,7 @@ def test_access_control_api_and_tool_binding_data_scope(tmp_path: Path):
         assert renamed.status_code == 200
         assert renamed.json()["name"] == "Finance Operations"
         assert renamed.json()["description"] == "Updated"
-        assert renamed.json()["tool_names"] == [
-            "amazon_finance_query", "profit_report_query"
-        ]
+        assert renamed.json()["tool_names"] == ["amazon_finance_query", "profit_report_query"]
         cross_group_grant = client.put(
             f"/v1/access-control/groups/{other_group['id']}/tools",
             json={"tool_names": ["profit_report_query"]},
@@ -1509,32 +1498,36 @@ def test_access_control_api_and_tool_binding_data_scope(tmp_path: Path):
         )
         assert system_tool_rule.status_code == 400
         assert system_tool_rule.json()["detail"]["code"] == "system_tool_not_configurable"
-        assert client.put(
-            "/v1/access-control/users/alice/groups",
-            json={"target_id": group["id"]},
-        ).status_code == 200
-        assert client.put(
-            f"/v1/access-control/groups/{group['id']}/rules",
-            json={"target_id": rule["id"]},
-        ).status_code == 200
+        assert (
+            client.put(
+                "/v1/access-control/users/alice/groups",
+                json={"target_id": group["id"]},
+            ).status_code
+            == 200
+        )
+        assert (
+            client.put(
+                f"/v1/access-control/groups/{group['id']}/rules",
+                json={"target_id": rule["id"]},
+            ).status_code
+            == 200
+        )
 
         snapshot = client.get("/v1/access-control").json()
         assert snapshot["configured"] is True
         assert snapshot["users"][0]["group_ids"] == [group["id"]]
         assert set(snapshot["default_tool_names"]) == SYSTEM_DEFAULT_TOOL_NAMES
-        assert not (
-            {tool["id"] for tool in snapshot["tool_catalog"]}
-            & SYSTEM_DEFAULT_TOOL_NAMES
-        )
+        assert not ({tool["id"] for tool in snapshot["tool_catalog"]} & SYSTEM_DEFAULT_TOOL_NAMES)
 
         alice_catalog = client.get(
             "/v1/catalog",
             headers={"X-User-ID": "alice", "X-User-Role": "operator"},
         ).json()
-        assert {tool["id"] for tool in alice_catalog["tools"]} == (
-            SYSTEM_DEFAULT_TOOL_NAMES | {"profit_report_query"}
-            | {"amazon_finance_query"}
-        )
+        expected = SYSTEM_DEFAULT_TOOL_NAMES - {"sandbox_read_only", "sandbox_workspace_write"} | {
+            "profit_report_query",
+            "amazon_finance_query",
+        }
+        assert {tool["id"] for tool in alice_catalog["tools"]} == expected
 
         alice_agents = client.get(
             "/v1/agents",
@@ -1544,39 +1537,36 @@ def test_access_control_api_and_tool_binding_data_scope(tmp_path: Path):
         assert "amazon-finance-analyst" in visible_agent_ids
         assert "profit-analyst" in visible_agent_ids
         assert "erp-analyst" not in visible_agent_ids
-        assert client.get(
-            "/v1/agents/erp-analyst",
-            headers={"X-User-ID": "alice", "X-User-Role": "operator"},
-        ).status_code == 404
+        assert (
+            client.get(
+                "/v1/agents/erp-analyst",
+                headers={"X-User-ID": "alice", "X-User-Role": "operator"},
+            ).status_code
+            == 404
+        )
 
-        assert client.put(
-            "/v1/access-control/users/bob",
-            json={"id": "bob", "name": "Bob", "enabled": True},
-        ).status_code == 200
+        assert (
+            client.put(
+                "/v1/access-control/users/bob",
+                json={"id": "bob", "name": "Bob", "enabled": True},
+            ).status_code
+            == 200
+        )
         bob_agents = client.get(
             "/v1/agents",
             headers={"X-User-ID": "bob", "X-User-Role": "operator"},
         ).json()
-        assert not (
-            {item["id"] for item in bob_agents["items"]}
-            & SPECIALIST_ANALYST_IDS
-        )
+        assert not ({item["id"] for item in bob_agents["items"]} & SPECIALIST_ANALYST_IDS)
 
         admin_catalog = client.get(
             "/v1/catalog",
             headers={"X-User-ID": "unregistered-admin", "X-User-Role": "admin"},
         ).json()
-        assert "delegate_subagent" in {
-            tool["id"] for tool in admin_catalog["tools"]
-        }
+        assert "delegate_subagent" in {tool["id"] for tool in admin_catalog["tools"]}
 
 
 def test_permission_denial_response_contains_actionable_hint(tmp_path: Path):
-    with TestClient(
-        create_app(
-            _settings(tmp_path)
-        )
-    ) as client:
+    with TestClient(create_app(_settings(tmp_path))) as client:
         _create_analytics_connection(client)
         client.put(
             "/v1/access-control/users/alice",
@@ -1631,8 +1621,57 @@ def test_memory_management_api_lifecycle(tmp_path: Path):
 
         erased = client.delete("/v1/memories/users/alice/compliance")
         assert erased.status_code == 204
-        remaining = client.get(
-            "/v1/memories?owner_user_id=alice&include_deleted=true"
-        ).json()
+        remaining = client.get("/v1/memories?owner_user_id=alice&include_deleted=true").json()
         assert remaining["count"] == 2
         assert all(item["content"] == "[deleted]" for item in remaining["items"])
+
+
+def test_memory_user_controls_and_temporary_session_mode(tmp_path: Path):
+    with TestClient(create_app(_settings(tmp_path))) as client:
+        headers = {"X-User-ID": "alice", "X-User-Role": "operator"}
+        preferences = client.put(
+            "/v1/memory/preferences",
+            headers=headers,
+            json={"enabled": True, "auto_extract_enabled": False},
+        )
+        assert preferences.status_code == 200
+        assert preferences.json()["auto_extract_enabled"] is False
+        assert client.get("/v1/memory/items", headers=headers).status_code == 200
+        exported = client.get("/v1/memory/export", headers=headers)
+        assert exported.status_code == 200
+        assert exported.json()["user_id"] == "alice"
+        response = client.post(
+            "/v1/agent/query",
+            headers=headers,
+            json={
+                "question": "临时查询一个普通问题",
+                "memory_mode": "disabled",
+            },
+        )
+        assert response.status_code == 200
+        assert client.get("/v1/memory/items", headers=headers).json()["count"] == 0
+
+
+def test_memory_sources_policy_and_user_clear(tmp_path: Path):
+    with TestClient(create_app(_settings(tmp_path))) as client:
+        headers = {"X-User-ID": "alice", "X-User-Role": "operator"}
+        created = client.post(
+            "/v1/memories",
+            json={
+                "content": "Alice 的默认报表币种是 CAD",
+                "key": "currency",
+                "owner_user_id": "alice",
+            },
+        )
+        assert created.status_code == 201
+        memory_id = created.json()["id"]
+        sources = client.get(f"/v1/memory/items/{memory_id}/sources", headers=headers)
+        assert sources.status_code == 200
+        assert sources.json()["items"][0]["source_type"] == "admin"
+        policy = client.put("/v1/memory/policy", json={"vector_backend": "milvus"})
+        assert policy.status_code == 200
+        assert policy.json()["vector_backend"] == "milvus"
+        cleared = client.delete("/v1/memory/items", headers=headers)
+        assert cleared.status_code == 204
+        listed = client.get("/v1/memory/items?include_deleted=true", headers=headers).json()
+        assert listed["items"][0]["content"] == "[deleted]"

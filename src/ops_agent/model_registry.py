@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .config import Settings
 from .runtime.model_errors import ModelProviderError
+from .connections import LocalSecretStore
+from .persistence import write_json_atomic
 
 
 ModelProvider = Literal["mock", "openai", "zhipu", "qwen", "deepseek"]
@@ -195,8 +197,14 @@ class ModelRegistry:
     def __init__(self, path: Path, settings: Settings) -> None:
         self.path = path
         self.settings = settings
+        secrets_path = settings.model_secrets_path or path.with_name("model_secrets.json")
+        self.secrets = LocalSecretStore(secrets_path)
         self._models: dict[str, ModelDefinition] = {}
         self.reload()
+
+    @staticmethod
+    def _secret_ref(model_id: str) -> str:
+        return f"model/{model_id}"
 
     def reload(self) -> None:
         stored = self._read_file()
@@ -204,8 +212,18 @@ class ModelRegistry:
         migrated = False
         for model_id, override in stored.items():
             try:
+                override = dict(override)
+                embedded_secret = str(override.pop("api_key", "") or "").strip()
+                if embedded_secret:
+                    self.secrets.put(
+                        self._secret_ref(model_id), {"api_key": embedded_secret}
+                    )
+                    migrated = True
+                stored_secret = self.secrets.get(self._secret_ref(model_id)).get(
+                    "api_key", ""
+                )
                 model = ModelDefinition.model_validate(
-                    {"id": model_id, **override}
+                    {"id": model_id, **override, "api_key": stored_secret}
                 )
                 # Remove the bootstrap entry created by older releases. Mock
                 # remains an internal test adapter, never a page model.
@@ -229,15 +247,11 @@ class ModelRegistry:
             self.save()
 
     def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            model_id: model.model_dump(mode="json")
+            model_id: model.model_dump(mode="json", exclude={"api_key"})
             for model_id, model in self._models.items()
         }
-        self.path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        write_json_atomic(self.path, payload)
 
     def _read_file(self) -> dict[str, dict[str, Any]]:
         if not self.path.is_file():
@@ -336,6 +350,10 @@ class ModelRegistry:
         if created.is_default:
             self._clear_default()
         self._models[model_id] = created
+        if created.api_key:
+            self.secrets.put(
+                self._secret_ref(model_id), {"api_key": created.api_key}
+            )
         self._ensure_default(self._models)
         self.save()
         return self._models[model_id]
@@ -354,6 +372,10 @@ class ModelRegistry:
         if patch.get("is_default"):
             self._clear_default(except_id=model_id)
         self._models[model_id] = updated
+        if "api_key" in patch and str(patch.get("api_key") or "").strip():
+            self.secrets.put(
+                self._secret_ref(model_id), {"api_key": str(patch["api_key"])}
+            )
         self._ensure_default(self._models)
         self.save()
         return self._models[model_id]
@@ -363,6 +385,7 @@ class ModelRegistry:
         if current is None:
             raise KeyError(model_id)
         del self._models[model_id]
+        self.secrets.delete(self._secret_ref(model_id))
         self._ensure_default(self._models)
         self.save()
 

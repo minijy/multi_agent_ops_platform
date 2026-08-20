@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hmac
 import logging
 import mimetypes
 import threading
@@ -38,6 +39,8 @@ from ..runtime.agent_tool_policy import (
     profit_report_tool_active,
 )
 from ..agent_registry import AgentRegistry, AgentUpdateRequest, snapshot_agents
+from ..agent_skill_store import build_skill_markdown
+from ..runtime.skills import register_skill_tool
 from ..config import (
     Settings,
     analyst_runtime_snapshot,
@@ -71,7 +74,7 @@ from ..runtime.domain import (
 from ..runtime.auth import principal_from_bearer
 from ..runtime.model_errors import ModelProviderError
 from ..runtime.model_router import create_model_router_from_registry
-from ..runtime.memory import MemoryCreate
+from ..runtime.memory import MemoryCreate, MemoryFeedback
 from ..runtime.result_store import result_page
 from ..runtime.session_events import SessionEvent
 from ..runtime.connectors import ToolConnectionBindingRequest
@@ -79,7 +82,10 @@ from ..runtime.stack import open_runtime_stack
 from ..runtime.subagents import SubagentSubmitRequest
 from ..runtime.tools import ToolExecutionContext, ToolExecutor
 from ..source_privacy import sanitize_public_value
-from ..workflows.amazon_finance.agent import AmazonFinanceAgent, SYSTEM_PROMPT as AMAZON_SYSTEM_PROMPT
+from ..workflows.amazon_finance.agent import (
+    AmazonFinanceAgent,
+    SYSTEM_PROMPT as AMAZON_SYSTEM_PROMPT,
+)
 from ..workflows.amazon_finance.domain import (
     AmazonFinanceQueryRequest,
     AmazonFinanceQueryResponse,
@@ -198,6 +204,30 @@ class MemoryAdminCreateRequest(MemoryCreate):
     owner_user_id: str | None = Field(default=None, max_length=128)
 
 
+class MemoryPreferencesUpdate(BaseModel):
+    enabled: bool | None = None
+    auto_extract_enabled: bool | None = None
+    allow_sensitive: bool | None = None
+    allowed_kinds: (
+        list[Literal["fact", "preference", "profile", "episodic", "procedural"]] | None
+    ) = None
+    retention_days: int | None = Field(default=None, ge=1, le=3650)
+
+
+class MemoryPolicyUpdate(BaseModel):
+    enabled: bool | None = None
+    automatic_candidates: bool | None = None
+    extraction_mode: Literal["heuristic", "llm"] | None = None
+    embedding_provider: Literal["hash", "sentence_transformers"] | None = None
+    embedding_model: str | None = Field(default=None, min_length=1, max_length=255)
+    vector_backend: Literal["auto", "qdrant", "milvus", "local"] | None = None
+    auto_activate_confidence: float | None = Field(default=None, ge=0, le=1)
+    relevance_threshold: float | None = Field(default=None, ge=0, le=1)
+    snapshot_limit: int | None = Field(default=None, ge=1, le=50)
+    default_expiry_days: int | None = Field(default=None, ge=1, le=3650)
+    sensitive_data_policy: Literal["block", "review"] | None = None
+
+
 @dataclass(frozen=True)
 class Principal:
     tenant_id: str
@@ -225,32 +255,24 @@ def _kingdee_cloud_active(registry: AgentRegistry, connections=None, tenant_id=N
     return kingdee_cloud_tool_active(registry, connections, tenant_id)
 
 
-def _sync_amazon_finance_agent(
-    agent: AmazonFinanceAgent, registry: AgentRegistry
-) -> None:
+def _sync_amazon_finance_agent(agent: AmazonFinanceAgent, registry: AgentRegistry) -> None:
     config = registry.amazon_finance_config()
     agent.set_system_prompt(config.effective_system_prompt(AMAZON_SYSTEM_PROMPT))
 
 
-def _sync_lingxing_profit_agent(
-    agent: LingXingProfitAgent, registry: AgentRegistry
-) -> None:
+def _sync_lingxing_profit_agent(agent: LingXingProfitAgent, registry: AgentRegistry) -> None:
     config = registry.lingxing_profit_config()
     agent.set_system_prompt(config.effective_system_prompt(LINGXING_SYSTEM_PROMPT))
     raw = config.integration if isinstance(config.integration, dict) else {}
     agent.set_integration(LingXingIntegrationConfig.model_validate(raw))
 
 
-def _sync_profit_report_agent(
-    agent: ProfitReportAgent, registry: AgentRegistry
-) -> None:
+def _sync_profit_report_agent(agent: ProfitReportAgent, registry: AgentRegistry) -> None:
     config = registry.profit_report_config()
     agent.set_system_prompt(config.effective_system_prompt(PROFIT_REPORT_SYSTEM_PROMPT))
 
 
-def _sync_kingdee_cloud_agent(
-    agent: KingdeeCloudAgent, registry: AgentRegistry
-) -> None:
+def _sync_kingdee_cloud_agent(agent: KingdeeCloudAgent, registry: AgentRegistry) -> None:
     config = registry.kingdee_cloud_config()
     agent.set_system_prompt(config.effective_system_prompt(KINGDEE_SYSTEM_PROMPT))
     raw = config.integration if isinstance(config.integration, dict) else {}
@@ -309,9 +331,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             application.state.result_store = stack.result_store
             application.state.memory_service = stack.memory_service
             application.state.knowledge_spaces = stack.knowledge_spaces
-            application.state.knowledge_gateway = KnowledgeGateway.from_settings(
-                runtime_settings
-            )
+            application.state.knowledge_gateway = KnowledgeGateway.from_settings(runtime_settings)
             application.state.runtime_tool_registry = stack.tool_registry
             application.state.runtime_tool_executor = stack.agent_runtime.executor
             _sync_amazon_finance_agent(
@@ -339,6 +359,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             application.state.runtime_governance = stack.governance_store
             application.state.subagent_manager = stack.subagent_manager
             application.state.sandbox_runner = stack.sandbox_runner
+            application.state.stream_slots = threading.BoundedSemaphore(
+                runtime_settings.agent_stream_max_concurrency
+            )
             yield
 
     application = FastAPI(
@@ -346,6 +369,114 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    @application.middleware("http")
+    async def audit_mutating_request(request: Request, call_next):
+        response = await call_next(request)
+        if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+            return response
+        if not request.url.path.startswith("/v1/"):
+            return response
+        settings = request.app.state.settings
+        tenant_id = request.headers.get("x-tenant-id") or settings.default_tenant_id
+        actor_id = request.headers.get("x-user-id") or "anonymous"
+        actor_role = request.headers.get("x-user-role") or "unknown"
+        bearer = request.headers.get("authorization") or ""
+        if bearer.lower().startswith("bearer "):
+            try:
+                claims = request.app.state.account_service.principal(
+                    bearer.split(" ", 1)[1].strip()
+                )
+                tenant_id = claims["tenant_id"]
+                actor_id = claims["user_id"]
+                actor_role = claims["role"]
+            except AccountError:
+                pass
+        route = request.scope.get("route")
+        route_path = getattr(route, "path", request.url.path)
+        try:
+            request.app.state.store.audit(
+                tenant_id=tenant_id,
+                actor_id=actor_id,
+                actor_role=actor_role,
+                action=f"api.{request.method.lower()}",
+                resource_type="api_route",
+                resource_id=route_path,
+                detail={"status_code": response.status_code},
+            )
+        except Exception:
+            LOGGER.exception("failed to write API mutation audit event")
+        return response
+
+    def start_stream_worker(request: Request, target, *, name: str) -> None:
+        slots: threading.BoundedSemaphore = request.app.state.stream_slots
+        if not slots.acquire(blocking=False):
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "code": "stream_capacity_exceeded",
+                    "message": "流式请求并发已满，请稍后重试",
+                },
+                headers={"Retry-After": "1"},
+            )
+
+        def bounded_target() -> None:
+            try:
+                target()
+            finally:
+                slots.release()
+
+        try:
+            threading.Thread(target=bounded_target, daemon=True, name=name).start()
+        except Exception:
+            slots.release()
+            raise
+
+    def audit_agent_result(
+        request: Request, principal: Principal, result: RuntimeAgentResponse
+    ) -> None:
+        request.app.state.store.audit(
+            tenant_id=principal.tenant_id,
+            actor_id=principal.user_id,
+            actor_role=principal.role,
+            action="agent.query.completed",
+            resource_type="agent_session",
+            resource_id=result.session_id,
+            detail={
+                "status": result.status,
+                "provider": result.provider,
+                "model": result.model,
+                "event_count": result.event_count,
+            },
+        )
+
+    def ensure_admin_survives(
+        request: Request,
+        tenant_id: str,
+        user_id: str,
+        *,
+        next_role: str | None = None,
+        next_enabled: bool = False,
+    ) -> None:
+        current = request.app.state.account_service.account(tenant_id, user_id)
+        loses_admin = (
+            current and current["role"] == "admin" and (next_role != "admin" or not next_enabled)
+        )
+        if not loses_admin:
+            return
+        other_admins = [
+            account
+            for account in request.app.state.account_service.list_accounts(tenant_id)
+            if account["user_id"] != user_id and account["role"] == "admin" and account["enabled"]
+        ]
+        if not other_admins:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "last_admin_required",
+                    "message": "不能停用、降级或删除租户的最后一个管理员。",
+                },
+            )
 
     def authorize(
         request: Request,
@@ -362,7 +493,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 claims = request.app.state.account_service.principal(token)
             except AccountError as account_error:
-                if not settings.jwt_secret:
+                if (
+                    not settings.jwt_secret
+                    or settings.app_env == "production"
+                    or settings.jwt_required
+                ):
                     raise HTTPException(
                         status_code=account_error.status_code, detail=account_error.detail()
                     ) from account_error
@@ -436,9 +571,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_role: str | None,
         allowed_roles: set[str] | None = None,
     ) -> Principal:
-        return authorize(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role, allowed_roles
-        )
+        return authorize(request, x_api_key, x_tenant_id, x_user_id, x_user_role, allowed_roles)
 
     def owned_session_events(
         request: Request,
@@ -451,11 +584,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             tenant_id=principal.tenant_id,
         )
         owner = next(
-            (
-                event.user_id
-                for event in events
-                if event.event_type == "session.created"
-            ),
+            (event.user_id for event in events if event.event_type == "session.created"),
             events[0].user_id if events else None,
         )
         if not events or owner != principal.user_id:
@@ -497,9 +626,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "tool_name": tool_name,
                 },
             ) from exc
-        resource_scope = {
-            name: tuple(values) for name, values in resolved_scope.items()
-        }
+        resource_scope = {name: tuple(values) for name, values in resolved_scope.items()}
         call = ToolCall(
             call_id=f"direct-{uuid.uuid4().hex}",
             name=tool_name,
@@ -520,8 +647,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not result.ok:
             reason = result.error or "tool execution failed"
             permission_markers = (
-                "permission", "not visible", "not authorized", "access denied",
-                "outside delegated scope", "no authorized resources",
+                "permission",
+                "not visible",
+                "not authorized",
+                "access denied",
+                "outside delegated scope",
+                "no authorized resources",
             )
             if any(marker in reason.lower() for marker in permission_markers):
                 raise HTTPException(
@@ -550,14 +681,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail={"code": "login_required", "message": "请先登录。"},
             )
         try:
-            claims = request.app.state.account_service.principal(
-                bearer.split(" ", 1)[1].strip()
-            )
+            claims = request.app.state.account_service.principal(bearer.split(" ", 1)[1].strip())
         except AccountError as error:
             raise account_failure(error) from error
-        account = request.app.state.account_service.account(
-            claims["tenant_id"], claims["user_id"]
-        )
+        account = request.app.state.account_service.account(claims["tenant_id"], claims["user_id"])
         if not account:
             raise HTTPException(status_code=401, detail="account not found")
         return Principal(**claims), account
@@ -573,10 +700,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     @application.post("/v1/auth/register", status_code=201)
-    def register_account(payload: AccountRegisterRequest, request: Request) -> dict[str, Any]:
-        if request.app.state.settings.app_env == "production":
-            raise HTTPException(status_code=403, detail="self-service registration is disabled")
+    def register_account(
+        payload: AccountRegisterRequest,
+        request: Request,
+        x_bootstrap_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
         service = request.app.state.account_service
+        settings = request.app.state.settings
+        production_bootstrap_denied = settings.app_env == "production" and (
+            payload.tenant_id != settings.default_tenant_id
+            or len(settings.account_bootstrap_token) < 24
+            or not hmac.compare_digest(x_bootstrap_token or "", settings.account_bootstrap_token)
+        )
+        if production_bootstrap_denied:
+            raise HTTPException(
+                status_code=403,
+                detail="valid bootstrap token is required for initial registration",
+            )
         try:
             account = service.register(
                 payload.tenant_id, payload.user_id, payload.display_name, payload.password
@@ -587,9 +727,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             payload.tenant_id, payload.user_id, payload.display_name, True
         )
         request.app.state.store.audit(
-            tenant_id=payload.tenant_id, actor_id=payload.user_id,
-            actor_role=account["role"], action="account.registered",
-            resource_type="account", resource_id=payload.user_id,
+            tenant_id=payload.tenant_id,
+            actor_id=payload.user_id,
+            actor_role=account["role"],
+            action="account.registered",
+            resource_type="account",
+            resource_id=payload.user_id,
             detail={"role": account["role"]},
         )
         return service.issue_tokens(account)
@@ -601,16 +744,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             account = service.authenticate(payload.tenant_id, payload.user_id, payload.password)
         except AccountError as error:
             request.app.state.store.audit(
-                tenant_id=payload.tenant_id, actor_id=payload.user_id,
-                actor_role="unknown", action="account.login_failed",
-                resource_type="account", resource_id=payload.user_id,
+                tenant_id=payload.tenant_id,
+                actor_id=payload.user_id,
+                actor_role="unknown",
+                action="account.login_failed",
+                resource_type="account",
+                resource_id=payload.user_id,
                 detail={"code": error.code},
             )
             raise account_failure(error) from error
         request.app.state.store.audit(
-            tenant_id=payload.tenant_id, actor_id=payload.user_id,
-            actor_role=account["role"], action="account.login_succeeded",
-            resource_type="account", resource_id=payload.user_id, detail={},
+            tenant_id=payload.tenant_id,
+            actor_id=payload.user_id,
+            actor_role=account["role"],
+            action="account.login_succeeded",
+            resource_type="account",
+            resource_id=payload.user_id,
+            detail={},
         )
         return service.issue_tokens(account)
 
@@ -633,21 +783,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return account
 
     @application.post("/v1/auth/change-password")
-    def change_account_password(
-        payload: ChangePasswordRequest, request: Request
-    ) -> dict[str, Any]:
+    def change_account_password(payload: ChangePasswordRequest, request: Request) -> dict[str, Any]:
         principal, _ = bearer_account(request)
         try:
             account = request.app.state.account_service.change_password(
-                principal.tenant_id, principal.user_id,
-                payload.current_password, payload.new_password,
+                principal.tenant_id,
+                principal.user_id,
+                payload.current_password,
+                payload.new_password,
             )
         except AccountError as error:
             raise account_failure(error) from error
         request.app.state.store.audit(
-            tenant_id=principal.tenant_id, actor_id=principal.user_id,
-            actor_role=principal.role, action="account.password_changed",
-            resource_type="account", resource_id=principal.user_id, detail={},
+            tenant_id=principal.tenant_id,
+            actor_id=principal.user_id,
+            actor_role=principal.role,
+            action="account.password_changed",
+            resource_type="account",
+            resource_id=principal.user_id,
+            detail={},
         )
         return request.app.state.account_service.issue_tokens(account)
 
@@ -664,19 +818,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             configured_models[0] if configured_models else None,
         )
         return {
-            "status": "ok", "environment": settings.app_env,
+            "status": "ok",
+            "environment": settings.app_env,
             "control_plane": settings.control_plane_backend,
             "session_events": settings.session_event_backend,
-            "model_provider": (
-                default_model.provider
-                if default_model
-                else "unconfigured"
-            ),
+            "model_provider": (default_model.provider if default_model else "unconfigured"),
             "knowledge_backend": (
                 "configured"
-                if request.app.state.knowledge_spaces.list(
-                    settings.default_tenant_id
-                )
+                if request.app.state.knowledge_spaces.list(settings.default_tenant_id)
                 else "disabled"
             ),
             "amazon_finance": (
@@ -716,11 +865,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "sandbox": (
                 "seatbelt"
                 if request.app.state.sandbox_runner.restricted_available
-                else "full-access-only"
+                else ("full-access" if settings.sandbox_full_access_enabled else "unavailable")
             ),
             "otel_exporter": settings.otel_exporter,
             "jwt": "required" if settings.jwt_required else "optional",
         }
+
+    @application.get("/health/live")
+    def health_live() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @application.get("/health/ready")
+    def health_ready(request: Request, response: Response) -> dict[str, Any]:
+        callable_models = [
+            model
+            for model in request.app.state.model_registry.list(enabled_only=True)
+            if model.callable()
+        ]
+        checks = {
+            "runtime": hasattr(request.app.state, "agent_runtime"),
+            "model": bool(callable_models),
+            "persistence": hasattr(request.app.state, "session_events"),
+        }
+        ready = all(checks.values())
+        if not ready:
+            response.status_code = 503
+        return {"status": "ready" if ready else "not_ready", "checks": checks}
 
     @application.get("/v1/dashboard/summary")
     def dashboard_summary(
@@ -735,9 +905,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         store: PlatformStore = request.app.state.store
         runtime = request.app.state.metrics_store.summarize(principal.tenant_id)
-        pending = request.app.state.runtime_governance.list_pending_approvals(
-            principal.tenant_id
-        )
+        pending = request.app.state.runtime_governance.list_pending_approvals(principal.tenant_id)
         return {
             **store.summary(principal.tenant_id),
             "waiting_approval": len(pending),
@@ -757,9 +925,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> RuntimeAgentResponse:
-        principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         decision = request.app.state.access_control.effective_access(
             principal.tenant_id, principal.user_id, principal.role
         )
@@ -768,18 +934,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if payload.session_id:
             owned_session_events(request, principal, payload.session_id)
         try:
-            return request.app.state.agent_runtime.run(
+            result = request.app.state.agent_runtime.run(
                 payload,
                 tenant_id=principal.tenant_id,
                 user_id=principal.user_id,
                 role=principal.role,
                 token_budget=request.app.state.settings.run_token_budget,
                 allowed_tools=(
-                    set(decision.allowed_tools)
-                    if decision.allowed_tools is not None
-                    else None
+                    set(decision.allowed_tools) if decision.allowed_tools is not None else None
                 ),
             )
+            audit_agent_result(request, principal, result)
+            return result
         except ModelProviderError as exc:
             raise HTTPException(
                 status_code=exc.status_code,
@@ -800,9 +966,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> StreamingResponse:
-        principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         decision = request.app.state.access_control.effective_access(
             principal.tenant_id, principal.user_id, principal.role
         )
@@ -826,16 +990,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     interruption_is_resumable=True,
                     on_event=emit,
                     allowed_tools=(
-                        set(decision.allowed_tools)
-                        if decision.allowed_tools is not None
-                        else None
+                        set(decision.allowed_tools) if decision.allowed_tools is not None else None
                     ),
                 )
+                audit_agent_result(request, principal, result)
                 events.put({"type": "done", **result.model_dump(mode="json")})
             except ModelProviderError as exc:
-                events.put(
-                    {"type": "error", **exc.as_dict(), "status_code": exc.status_code}
-                )
+                events.put({"type": "error", **exc.as_dict(), "status_code": exc.status_code})
             except Exception as exc:
                 events.put(
                     {
@@ -848,9 +1009,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             finally:
                 events.put(None)
 
-        threading.Thread(
-            target=worker, daemon=True, name="agent-query-stream"
-        ).start()
+        start_stream_worker(request, worker, name="agent-query-stream")
 
         def sse() -> Iterator[str]:
             while True:
@@ -859,8 +1018,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     break
                 name = str(item.get("type") or "message")
                 yield (
-                    f"event: {name}\n"
-                    f"data: {json.dumps(item, ensure_ascii=False, default=str)}\n\n"
+                    f"event: {name}\ndata: {json.dumps(item, ensure_ascii=False, default=str)}\n\n"
                 )
 
         return StreamingResponse(
@@ -880,8 +1038,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     break
                 name = str(item.get("type") or "message")
                 yield (
-                    f"event: {name}\n"
-                    f"data: {json.dumps(item, ensure_ascii=False, default=str)}\n\n"
+                    f"event: {name}\ndata: {json.dumps(item, ensure_ascii=False, default=str)}\n\n"
                 )
 
         return StreamingResponse(
@@ -902,9 +1059,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> StreamingResponse:
-        principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         runtime: AgentRuntime = request.app.state.agent_runtime
         stored = owned_session_events(request, principal, payload.session_id)
         events: Queue[dict[str, Any] | None] = Queue()
@@ -914,6 +1069,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         attached, live = runtime.live_hub.subscribe(payload.session_id)
         if live and attached is not None:
+
             def forward() -> None:
                 try:
                     while True:
@@ -925,26 +1081,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     runtime.live_hub.unsubscribe(payload.session_id, attached)
                     events.put(None)
 
-            threading.Thread(
-                target=forward, daemon=True, name="agent-query-resume-attach"
-            ).start()
+            try:
+                start_stream_worker(request, forward, name="agent-query-resume-attach")
+            except HTTPException:
+                runtime.live_hub.unsubscribe(payload.session_id, attached)
+                raise
             return _sse(events)
 
         if not turn_is_open(stored):
             completed = next(
-                (
-                    event
-                    for event in reversed(stored)
-                    if event.event_type == "turn.completed"
-                ),
+                (event for event in reversed(stored) if event.event_type == "turn.completed"),
                 None,
             )
             model = next(
-                (
-                    event
-                    for event in reversed(stored)
-                    if event.event_type == "model.response"
-                ),
+                (event for event in reversed(stored) if event.event_type == "model.response"),
                 None,
             )
             emit({"type": "session", "session_id": payload.session_id})
@@ -955,7 +1105,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "answer": (completed.payload or {}).get("answer", "") if completed else "",
                     "provider": (model.payload or {}).get("provider", "") if model else "",
                     "model": (model.payload or {}).get("model", "") if model else "",
-                    "status": (completed.payload or {}).get("status", "completed") if completed else "completed",
+                    "status": (completed.payload or {}).get("status", "completed")
+                    if completed
+                    else "completed",
                     "pending_approval_ids": [],
                     "tool_results": [],
                     "event_count": len(stored),
@@ -975,6 +1127,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     interruption_is_resumable=True,
                     on_event=emit,
                 )
+                audit_agent_result(request, principal, result)
                 events.put({"type": "done", **result.model_dump(mode="json")})
             except KeyError:
                 events.put(
@@ -986,9 +1139,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     }
                 )
             except ModelProviderError as exc:
-                events.put(
-                    {"type": "error", **exc.as_dict(), "status_code": exc.status_code}
-                )
+                events.put({"type": "error", **exc.as_dict(), "status_code": exc.status_code})
             except Exception as exc:
                 events.put(
                     {
@@ -1001,9 +1152,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             finally:
                 events.put(None)
 
-        threading.Thread(
-            target=worker, daemon=True, name="agent-query-resume"
-        ).start()
+        start_stream_worker(request, worker, name="agent-query-resume")
         return _sse(events)
 
     @application.get("/v1/agent/approvals")
@@ -1015,12 +1164,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_role: str | None = Header(default=None),
     ) -> dict[str, Any]:
         principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role,
+            request,
+            x_api_key,
+            x_tenant_id,
+            x_user_id,
+            x_user_role,
             {"approver", "admin"},
         )
-        items = request.app.state.runtime_governance.list_pending_approvals(
-            principal.tenant_id
-        )
+        items = request.app.state.runtime_governance.list_pending_approvals(principal.tenant_id)
         return {
             "items": [item.model_dump(mode="json") for item in items],
             "count": len(items),
@@ -1040,7 +1191,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_role: str | None = Header(default=None),
     ) -> RuntimeAgentResponse:
         principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role,
+            request,
+            x_api_key,
+            x_tenant_id,
+            x_user_id,
+            x_user_role,
             {"approver", "admin"},
         )
         try:
@@ -1065,10 +1220,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             tenant_id=principal.tenant_id,
             actor_id=principal.user_id,
             actor_role=principal.role,
-            action=(
-                "agent_tool.approved"
-                if payload.approved else "agent_tool.rejected"
-            ),
+            action=("agent_tool.approved" if payload.approved else "agent_tool.rejected"),
             resource_type="agent_tool_approval",
             resource_id=approval_id,
             detail={"comment": payload.comment},
@@ -1085,7 +1237,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_role: str | None = Header(default=None),
     ) -> dict[str, Any]:
         principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role,
+            request,
+            x_api_key,
+            x_tenant_id,
+            x_user_id,
+            x_user_role,
             {"operator", "admin"},
         )
         parent_events = request.app.state.session_events.list_events(
@@ -1120,12 +1276,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
-        items = request.app.state.subagent_manager.list(
-            principal.tenant_id, parent_session_id
-        )
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
+        items = request.app.state.subagent_manager.list(principal.tenant_id, parent_session_id)
         items = [item for item in items if item.user_id == principal.user_id]
         return {
             "items": [item.model_dump(mode="json") for item in items],
@@ -1141,12 +1293,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
-        task = request.app.state.subagent_manager.get(
-            task_id, principal.tenant_id
-        )
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
+        task = request.app.state.subagent_manager.get(task_id, principal.tenant_id)
         if task is None:
             raise HTTPException(status_code=404, detail="subagent task not found")
         if task.user_id != principal.user_id:
@@ -1163,18 +1311,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_role: str | None = Header(default=None),
     ) -> dict[str, Any]:
         principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role,
+            request,
+            x_api_key,
+            x_tenant_id,
+            x_user_id,
+            x_user_role,
             {"operator", "admin"},
         )
-        existing = request.app.state.subagent_manager.get(
-            task_id, principal.tenant_id
-        )
+        existing = request.app.state.subagent_manager.get(task_id, principal.tenant_id)
         if existing is None or existing.user_id != principal.user_id:
             raise HTTPException(status_code=404, detail="subagent task not found")
         try:
-            task = request.app.state.subagent_manager.cancel(
-                task_id, principal.tenant_id
-            )
+            task = request.app.state.subagent_manager.cancel(task_id, principal.tenant_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return task.model_dump(mode="json")
@@ -1192,13 +1340,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> AttachmentReference:
-        principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         try:
-            return request.app.state.attachment_store.save(
-                payload, tenant_id=principal.tenant_id
-            )
+            return request.app.state.attachment_store.save(payload, tenant_id=principal.tenant_id)
         except AttachmentError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1212,7 +1356,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_role: str | None = Header(default=None),
     ) -> FileResponse:
         principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role,
+            request,
+            x_api_key,
+            x_tenant_id,
+            x_user_id,
+            x_user_role,
             {"operator", "admin"},
         )
         try:
@@ -1235,8 +1383,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 media_type="text/csv; charset=utf-8",
                 headers={
                     "Content-Disposition": (
-                        f"attachment; filename=\"{target.name}\"; "
-                        f"filename*=UTF-8''{encoded_name}"
+                        f"attachment; filename=\"{target.name}\"; filename*=UTF-8''{encoded_name}"
                     ),
                 },
             )
@@ -1255,13 +1402,168 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
-        items = [
-            item.as_dict() for item in request.app.state.skill_registry.list()
-        ]
+        principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
+        items = [item.as_dict() for item in request.app.state.skill_registry.list()]
         return {"items": items, "count": len(items)}
+
+    class SkillUpsertRequest(BaseModel):
+        name: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=64)
+        description: str = Field(min_length=1, max_length=500)
+        content: str = Field(default="", max_length=100_000)
+        body: str = Field(default="", max_length=100_000)
+        model_invocable: bool = True
+        user_invocable: bool = True
+
+    def _refresh_skill_tool(request: Request) -> None:
+        register_skill_tool(
+            request.app.state.runtime_tool_registry,
+            request.app.state.skill_registry,
+            replace=True,
+        )
+
+    @application.get("/v1/agent/skills/{skill_name}")
+    def get_agent_skill(
+        skill_name: str,
+        request: Request,
+        x_api_key: str | None = Header(default=None),
+        x_tenant_id: str | None = Header(default=None),
+        x_user_id: str | None = Header(default=None),
+        x_user_role: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
+        try:
+            return request.app.state.skill_registry.get_detail(skill_name).as_detail()
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @application.put("/v1/agent/skills/{skill_name}")
+    def upsert_agent_skill(
+        skill_name: str,
+        payload: SkillUpsertRequest,
+        request: Request,
+        x_api_key: str | None = Header(default=None),
+        x_tenant_id: str | None = Header(default=None),
+        x_user_id: str | None = Header(default=None),
+        x_user_role: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        principal = principal_from_headers(
+            request, x_api_key, x_tenant_id, x_user_id, x_user_role, {"admin"}
+        )
+        if payload.name != skill_name:
+            raise HTTPException(status_code=400, detail="skill name mismatch")
+        content = payload.content.strip()
+        if not content:
+            content = build_skill_markdown(
+                name=payload.name,
+                description=payload.description,
+                body=payload.body or f"# {payload.name}\n",
+                model_invocable=payload.model_invocable,
+                user_invocable=payload.user_invocable,
+            )
+        try:
+            skill = request.app.state.skill_registry.upsert(
+                name=payload.name,
+                description=payload.description,
+                content=content,
+                model_invocable=payload.model_invocable,
+                user_invocable=payload.user_invocable,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        _refresh_skill_tool(request)
+        request.app.state.store.audit(
+            tenant_id=principal.tenant_id,
+            actor_id=principal.user_id,
+            actor_role=principal.role,
+            action="skill.upserted",
+            resource_type="skill",
+            resource_id=skill_name,
+            detail={"description": payload.description},
+        )
+        return skill.as_detail()
+
+    @application.post("/v1/agent/skills")
+    def create_agent_skill(
+        payload: SkillUpsertRequest,
+        request: Request,
+        x_api_key: str | None = Header(default=None),
+        x_tenant_id: str | None = Header(default=None),
+        x_user_id: str | None = Header(default=None),
+        x_user_role: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        principal = principal_from_headers(
+            request, x_api_key, x_tenant_id, x_user_id, x_user_role, {"admin"}
+        )
+        registry = request.app.state.skill_registry
+        if payload.name in {item.name for item in registry.list()}:
+            raise HTTPException(status_code=409, detail="skill already exists")
+        content = payload.content.strip()
+        if not content:
+            content = build_skill_markdown(
+                name=payload.name,
+                description=payload.description,
+                body=payload.body or f"# {payload.name}\n",
+                model_invocable=payload.model_invocable,
+                user_invocable=payload.user_invocable,
+            )
+        try:
+            skill = registry.upsert(
+                name=payload.name,
+                description=payload.description,
+                content=content,
+                model_invocable=payload.model_invocable,
+                user_invocable=payload.user_invocable,
+                builtin=False,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        _refresh_skill_tool(request)
+        request.app.state.store.audit(
+            tenant_id=principal.tenant_id,
+            actor_id=principal.user_id,
+            actor_role=principal.role,
+            action="skill.created",
+            resource_type="skill",
+            resource_id=payload.name,
+            detail={"description": payload.description},
+        )
+        return skill.as_detail()
+
+    @application.delete("/v1/agent/skills/{skill_name}")
+    def delete_agent_skill(
+        skill_name: str,
+        request: Request,
+        x_api_key: str | None = Header(default=None),
+        x_tenant_id: str | None = Header(default=None),
+        x_user_id: str | None = Header(default=None),
+        x_user_role: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        principal = principal_from_headers(
+            request, x_api_key, x_tenant_id, x_user_id, x_user_role, {"admin"}
+        )
+        try:
+            deleted = request.app.state.skill_registry.delete(skill_name)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"unknown skill: {skill_name}")
+        _refresh_skill_tool(request)
+        request.app.state.store.audit(
+            tenant_id=principal.tenant_id,
+            actor_id=principal.user_id,
+            actor_role=principal.role,
+            action="skill.deleted",
+            resource_type="skill",
+            resource_id=skill_name,
+            detail={},
+        )
+        return {"ok": True, "name": skill_name}
 
     @application.get("/v1/agent/sessions")
     def list_agent_sessions(
@@ -1272,9 +1574,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         items = request.app.state.session_events.list_sessions(
             tenant_id=principal.tenant_id,
             user_id=principal.user_id,
@@ -1294,16 +1594,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         events = owned_session_events(request, principal, session_id)
         return {
             "session_id": session_id,
-            "items": [
-                sanitize_public_value(event.model_dump(mode="json"))
-                for event in events
-            ],
+            "items": [sanitize_public_value(event.model_dump(mode="json")) for event in events],
             "count": len(events),
         }
 
@@ -1316,9 +1611,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         owned_session_events(request, principal, session_id)
         if not request.app.state.agent_runtime.live_hub.interrupt(session_id):
             raise HTTPException(status_code=409, detail="session is not running")
@@ -1330,15 +1623,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             payload={"status": "interrupt_requested"},
         )
         cancelled = 0
-        for task in request.app.state.subagent_manager.list(
-            principal.tenant_id, session_id
-        ):
+        for task in request.app.state.subagent_manager.list(principal.tenant_id, session_id):
             if task.status not in {"queued", "running", "cancel_requested"}:
                 continue
             try:
-                request.app.state.subagent_manager.cancel(
-                    task.task_id, principal.tenant_id
-                )
+                request.app.state.subagent_manager.cancel(task.task_id, principal.tenant_id)
                 cancelled += 1
             except KeyError:
                 pass
@@ -1357,19 +1646,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         owned_session_events(request, principal, session_id)
-        tasks = request.app.state.subagent_manager.list(
-            principal.tenant_id, session_id
-        )
+        tasks = request.app.state.subagent_manager.list(principal.tenant_id, session_id)
         for task in tasks:
             if task.status in {"queued", "running", "cancel_requested"}:
                 try:
-                    request.app.state.subagent_manager.cancel(
-                        task.task_id, principal.tenant_id
-                    )
+                    request.app.state.subagent_manager.cancel(task.task_id, principal.tenant_id)
                 except KeyError:
                     pass
         deleted = request.app.state.session_events.delete_session(
@@ -1421,12 +1704,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
-        record = request.app.state.result_store.get(
-            result_ref, principal.tenant_id
-        )
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
+        record = request.app.state.result_store.get(result_ref, principal.tenant_id)
         if record is None:
             raise HTTPException(status_code=404, detail="result not found")
         if record.user_id != principal.user_id:
@@ -1441,9 +1720,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         summary = request.app.state.metrics_store.summarize(principal.tenant_id)
         return summary.model_dump(mode="json")
 
@@ -1459,9 +1736,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> AmazonFinanceQueryResponse:
-        principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         registry: AgentRegistry = request.app.state.agent_registry
         config = registry.amazon_finance_config()
         if not config.enabled:
@@ -1523,9 +1798,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> KingdeeQueryResponse:
-        principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         registry: AgentRegistry = request.app.state.agent_registry
         config = registry.kingdee_cloud_config()
         if not config.enabled:
@@ -1583,9 +1856,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> LingXingProfitQueryResponse:
-        principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         registry: AgentRegistry = request.app.state.agent_registry
         config = registry.lingxing_profit_config()
         if not config.enabled:
@@ -1611,9 +1882,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             rows=output.get("rows", []),
             summary=output.get("summary", ""),
             total=output.get("total", 0),
-            data_scope=output.get(
-                "data_scope", "领星利润报表 · 订单维度 transaction 视图"
-            ),
+            data_scope=output.get("data_scope", "领星利润报表 · 订单维度 transaction 视图"),
         )
         request.app.state.store.audit(
             tenant_id=principal.tenant_id,
@@ -1644,9 +1913,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> ProfitReportQueryResponse:
-        principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         registry: AgentRegistry = request.app.state.agent_registry
         config = registry.profit_report_config()
         if not config.enabled:
@@ -1679,9 +1946,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             rows=output.get("rows", []),
             summary=output.get("summary", ""),
             total_rows=output.get("total_rows", 0),
-            data_scope=output.get(
-                "data_scope", "领星利润分析数据（分析仓）"
-            ),
+            data_scope=output.get("data_scope", "领星利润分析数据（分析仓）"),
         )
         request.app.state.store.audit(
             tenant_id=principal.tenant_id,
@@ -1715,9 +1980,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         registry = request.app.state.connection_registry
         health = {
             item["connection_id"]: item
-            for item in request.app.state.connector_runtime.health_for_tenant(
-                principal.tenant_id
-            )
+            for item in request.app.state.connector_runtime.health_for_tenant(principal.tenant_id)
         }
         items = [
             connection_payload(request, item) | {"health": health.get(item.id)}
@@ -1770,9 +2033,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         principal = principal_from_headers(
             request, x_api_key, x_tenant_id, x_user_id, x_user_role, {"admin"}
         )
-        items = request.app.state.connector_runtime.health_for_tenant(
-            principal.tenant_id
-        )
+        items = request.app.state.connector_runtime.health_for_tenant(principal.tenant_id)
         return {"items": items, "count": len(items)}
 
     @application.put("/v1/connections/{connector_type}")
@@ -1794,7 +2055,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             {"admin"},
         )
         if connector_type not in {
-            "analytics", "lingxing", "kingdee", "dingtalk", "qdrant", "milvus", "tavily"
+            "analytics",
+            "lingxing",
+            "kingdee",
+            "dingtalk",
+            "qdrant",
+            "milvus",
+            "tavily",
         }:
             raise HTTPException(status_code=404, detail="unknown connector type")
         registry = request.app.state.connection_registry
@@ -1915,9 +2182,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "items": [
                 item.model_dump(mode="json")
                 | {
-                    "connector_type": (
-                        connection.connector_type if connection else None
-                    ),
+                    "connector_type": (connection.connector_type if connection else None),
                     "connection_name": connection.name if connection else None,
                 }
                 for item in items
@@ -1939,9 +2204,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             request, x_api_key, x_tenant_id, x_user_id, x_user_role, {"admin"}
         )
         try:
-            item = request.app.state.knowledge_spaces.create(
-                principal.tenant_id, payload
-            )
+            item = request.app.state.knowledge_spaces.create(principal.tenant_id, payload)
         except (ValueError, PermissionError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         request.app.state.store.audit(
@@ -1969,9 +2232,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             request, x_api_key, x_tenant_id, x_user_id, x_user_role, {"admin"}
         )
         try:
-            item = request.app.state.knowledge_spaces.update(
-                principal.tenant_id, space_id, payload
-            )
+            item = request.app.state.knowledge_spaces.update(principal.tenant_id, space_id, payload)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="knowledge space not found") from exc
         except (ValueError, PermissionError) as exc:
@@ -2000,9 +2261,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             request, x_api_key, x_tenant_id, x_user_id, x_user_role, {"admin"}
         )
         try:
-            item = request.app.state.knowledge_spaces.delete(
-                principal.tenant_id, space_id
-            )
+            item = request.app.state.knowledge_spaces.delete(principal.tenant_id, space_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="knowledge space not found") from exc
         request.app.state.store.audit(
@@ -2035,9 +2294,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             result = request.app.state.connector_runtime.execute_connection(
                 principal.tenant_id,
                 item.connection_id,
-                lambda client, _connection: client.check_collection(
-                    item.collection_name
-                ),
+                lambda client, _connection: client.check_collection(item.collection_name),
             )
         except Exception as exc:
             raise HTTPException(
@@ -2086,12 +2343,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail=f"读取知识库内容失败: {exc}",
             ) from exc
         contents = list(result.get("items") or [])
-        categories = sorted(
-            {
-                str(content.get("category") or "未分类")
-                for content in contents
-            }
-        )
+        categories = sorted({str(content.get("category") or "未分类") for content in contents})
         return {
             "space_id": item.id,
             "space_name": item.name,
@@ -2111,9 +2363,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         items = request.app.state.tool_bindings.catalog(
             principal.tenant_id, request.app.state.connection_registry
         )
@@ -2170,6 +2420,233 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if service is None:
             raise HTTPException(status_code=503, detail="memory service is disabled")
         return service
+
+    @application.get("/v1/memory/preferences")
+    def get_my_memory_preferences(
+        request: Request,
+        x_api_key: str | None = Header(default=None),
+        x_tenant_id: str | None = Header(default=None),
+        x_user_id: str | None = Header(default=None),
+        x_user_role: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
+        return (
+            _memory_service(request)
+            .preferences(principal.tenant_id, principal.user_id)
+            .model_dump(mode="json")
+        )
+
+    @application.put("/v1/memory/preferences")
+    def update_my_memory_preferences(
+        payload: MemoryPreferencesUpdate,
+        request: Request,
+        x_api_key: str | None = Header(default=None),
+        x_tenant_id: str | None = Header(default=None),
+        x_user_id: str | None = Header(default=None),
+        x_user_role: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
+        saved = _memory_service(request).save_preferences(
+            principal.tenant_id,
+            principal.user_id,
+            payload.model_dump(exclude_unset=True),
+        )
+        return saved.model_dump(mode="json")
+
+    @application.get("/v1/memory/items")
+    def list_my_memories(
+        request: Request,
+        include_deleted: bool = Query(default=False),
+        x_api_key: str | None = Header(default=None),
+        x_tenant_id: str | None = Header(default=None),
+        x_user_id: str | None = Header(default=None),
+        x_user_role: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
+        items = _memory_service(request).list(
+            principal.tenant_id,
+            user_id=principal.user_id,
+            include_deleted=include_deleted,
+        )
+        return {"items": [item.model_dump(mode="json") for item in items], "count": len(items)}
+
+    @application.get("/v1/memory/export")
+    def export_my_memories(
+        request: Request,
+        x_api_key: str | None = Header(default=None),
+        x_tenant_id: str | None = Header(default=None),
+        x_user_id: str | None = Header(default=None),
+        x_user_role: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
+        return _memory_service(request).export_user(principal.tenant_id, principal.user_id)
+
+    @application.get("/v1/memory/items/{memory_id}/sources")
+    def get_my_memory_sources(
+        memory_id: str,
+        request: Request,
+        x_api_key: str | None = Header(default=None),
+        x_tenant_id: str | None = Header(default=None),
+        x_user_id: str | None = Header(default=None),
+        x_user_role: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
+        service = _memory_service(request)
+        item = service.store.get(principal.tenant_id, memory_id)
+        if item is None or item.user_id != principal.user_id:
+            raise HTTPException(status_code=404, detail="memory not found")
+        sources = service.sources(principal.tenant_id, memory_id)
+        return {"items": sources, "count": len(sources)}
+
+    @application.delete("/v1/memory/items", status_code=204)
+    def clear_my_memories(
+        request: Request,
+        x_api_key: str | None = Header(default=None),
+        x_tenant_id: str | None = Header(default=None),
+        x_user_id: str | None = Header(default=None),
+        x_user_role: str | None = Header(default=None),
+    ) -> Response:
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
+        _memory_service(request).compliance_delete_user(principal.tenant_id, principal.user_id)
+        return Response(status_code=204)
+
+    @application.delete("/v1/memory/items/{memory_id}", status_code=204)
+    def delete_my_memory(
+        memory_id: str,
+        request: Request,
+        x_api_key: str | None = Header(default=None),
+        x_tenant_id: str | None = Header(default=None),
+        x_user_id: str | None = Header(default=None),
+        x_user_role: str | None = Header(default=None),
+    ) -> Response:
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
+        service = _memory_service(request)
+        item = service.store.get(principal.tenant_id, memory_id)
+        if item is None or item.user_id != principal.user_id:
+            raise HTTPException(status_code=404, detail="memory not found")
+        service.forget(principal.tenant_id, memory_id, reason="user_requested")
+        return Response(status_code=204)
+
+    @application.put("/v1/memory/items/{memory_id}", status_code=201)
+    def correct_my_memory(
+        memory_id: str,
+        payload: MemoryCorrectionRequest,
+        request: Request,
+        x_api_key: str | None = Header(default=None),
+        x_tenant_id: str | None = Header(default=None),
+        x_user_id: str | None = Header(default=None),
+        x_user_role: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
+        service = _memory_service(request)
+        item = service.store.get(principal.tenant_id, memory_id)
+        if item is None or item.user_id != principal.user_id:
+            raise HTTPException(status_code=404, detail="memory not found")
+        return service.correct(
+            principal.tenant_id, memory_id, payload.content, principal.user_id
+        ).model_dump(mode="json")
+
+    @application.post("/v1/memory/items/{memory_id}/confirm")
+    def confirm_my_memory(
+        memory_id: str,
+        payload: MemoryDecisionRequest,
+        request: Request,
+        x_api_key: str | None = Header(default=None),
+        x_tenant_id: str | None = Header(default=None),
+        x_user_id: str | None = Header(default=None),
+        x_user_role: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
+        service = _memory_service(request)
+        item = service.store.get(principal.tenant_id, memory_id)
+        if item is None or item.user_id != principal.user_id:
+            raise HTTPException(status_code=404, detail="memory not found")
+        return service.confirm(
+            principal.tenant_id,
+            memory_id,
+            replace_conflicts=payload.replace_conflicts,
+        ).model_dump(mode="json")
+
+    @application.post("/v1/memory/items/{memory_id}/reject")
+    def reject_my_memory(
+        memory_id: str,
+        request: Request,
+        x_api_key: str | None = Header(default=None),
+        x_tenant_id: str | None = Header(default=None),
+        x_user_id: str | None = Header(default=None),
+        x_user_role: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
+        service = _memory_service(request)
+        item = service.store.get(principal.tenant_id, memory_id)
+        if item is None or item.user_id != principal.user_id:
+            raise HTTPException(status_code=404, detail="memory not found")
+        return service.reject(principal.tenant_id, memory_id).model_dump(mode="json")
+
+    @application.post("/v1/memory/feedback", status_code=201)
+    def submit_memory_feedback(
+        payload: MemoryFeedback,
+        request: Request,
+        x_api_key: str | None = Header(default=None),
+        x_tenant_id: str | None = Header(default=None),
+        x_user_id: str | None = Header(default=None),
+        x_user_role: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
+        try:
+            return _memory_service(request).add_feedback(
+                principal.tenant_id, principal.user_id, payload
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @application.get("/v1/memory/policy")
+    def get_memory_policy(
+        request: Request,
+        x_api_key: str | None = Header(default=None),
+        x_tenant_id: str | None = Header(default=None),
+        x_user_id: str | None = Header(default=None),
+        x_user_role: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        principal = principal_from_headers(
+            request, x_api_key, x_tenant_id, x_user_id, x_user_role, {"admin"}
+        )
+        return _memory_service(request).policy(principal.tenant_id).model_dump(mode="json")
+
+    @application.put("/v1/memory/policy")
+    def update_memory_policy(
+        payload: MemoryPolicyUpdate,
+        request: Request,
+        x_api_key: str | None = Header(default=None),
+        x_tenant_id: str | None = Header(default=None),
+        x_user_id: str | None = Header(default=None),
+        x_user_role: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        principal = principal_from_headers(
+            request, x_api_key, x_tenant_id, x_user_id, x_user_role, {"admin"}
+        )
+        return (
+            _memory_service(request)
+            .save_policy(
+                principal.tenant_id,
+                payload.model_dump(exclude_none=True),
+                principal.user_id,
+            )
+            .model_dump(mode="json")
+        )
+
+    @application.post("/v1/memory/maintenance")
+    def run_memory_maintenance(
+        request: Request,
+        x_api_key: str | None = Header(default=None),
+        x_tenant_id: str | None = Header(default=None),
+        x_user_id: str | None = Header(default=None),
+        x_user_role: str | None = Header(default=None),
+    ) -> dict[str, int]:
+        principal = principal_from_headers(
+            request, x_api_key, x_tenant_id, x_user_id, x_user_role, {"admin"}
+        )
+        return _memory_service(request).maintenance(principal.tenant_id)
 
     @application.get("/v1/memories")
     def list_memories(
@@ -2265,6 +2742,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return _memory_service(request).profile(principal.tenant_id, managed_user_id)
 
+    @application.get("/v1/memories/{memory_id}/sources")
+    def memory_sources(
+        memory_id: str,
+        request: Request,
+        x_api_key: str | None = Header(default=None),
+        x_tenant_id: str | None = Header(default=None),
+        x_user_id: str | None = Header(default=None),
+        x_user_role: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        principal = principal_from_headers(
+            request, x_api_key, x_tenant_id, x_user_id, x_user_role, {"admin"}
+        )
+        service = _memory_service(request)
+        if service.store.get(principal.tenant_id, memory_id) is None:
+            raise HTTPException(status_code=404, detail="memory not found")
+        sources = service.sources(principal.tenant_id, memory_id)
+        return {"items": sources, "count": len(sources)}
+
     @application.post("/v1/memories/{memory_id}/confirm")
     def confirm_memory(
         memory_id: str,
@@ -2287,9 +2782,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         request.app.state.store.audit(
-            tenant_id=principal.tenant_id, actor_id=principal.user_id,
-            actor_role=principal.role, action="memory.confirmed",
-            resource_type="memory", resource_id=memory_id,
+            tenant_id=principal.tenant_id,
+            actor_id=principal.user_id,
+            actor_role=principal.role,
+            action="memory.confirmed",
+            resource_type="memory",
+            resource_id=memory_id,
             detail={"replace_conflicts": payload.replace_conflicts},
         )
         return item.model_dump(mode="json")
@@ -2311,9 +2809,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         request.app.state.store.audit(
-            tenant_id=principal.tenant_id, actor_id=principal.user_id,
-            actor_role=principal.role, action="memory.rejected",
-            resource_type="memory", resource_id=memory_id, detail={},
+            tenant_id=principal.tenant_id,
+            actor_id=principal.user_id,
+            actor_role=principal.role,
+            action="memory.rejected",
+            resource_type="memory",
+            resource_id=memory_id,
+            detail={},
         )
         return item.model_dump(mode="json")
 
@@ -2337,9 +2839,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         request.app.state.store.audit(
-            tenant_id=principal.tenant_id, actor_id=principal.user_id,
-            actor_role=principal.role, action="memory.corrected",
-            resource_type="memory", resource_id=item.id,
+            tenant_id=principal.tenant_id,
+            actor_id=principal.user_id,
+            actor_role=principal.role,
+            action="memory.corrected",
+            resource_type="memory",
+            resource_id=item.id,
             detail={"correction_of": memory_id},
         )
         return item.model_dump(mode="json")
@@ -2362,9 +2867,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ):
             raise HTTPException(status_code=404, detail="memory not found")
         request.app.state.store.audit(
-            tenant_id=principal.tenant_id, actor_id=principal.user_id,
-            actor_role=principal.role, action="memory.forgotten",
-            resource_type="memory", resource_id=memory_id,
+            tenant_id=principal.tenant_id,
+            actor_id=principal.user_id,
+            actor_role=principal.role,
+            action="memory.forgotten",
+            resource_type="memory",
+            resource_id=memory_id,
             detail={"reason": payload.reason},
         )
         return Response(status_code=204)
@@ -2385,9 +2893,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             principal.tenant_id, managed_user_id
         )
         request.app.state.store.audit(
-            tenant_id=principal.tenant_id, actor_id=principal.user_id,
-            actor_role=principal.role, action="memory.compliance_deleted",
-            resource_type="user_memory", resource_id=managed_user_id,
+            tenant_id=principal.tenant_id,
+            actor_id=principal.user_id,
+            actor_role=principal.role,
+            action="memory.compliance_deleted",
+            resource_type="user_memory",
+            resource_id=managed_user_id,
             detail={"deleted_count": count},
         )
         return Response(status_code=204)
@@ -2433,15 +2944,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         if payload.id != managed_user_id:
             raise HTTPException(status_code=400, detail="payload id must match path")
-        account = request.app.state.account_service.account(
-            principal.tenant_id, managed_user_id
+        account = request.app.state.account_service.account(principal.tenant_id, managed_user_id)
+        ensure_admin_survives(
+            request,
+            principal.tenant_id,
+            managed_user_id,
+            next_role=payload.role,
+            next_enabled=payload.enabled,
         )
         generated_password = None
         if account or payload.temporary_password or payload.generate_temporary_password:
             try:
                 account, generated_password = request.app.state.account_service.provision(
-                    principal.tenant_id, managed_user_id, payload.name, payload.role,
-                    payload.enabled, payload.temporary_password,
+                    principal.tenant_id,
+                    managed_user_id,
+                    payload.name,
+                    payload.role,
+                    payload.enabled,
+                    payload.temporary_password,
                     payload.generate_temporary_password,
                 )
             except AccountError as error:
@@ -2453,16 +2973,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if generated_password:
             result["temporary_password"] = generated_password
         request.app.state.store.audit(
-            tenant_id=principal.tenant_id, actor_id=principal.user_id,
-            actor_role=principal.role, action="access.user_saved",
-            resource_type="access_user", resource_id=managed_user_id,
+            tenant_id=principal.tenant_id,
+            actor_id=principal.user_id,
+            actor_role=principal.role,
+            action="access.user_saved",
+            resource_type="access_user",
+            resource_id=managed_user_id,
             detail={"enabled": payload.enabled, "role": payload.role},
         )
         return result
 
     @application.delete("/v1/access-control/users/{managed_user_id}", status_code=204)
     def delete_access_user(
-        managed_user_id: str, request: Request,
+        managed_user_id: str,
+        request: Request,
         x_api_key: str | None = Header(default=None),
         x_tenant_id: str | None = Header(default=None),
         x_user_id: str | None = Header(default=None),
@@ -2471,11 +2995,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         principal = principal_from_headers(
             request, x_api_key, x_tenant_id, x_user_id, x_user_role, {"admin"}
         )
-        if not request.app.state.access_control.delete_user(
-            principal.tenant_id, managed_user_id
-        ):
+        ensure_admin_survives(request, principal.tenant_id, managed_user_id)
+        if not request.app.state.access_control.delete_user(principal.tenant_id, managed_user_id):
             raise HTTPException(status_code=404, detail="user not found")
         request.app.state.account_service.store.delete(principal.tenant_id, managed_user_id)
+        request.app.state.store.audit(
+            tenant_id=principal.tenant_id,
+            actor_id=principal.user_id,
+            actor_role=principal.role,
+            action="access.user_deleted",
+            resource_type="access_user",
+            resource_id=managed_user_id,
+            detail={},
+        )
         return Response(status_code=204)
 
     @application.post("/v1/access-control/users/{managed_user_id}/reset-password")
@@ -2493,15 +3025,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         try:
             account, generated = request.app.state.account_service.reset_password(
-                principal.tenant_id, managed_user_id, payload.temporary_password,
+                principal.tenant_id,
+                managed_user_id,
+                payload.temporary_password,
                 payload.generate_temporary_password,
             )
         except AccountError as error:
             raise account_failure(error) from error
         request.app.state.store.audit(
-            tenant_id=principal.tenant_id, actor_id=principal.user_id,
-            actor_role=principal.role, action="account.password_reset",
-            resource_type="account", resource_id=managed_user_id, detail={},
+            tenant_id=principal.tenant_id,
+            actor_id=principal.user_id,
+            actor_role=principal.role,
+            action="account.password_reset",
+            resource_type="account",
+            resource_id=managed_user_id,
+            detail={},
         )
         result = {"account": account}
         if generated:
@@ -2510,7 +3048,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @application.post("/v1/access-control/groups", status_code=201)
     def create_permission_group(
-        payload: PermissionGroupUpsert, request: Request,
+        payload: PermissionGroupUpsert,
+        request: Request,
         x_api_key: str | None = Header(default=None),
         x_tenant_id: str | None = Header(default=None),
         x_user_id: str | None = Header(default=None),
@@ -2574,9 +3113,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         store = request.app.state.access_control
         if not store.get_group(principal.tenant_id, group_id):
             raise HTTPException(status_code=404, detail="group not found")
-        known = {
-            item["id"] for item in request.app.state.runtime_tool_registry.catalog()
-        }
+        known = {item["id"] for item in request.app.state.runtime_tool_registry.catalog()}
         unknown = sorted(set(payload.tool_names) - known)
         if unknown:
             raise HTTPException(
@@ -2597,13 +3134,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "tool_names": system_tools,
                 },
             )
-        return store.set_group_tools(
-            principal.tenant_id, group_id, payload.tool_names
-        )
+        return store.set_group_tools(principal.tenant_id, group_id, payload.tool_names)
 
     @application.delete("/v1/access-control/groups/{group_id}", status_code=204)
     def delete_permission_group(
-        group_id: str, request: Request,
+        group_id: str,
+        request: Request,
         x_api_key: str | None = Header(default=None),
         x_tenant_id: str | None = Header(default=None),
         x_user_id: str | None = Header(default=None),
@@ -2618,7 +3154,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @application.post("/v1/access-control/rules", status_code=201)
     def create_permission_rule(
-        payload: PermissionRuleUpsert, request: Request,
+        payload: PermissionRuleUpsert,
+        request: Request,
         x_api_key: str | None = Header(default=None),
         x_tenant_id: str | None = Header(default=None),
         x_user_id: str | None = Header(default=None),
@@ -2627,9 +3164,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         principal = principal_from_headers(
             request, x_api_key, x_tenant_id, x_user_id, x_user_role, {"admin"}
         )
-        known = {
-            item["id"] for item in request.app.state.runtime_tool_registry.catalog()
-        }
+        known = {item["id"] for item in request.app.state.runtime_tool_registry.catalog()}
         unknown = sorted(set(payload.tool_names) - known)
         if unknown:
             raise HTTPException(status_code=400, detail=f"unknown tools: {unknown}")
@@ -2644,9 +3179,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 },
             )
         store = request.app.state.access_control
-        if not store.get_group(
-            principal.tenant_id, payload.group_id
-        ):
+        if not store.get_group(principal.tenant_id, payload.group_id):
             raise HTTPException(
                 status_code=404,
                 detail={
@@ -2677,8 +3210,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         try:
             return store.put_rule(
-                principal.tenant_id, item_id, payload.name,
-                payload.tool_names, payload.description, payload.group_id,
+                principal.tenant_id,
+                item_id,
+                payload.name,
+                payload.tool_names,
+                payload.description,
+                payload.group_id,
             )
         except ToolAssignmentConflict as error:
             raise HTTPException(
@@ -2691,7 +3228,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @application.delete("/v1/access-control/rules/{rule_id}", status_code=204)
     def delete_permission_rule(
-        rule_id: str, request: Request,
+        rule_id: str,
+        request: Request,
         x_api_key: str | None = Header(default=None),
         x_tenant_id: str | None = Header(default=None),
         x_user_id: str | None = Header(default=None),
@@ -2706,7 +3244,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @application.put("/v1/access-control/users/{managed_user_id}/groups")
     def bind_user_group(
-        managed_user_id: str, payload: AccessBindingRequest, request: Request,
+        managed_user_id: str,
+        payload: AccessBindingRequest,
+        request: Request,
         x_api_key: str | None = Header(default=None),
         x_tenant_id: str | None = Header(default=None),
         x_user_id: str | None = Header(default=None),
@@ -2716,14 +3256,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             request, x_api_key, x_tenant_id, x_user_id, x_user_role, {"admin"}
         )
         store = request.app.state.access_control
-        if not store.get_user(principal.tenant_id, managed_user_id) or not store.get_group(principal.tenant_id, payload.target_id):
+        if not store.get_user(principal.tenant_id, managed_user_id) or not store.get_group(
+            principal.tenant_id, payload.target_id
+        ):
             raise HTTPException(status_code=404, detail="user or group not found")
         store.bind_user_group(principal.tenant_id, managed_user_id, payload.target_id)
         return store.get_user(principal.tenant_id, managed_user_id)
 
-    @application.delete("/v1/access-control/users/{managed_user_id}/groups/{group_id}", status_code=204)
+    @application.delete(
+        "/v1/access-control/users/{managed_user_id}/groups/{group_id}", status_code=204
+    )
     def unbind_user_group(
-        managed_user_id: str, group_id: str, request: Request,
+        managed_user_id: str,
+        group_id: str,
+        request: Request,
         x_api_key: str | None = Header(default=None),
         x_tenant_id: str | None = Header(default=None),
         x_user_id: str | None = Header(default=None),
@@ -2739,7 +3285,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @application.put("/v1/access-control/groups/{group_id}/rules")
     def bind_group_rule(
-        group_id: str, payload: AccessBindingRequest, request: Request,
+        group_id: str,
+        payload: AccessBindingRequest,
+        request: Request,
         x_api_key: str | None = Header(default=None),
         x_tenant_id: str | None = Header(default=None),
         x_user_id: str | None = Header(default=None),
@@ -2749,7 +3297,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             request, x_api_key, x_tenant_id, x_user_id, x_user_role, {"admin"}
         )
         store = request.app.state.access_control
-        if not store.get_group(principal.tenant_id, group_id) or not store.get_rule(principal.tenant_id, payload.target_id):
+        if not store.get_group(principal.tenant_id, group_id) or not store.get_rule(
+            principal.tenant_id, payload.target_id
+        ):
             raise HTTPException(status_code=404, detail="group or rule not found")
         try:
             store.bind_group_rule(principal.tenant_id, group_id, payload.target_id)
@@ -2766,7 +3316,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @application.delete("/v1/access-control/groups/{group_id}/rules/{rule_id}", status_code=204)
     def unbind_group_rule(
-        group_id: str, rule_id: str, request: Request,
+        group_id: str,
+        rule_id: str,
+        request: Request,
         x_api_key: str | None = Header(default=None),
         x_tenant_id: str | None = Header(default=None),
         x_user_id: str | None = Header(default=None),
@@ -2775,9 +3327,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         principal = principal_from_headers(
             request, x_api_key, x_tenant_id, x_user_id, x_user_role, {"admin"}
         )
-        request.app.state.access_control.unbind_group_rule(
-            principal.tenant_id, group_id, rule_id
-        )
+        request.app.state.access_control.unbind_group_rule(principal.tenant_id, group_id, rule_id)
         return Response(status_code=204)
 
     @application.get("/v1/agents")
@@ -2788,9 +3338,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         registry: AgentRegistry = request.app.state.agent_registry
         settings = request.app.state.settings
         decision = request.app.state.access_control.effective_access(
@@ -2803,8 +3351,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             payload = mask_agent_integration(agent)
             if decision.allowed_tools is not None:
                 payload["allowed_tools"] = [
-                    name for name in agent.allowed_tools
-                    if name in decision.allowed_tools
+                    name for name in agent.allowed_tools if name in decision.allowed_tools
                 ]
             connector_type = {
                 "lingxing-profit-report": "lingxing",
@@ -2815,8 +3362,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     principal.tenant_id, connector_type
                 )
                 if connection is not None:
-                    payload["integration"] = (
-                        request.app.state.connection_registry.masked_values(connection)
+                    payload["integration"] = request.app.state.connection_registry.masked_values(
+                        connection
                     )
             payload["status"] = "active"
             if not agent.enabled:
@@ -2855,9 +3402,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         registry: AgentRegistry = request.app.state.agent_registry
         agent = registry.get(agent_id)
         if agent is None:
@@ -2870,8 +3415,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         payload = mask_agent_integration(agent)
         if decision.allowed_tools is not None:
             payload["allowed_tools"] = [
-                name for name in agent.allowed_tools
-                if name in decision.allowed_tools
+                name for name in agent.allowed_tools if name in decision.allowed_tools
             ]
         connector_type = {
             "lingxing-profit-report": "lingxing",
@@ -2882,10 +3426,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 principal.tenant_id, connector_type
             )
             if connection is not None:
-                payload["integration"] = (
-                    request.app.state.connection_registry.masked_values(connection)
+                payload["integration"] = request.app.state.connection_registry.masked_values(
+                    connection
                 )
-        if agent.id in {COORDINATOR_AGENT_ID, ANALYST_AGENT_ID} or agent.id in SPECIALIST_ANALYST_IDS:
+        if (
+            agent.id in {COORDINATOR_AGENT_ID, ANALYST_AGENT_ID}
+            or agent.id in SPECIALIST_ANALYST_IDS
+        ):
             tool_context = ToolExecutionContext(
                 session_id="agent-detail",
                 tenant_id=principal.tenant_id,
@@ -2893,12 +3440,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 role=principal.role,
                 allowed_tool_names=decision.allowed_tools,
             )
-            tool_catalog = request.app.state.runtime_tool_registry.catalog_for(
-                tool_context
-            )
+            tool_catalog = request.app.state.runtime_tool_registry.catalog_for(tool_context)
             payload["tool_catalog"] = tool_catalog
             payload["role_tools"] = [
-                name for name in agent.allowed_tools
+                name
+                for name in agent.allowed_tools
                 if decision.allowed_tools is None or name in decision.allowed_tools
             ]
             payload["strict_tool_allowlist"] = agent.strict_tool_allowlist
@@ -2929,10 +3475,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             *SPECIALIST_ANALYST_IDS,
         }
         if payload.allowed_tools is not None and agent_id in decision_agents:
-            catalog = {
-                item["name"]
-                for item in request.app.state.runtime_tool_registry.catalog()
-            }
+            catalog = {item["name"] for item in request.app.state.runtime_tool_registry.catalog()}
             unknown = sorted(set(payload.allowed_tools) - catalog)
             if unknown:
                 raise HTTPException(
@@ -2940,9 +3483,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     detail=f"unknown tools: {', '.join(unknown)}",
                 )
             if agent_id == COORDINATOR_AGENT_ID:
-                forbidden = sorted(
-                    set(payload.allowed_tools) & DATA_QUERY_TOOL_NAMES
-                )
+                forbidden = sorted(set(payload.allowed_tools) & DATA_QUERY_TOOL_NAMES)
                 if forbidden:
                     raise HTTPException(
                         status_code=400,
@@ -3017,13 +3558,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
+        principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         registry: ModelRegistry = request.app.state.model_registry
-        callable_models = [
-            model for model in registry.list(enabled_only=True) if model.callable()
-        ]
+        callable_models = [model for model in registry.list(enabled_only=True) if model.callable()]
         items = [
             {
                 "id": model.id,
@@ -3065,9 +3602,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         registry: ModelRegistry = request.app.state.model_registry
         items = registry.catalog_items()
-        callable_models = [
-            model for model in registry.list(enabled_only=True) if model.callable()
-        ]
+        callable_models = [model for model in registry.list(enabled_only=True) if model.callable()]
         default_model = next(
             (model for model in callable_models if model.is_default),
             callable_models[0] if callable_models else None,
@@ -3197,9 +3732,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         decision = request.app.state.access_control.effective_access(
             principal.tenant_id, principal.user_id, principal.role
         )
@@ -3241,9 +3774,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         if decision.allowed_tools is not None:
             tool_bindings = [
-                item
-                for item in tool_bindings
-                if item["tool_name"] in decision.allowed_tools
+                item for item in tool_bindings if item["tool_name"] in decision.allowed_tools
             ]
         return {
             **agent_snapshot,
@@ -3259,15 +3790,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role
-        )
+        principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         settings = request.app.state.settings
         model_registry: ModelRegistry = request.app.state.model_registry
         configured_models = model_registry.list()
-        callable_models = [
-            model for model in configured_models if model.callable()
-        ]
+        callable_models = [model for model in configured_models if model.callable()]
         default_model = next(
             (model for model in callable_models if model.is_default),
             callable_models[0] if callable_models else None,
@@ -3301,13 +3828,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "library": request.app.state.knowledge_gateway.status(),
                 "spaces": [
                     item.model_dump(mode="json")
-                    for item in request.app.state.knowledge_spaces.list(
-                        principal.tenant_id
-                    )
+                    for item in request.app.state.knowledge_spaces.list(principal.tenant_id)
                 ],
-                "count": len(
-                    request.app.state.knowledge_spaces.list(principal.tenant_id)
-                ),
+                "count": len(request.app.state.knowledge_spaces.list(principal.tenant_id)),
             },
             "amazon_finance": {
                 "configured": _amazon_finance_active(
@@ -3325,9 +3848,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     request.app.state.connection_registry,
                     principal.tenant_id,
                 ),
-                "endpoint": (
-                    "/basicOpen/finance/profitReport/order/transcation/list"
-                ),
+                "endpoint": ("/basicOpen/finance/profitReport/order/transcation/list"),
                 "credential_source": "tenant_connection",
             },
             "profit_report": {
@@ -3358,19 +3879,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "agent_runtime": {
                 "function_calling": True,
                 "tools": request.app.state.runtime_tool_registry.catalog(),
-                "skills": [
-                    item.as_dict()
-                    for item in request.app.state.skill_registry.list()
-                ],
+                "skills": [item.as_dict() for item in request.app.state.skill_registry.list()],
                 "mcp_servers": request.app.state.mcp_manager.catalog(),
                 "attachments": {
-                    "image_types": [
-                        "image/png", "image/jpeg", "image/webp", "image/gif"
-                    ],
+                    "image_types": ["image/png", "image/jpeg", "image/webp", "image/gif"],
                     "max_image_bytes": settings.attachment_max_image_bytes,
-                    "max_images_per_message": (
-                        settings.attachment_max_images_per_message
-                    ),
+                    "max_images_per_message": (settings.attachment_max_images_per_message),
                     "vision_model": (
                         settings.zhipu_vision_model_name
                         if settings.model_provider == "zhipu"
@@ -3381,20 +3895,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "subagent_queue_backend": settings.subagent_queue_backend,
                     "subagent_workers": settings.subagent_worker_count,
                     "subagent_max_depth": settings.subagent_max_depth,
-                    "subagent_timeout_seconds": (
-                        settings.subagent_default_timeout_seconds
-                    ),
-                    "subagent_token_budget": (
-                        settings.subagent_default_token_budget
-                    ),
+                    "subagent_timeout_seconds": (settings.subagent_default_timeout_seconds),
+                    "subagent_token_budget": (settings.subagent_default_token_budget),
                     "subagent_lease_seconds": settings.subagent_lease_seconds,
                     "subagent_max_attempts": settings.subagent_max_attempts,
                     "sandbox_restricted_available": (
                         request.app.state.sandbox_runner.restricted_available
                     ),
-                    "sandbox_workspace_root": str(
-                        settings.sandbox_workspace_root
-                    ),
+                    "sandbox_workspace_root": str(settings.sandbox_workspace_root),
                     "per_call_approval": True,
                 },
                 "observability": {
@@ -3422,7 +3930,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_role: str | None = Header(default=None),
     ) -> dict[str, Any]:
         principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role,
+            request,
+            x_api_key,
+            x_tenant_id,
+            x_user_id,
+            x_user_role,
             {"admin"},
         )
         try:
@@ -3479,12 +3991,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_user_role: str | None = Header(default=None),
     ) -> dict[str, Any]:
         principal = principal_from_headers(
-            request, x_api_key, x_tenant_id, x_user_id, x_user_role,
+            request,
+            x_api_key,
+            x_tenant_id,
+            x_user_id,
+            x_user_role,
             {"admin"},
         )
-        items = request.app.state.store.list_audit(
-            tenant_id=principal.tenant_id, limit=limit
-        )
+        items = request.app.state.store.list_audit(tenant_id=principal.tenant_id, limit=limit)
         return {"items": items, "count": len(items)}
 
     register_knowledge_library_routes(application, principal_from_headers)
@@ -3513,6 +4027,8 @@ def main() -> None:
 
     settings = get_settings()
     uvicorn.run(
-        "ops_agent.api.app:app", host=settings.app_host, port=settings.app_port,
+        "ops_agent.api.app:app",
+        host=settings.app_host,
+        port=settings.app_port,
         log_level=settings.log_level.lower(),
     )

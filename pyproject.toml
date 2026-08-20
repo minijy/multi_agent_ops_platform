@@ -44,6 +44,8 @@ ops-agent-api = "ops_agent.api.app:main"
 ops-agent-eval = "ops_agent.evals:main"
 ops-agent-migrate = "ops_agent.migrations:main"
 ops-agent-subagent-worker = "ops_agent.runtime.subagent_worker:main"
+ops-agent-memory-worker = "ops_agent.runtime.memory_worker:main"
+ops-agent-memory-eval = "ops_agent.evals.memory_eval:main"
 ops-agent-install-mock = "ops_agent.install_mock:main"
 
 [tool.setuptools.packages.find]

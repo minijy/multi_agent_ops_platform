@@ -1,0 +1,29 @@
+{
+  "name": "cross_border_enterprise_memory_v1",
+  "memories": [
+    {"tenant_id":"eval-enterprise-a","user_id":"finance-lead","key":"report-currency","content":"欧洲站利润报表默认使用欧元 EUR 展示","kind":"preference"},
+    {"tenant_id":"eval-enterprise-a","user_id":"finance-lead","key":"report-precision","content":"金额统一保留两位小数，百分比保留一位小数","kind":"preference"},
+    {"tenant_id":"eval-enterprise-a","user_id":"finance-lead","key":"marketplace-scope","content":"当前负责 Amazon 德国站 DE 和法国站 FR 的利润分析","kind":"profile"},
+    {"tenant_id":"eval-enterprise-a","user_id":"finance-lead","key":"budget-approval","content":"广告预算调整超过 5000 欧元时需要财务负责人审批","kind":"procedural"},
+    {"tenant_id":"eval-enterprise-a","user_id":"finance-lead","key":"user-timezone","content":"用户时区为 Asia/Shanghai","kind":"profile"},
+    {"tenant_id":"eval-enterprise-a","user_id":"finance-lead","key":"fiscal-year","content":"公司财年从每年七月一日开始","scope":"tenant","kind":"organization"},
+    {"tenant_id":"eval-enterprise-a","user_id":"admin","key":"settlement-basis","content":"结算分析默认使用已实现利润口径","scope":"agent","kind":"agent","agent_id":"profit-analyst"},
+    {"tenant_id":"eval-enterprise-a","user_id":"other-user","key":"other-user-currency","content":"另一位用户的报表币种为美元 USD","kind":"preference"},
+    {"tenant_id":"eval-enterprise-b","user_id":"finance-lead","key":"other-tenant-policy","content":"其他租户使用英镑 GBP 报表","kind":"organization","scope":"tenant"},
+    {"tenant_id":"eval-enterprise-a","user_id":"finance-lead","key":"report-currency-candidate","content":"候选变更：欧洲站报表改用美元 USD","kind":"preference","status":"candidate"},
+    {"tenant_id":"eval-enterprise-a","user_id":"finance-lead","key":"expired-campaign","content":"过期的夏季广告活动使用 20% 折扣","kind":"episodic","expires_at":"2020-01-01T00:00:00+00:00"},
+    {"tenant_id":"eval-enterprise-a","user_id":"finance-lead","key":"deleted-dashboard","content":"已删除的旧仪表板偏好","kind":"preference","delete_before_eval":true}
+  ],
+  "cases": [
+    {"name":"币种同义改写","tenant_id":"eval-enterprise-a","user_id":"finance-lead","query":"欧洲业务的盈利报告用哪种货币？","expected_keys":["report-currency"],"forbidden_keys":["other-user-currency","other-tenant-policy","report-currency-candidate"]},
+    {"name":"数字格式偏好","tenant_id":"eval-enterprise-a","user_id":"finance-lead","query":"金额和比率的小数位怎么展示？","expected_keys":["report-precision"]},
+    {"name":"市场范围","tenant_id":"eval-enterprise-a","user_id":"finance-lead","query":"我主要分析哪些亚马逊站点？","expected_keys":["marketplace-scope"]},
+    {"name":"审批阈值","tenant_id":"eval-enterprise-a","user_id":"finance-lead","query":"多大的广告调整要找财务审批？","expected_keys":["budget-approval"]},
+    {"name":"组织财年","tenant_id":"eval-enterprise-a","user_id":"finance-lead","query":"公司的会计年度什么时候开始？","expected_keys":["fiscal-year"]},
+    {"name":"Agent 专属口径","tenant_id":"eval-enterprise-a","user_id":"finance-lead","agent_id":"profit-analyst","query":"利润结算用什么口径？","expected_keys":["settlement-basis"]},
+    {"name":"Agent 隔离","tenant_id":"eval-enterprise-a","user_id":"finance-lead","agent_id":"function-calling-runtime","query":"利润结算口径","forbidden_keys":["settlement-basis"]},
+    {"name":"用户隔离","tenant_id":"eval-enterprise-a","user_id":"finance-lead","query":"报表币种","forbidden_keys":["other-user-currency"]},
+    {"name":"租户隔离","tenant_id":"eval-enterprise-a","user_id":"finance-lead","query":"租户报表规则","forbidden_keys":["other-tenant-policy"]},
+    {"name":"过期删除与候选隔离","tenant_id":"eval-enterprise-a","user_id":"finance-lead","query":"夏季活动、旧仪表板和候选币种","forbidden_keys":["expired-campaign","deleted-dashboard","report-currency-candidate"]}
+  ]
+}

@@ -8,6 +8,8 @@ from typing import Any, Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .persistence import write_json_atomic
+
 CONTEXT_WINDOW_API_TO_FIELD = {
     "enabled": "context_window_enabled",
     "keep_recent_user_turns": "context_keep_recent_user_turns",
@@ -32,6 +34,7 @@ class Settings(BaseSettings):
     app_port: int = 8100
     log_level: str = "INFO"
     app_api_key: str = ""
+    app_replica_count: int = Field(default=1, ge=1, le=256)
 
     control_plane_backend: Literal["sqlite", "postgres"] = "sqlite"
     session_event_backend: Literal["sqlite", "postgres"] = "sqlite"
@@ -50,6 +53,7 @@ class Settings(BaseSettings):
     knowledge_api_token: str = ""
     default_tenant_id: str = "tenant-a"
     model_definitions_path: Path = Path("data/model_definitions.json")
+    model_secrets_path: Path | None = None
     attachment_path: Path = Path("data/attachments")
     attachment_max_image_bytes: int = Field(default=5 * 1024 * 1024, ge=1024)
     attachment_max_images_per_message: int = Field(default=20, ge=1, le=100)
@@ -61,9 +65,9 @@ class Settings(BaseSettings):
 
     # Provider credentials are configured in the control plane UI. This field
     # remains only for isolated legacy tests and must not bootstrap production.
-    model_provider: Literal[
-        "unconfigured", "mock", "openai", "zhipu", "qwen", "deepseek"
-    ] = "unconfigured"
+    model_provider: Literal["unconfigured", "mock", "openai", "zhipu", "qwen", "deepseek"] = (
+        "unconfigured"
+    )
     model_name: str = "gpt-5.6-sol"
     openai_api_key: str = ""
     model_temperature: float | None = None
@@ -105,16 +109,25 @@ class Settings(BaseSettings):
     memory_enabled: bool = True
     memory_backend: Literal["sqlite", "postgres"] = "sqlite"
     memory_semantic_backend: Literal["local", "pgvector", "qdrant"] = "local"
+    memory_embedding_provider: Literal["hash", "sentence_transformers"] = "hash"
+    memory_embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    memory_embedding_dimensions: int = Field(default=384, ge=64, le=4096)
     memory_qdrant_collection: str = "agent_memory_items_v1"
     qdrant_url: str = ""
     qdrant_api_key: str = ""
     memory_snapshot_limit: int = Field(default=8, ge=1, le=50)
+    memory_snapshot_max_chars: int = Field(default=2400, ge=400, le=20000)
+    memory_relevance_threshold: float = Field(default=0.12, ge=0, le=1)
     memory_default_expiry_days: int | None = Field(default=365, ge=1, le=3650)
     memory_auto_extract_enabled: bool = True
+    memory_sensitive_data_policy: Literal["block", "review"] = "block"
+    memory_decay_after_days: int = Field(default=180, ge=1, le=3650)
+    memory_worker_poll_seconds: float = Field(default=60, ge=5, le=3600)
     sandbox_workspace_root: Path = Path(".")
     sandbox_timeout_seconds: float = Field(default=30, ge=1, le=600)
     sandbox_max_output_bytes: int = Field(default=65536, ge=1024)
     sandbox_full_access_enabled: bool = False
+    agent_stream_max_concurrency: int = Field(default=32, ge=1, le=512)
 
     jwt_secret: str = ""
     jwt_issuer: str = ""
@@ -124,6 +137,7 @@ class Settings(BaseSettings):
     account_refresh_token_days: int = Field(default=7, ge=1, le=90)
     account_max_login_attempts: int = Field(default=5, ge=3, le=20)
     account_lock_minutes: int = Field(default=15, ge=1, le=1440)
+    account_bootstrap_token: str = Field(default="", min_length=0, max_length=512)
     otel_service_name: str = "ops-agent"
     otel_exporter: Literal["none", "console", "otlp"] = "none"
     otel_exporter_otlp_endpoint: str = ""
@@ -150,8 +164,26 @@ class Settings(BaseSettings):
         return value.expanduser().resolve()
 
     def validate_runtime(self) -> None:
-        if self.app_env == "production" and not self.app_api_key and not self.jwt_secret:
-            raise ValueError("APP_API_KEY or JWT_SECRET is required in production")
+        if self.app_env == "production":
+            if len(self.jwt_secret) < 32:
+                raise ValueError("JWT_SECRET with at least 32 characters is required in production")
+            if not self.jwt_required:
+                raise ValueError("JWT_REQUIRED=true is required in production")
+            if not self.jwt_issuer or not self.jwt_audience:
+                raise ValueError("JWT_ISSUER and JWT_AUDIENCE are required in production")
+            if self.control_plane_backend != "postgres":
+                raise ValueError("CONTROL_PLANE_BACKEND=postgres is required in production")
+            if self.session_event_backend != "postgres":
+                raise ValueError("SESSION_EVENT_BACKEND=postgres is required in production")
+            if self.memory_enabled and self.memory_backend != "postgres":
+                raise ValueError("MEMORY_BACKEND=postgres is required in production")
+            if self.subagent_queue_backend != "db":
+                raise ValueError("SUBAGENT_QUEUE_BACKEND=db is required in production")
+            if self.app_replica_count != 1:
+                raise ValueError(
+                    "APP_REPLICA_COUNT must remain 1 until configuration registries "
+                    "use shared persistence"
+                )
         if self.jwt_required and not self.jwt_secret:
             raise ValueError("JWT_SECRET is required when JWT_REQUIRED=true")
         postgres_backends = (
@@ -164,8 +196,8 @@ class Settings(BaseSettings):
             raise ValueError("POSTGRES_DSN is required for postgres memory persistence")
         if self.memory_semantic_backend == "pgvector" and self.memory_backend != "postgres":
             raise ValueError("MEMORY_BACKEND=postgres is required for pgvector memory search")
-        if self.memory_semantic_backend == "qdrant" and not self.qdrant_url:
-            raise ValueError("QDRANT_URL is required for Qdrant memory search")
+        # Qdrant is normally configured per tenant from the connector page.
+        # Legacy environment fields remain an optional fallback for upgrades.
         if self.model_provider == "openai" and not self.openai_api_key:
             raise ValueError("OPENAI_API_KEY is required when MODEL_PROVIDER=openai")
         if self.model_provider == "zhipu" and not self.zai_api_key:
@@ -208,9 +240,7 @@ def apply_runtime_overrides(settings: Settings) -> Settings:
     return settings
 
 
-def update_context_window(
-    settings: Settings, updates: dict[str, Any]
-) -> dict[str, Any]:
+def update_context_window(settings: Settings, updates: dict[str, Any]) -> dict[str, Any]:
     mapped = {
         CONTEXT_WINDOW_API_TO_FIELD[key]: value
         for key, value in updates.items()
@@ -231,15 +261,9 @@ def update_context_window(
             except (OSError, json.JSONDecodeError):
                 existing = {}
         existing.update(
-            {
-                field: getattr(settings, field)
-                for field in CONTEXT_WINDOW_API_TO_FIELD.values()
-            }
+            {field: getattr(settings, field) for field in CONTEXT_WINDOW_API_TO_FIELD.values()}
         )
-        path.write_text(
-            json.dumps(existing, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        write_json_atomic(path, existing)
     return context_window_snapshot(settings)
 
 
@@ -271,15 +295,9 @@ def update_analyst_runtime(settings: Settings, updates: dict[str, Any]) -> dict[
             except (OSError, json.JSONDecodeError):
                 existing = {}
         existing.update(
-            {
-                field: getattr(settings, field)
-                for field in ANALYST_RUNTIME_API_TO_FIELD.values()
-            }
+            {field: getattr(settings, field) for field in ANALYST_RUNTIME_API_TO_FIELD.values()}
         )
-        path.write_text(
-            json.dumps(existing, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        write_json_atomic(path, existing)
     return analyst_runtime_snapshot(settings)
 
 

@@ -76,10 +76,11 @@ HOST="$(env_get APP_HOST 127.0.0.1)"
 PORT="$(env_get APP_PORT 8100)"
 CONTROL_BACKEND="$(env_get CONTROL_PLANE_BACKEND sqlite)"
 SESSION_BACKEND="$(env_get SESSION_EVENT_BACKEND sqlite)"
+MEMORY_BACKEND="$(env_get MEMORY_BACKEND sqlite)"
 POSTGRES_DSN="$(env_get POSTGRES_DSN)"
 
 needs_postgres=0
-if [[ "$CONTROL_BACKEND" == postgres || "$SESSION_BACKEND" == postgres ]]; then
+if [[ "$CONTROL_BACKEND" == postgres || "$SESSION_BACKEND" == postgres || "$MEMORY_BACKEND" == postgres ]]; then
   needs_postgres=1
 fi
 

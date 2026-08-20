@@ -53,6 +53,7 @@ class RuntimeAgentRequest(BaseModel):
     session_id: str | None = Field(default=None, max_length=128)
     model_id: str | None = Field(default=None, max_length=64)
     attachment_ids: list[str] = Field(default_factory=list, max_length=20)
+    memory_mode: Literal["default", "read_only", "disabled"] = "default"
 
 
 class ResumeAgentRequest(BaseModel):

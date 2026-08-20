@@ -1,0 +1,103 @@
+{
+  "case_count": 10,
+  "recall_at_k": 1.0,
+  "cross_scope_leakage_count": 0,
+  "latency_ms_average": 220.515,
+  "latency_ms_p95": 236.867,
+  "snapshot_chars_average": 427.9,
+  "snapshot_chars_p95": 775,
+  "passed": true,
+  "details": [
+    {
+      "name": "币种同义改写",
+      "returned_keys": [
+        "report-currency"
+      ],
+      "expected_hits": 1,
+      "leakage_count": 0
+    },
+    {
+      "name": "数字格式偏好",
+      "returned_keys": [
+        "report-precision"
+      ],
+      "expected_hits": 1,
+      "leakage_count": 0
+    },
+    {
+      "name": "市场范围",
+      "returned_keys": [
+        "marketplace-scope"
+      ],
+      "expected_hits": 1,
+      "leakage_count": 0
+    },
+    {
+      "name": "审批阈值",
+      "returned_keys": [
+        "budget-approval"
+      ],
+      "expected_hits": 1,
+      "leakage_count": 0
+    },
+    {
+      "name": "组织财年",
+      "returned_keys": [
+        "fiscal-year"
+      ],
+      "expected_hits": 1,
+      "leakage_count": 0
+    },
+    {
+      "name": "Agent 专属口径",
+      "returned_keys": [
+        "settlement-basis"
+      ],
+      "expected_hits": 1,
+      "leakage_count": 0
+    },
+    {
+      "name": "Agent 隔离",
+      "returned_keys": [
+        "marketplace-scope",
+        "budget-approval",
+        "report-currency",
+        "report-precision"
+      ],
+      "expected_hits": 0,
+      "leakage_count": 0
+    },
+    {
+      "name": "用户隔离",
+      "returned_keys": [
+        "report-currency",
+        "report-precision",
+        "budget-approval"
+      ],
+      "expected_hits": 0,
+      "leakage_count": 0
+    },
+    {
+      "name": "租户隔离",
+      "returned_keys": [
+        "user-timezone",
+        "report-precision",
+        "report-currency",
+        "budget-approval"
+      ],
+      "expected_hits": 0,
+      "leakage_count": 0
+    },
+    {
+      "name": "过期删除与候选隔离",
+      "returned_keys": [
+        "fiscal-year"
+      ],
+      "expected_hits": 0,
+      "leakage_count": 0
+    }
+  ],
+  "dataset": "cross_border_enterprise_memory_v1",
+  "seeded_memory_count": 12,
+  "evaluated_at": "2026-08-20T05:51:56.824539+00:00"
+}

@@ -22,6 +22,7 @@ from ..integrations.kingdee.client import KingdeeClient, KingdeeCredentials
 from ..integrations.lingxing.client import LingXingClient
 from ..integrations.dingtalk.client import DingTalkClient
 from ..integrations.tavily.client import TavilyClient
+from ..persistence import write_json_atomic
 from ..vector_connections import MilvusVectorClient, QdrantVectorClient
 from ..workflows.kingdee_cloud.domain import KingdeeIntegrationConfig
 from ..workflows.lingxing_profit.domain import LingXingIntegrationConfig
@@ -91,17 +92,12 @@ class ToolBindingRegistry:
     def _save(self) -> None:
         if self.path is None:
             return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(
-                {
-                    "selections": self._selections,
-                    "resource_scopes": self._resource_scopes,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ) + "\n",
-            encoding="utf-8",
+        write_json_atomic(
+            self.path,
+            {
+                "selections": self._selections,
+                "resource_scopes": self._resource_scopes,
+            },
         )
 
     def register(self, binding: ToolBinding) -> None:
