@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ArkFlow · 任务</title>
-  <link rel="icon" href="/ui/favicon.svg?v=ark-a1" type="image/svg+xml">
-  <link rel="icon" href="/favicon.ico?v=ark-a1" sizes="32x32">
-  <link rel="apple-touch-icon" href="/ui/apple-touch-icon.png?v=ark-a1">
-  <link rel="stylesheet" href="/ui/styles.css?v=prod-ui-55">
-  <link rel="stylesheet" href="/ui/transitions.css?v=prod-ui-55">
+  <title>SellerForge · 任务</title>
+  <link rel="icon" href="/ui/favicon.svg?v=sf-s1" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico?v=sf-s1" sizes="32x32">
+  <link rel="apple-touch-icon" href="/ui/apple-touch-icon.png?v=sf-s1">
+  <link rel="stylesheet" href="/ui/styles.css?v=prod-ui-56">
+  <link rel="stylesheet" href="/ui/transitions.css?v=prod-ui-56">
   <style>
     html.auth-restoring .auth-card,
     html.auth-restoring .auth-error{visibility:hidden!important;pointer-events:none}
@@ -17,7 +17,14 @@
   </style>
   <script>
     try{
-      if(localStorage.getItem('arkflow.accessToken')||localStorage.getItem('arkflow.refreshToken')){
+      ['accessToken','refreshToken','tenant','userId','role','apiKey','modelId','knowledgeSpaceId','navCollapsed'].forEach((key)=>{
+        const next=`sellerforge.${key}`;
+        const previous=`arkflow.${key}`;
+        if(!localStorage.getItem(next)&&localStorage.getItem(previous)){
+          localStorage.setItem(next, localStorage.getItem(previous));
+        }
+      });
+      if(localStorage.getItem('sellerforge.accessToken')||localStorage.getItem('sellerforge.refreshToken')){
         document.documentElement.classList.add('auth-restoring');
       }
     }catch(_error){}
@@ -28,7 +35,7 @@
   <div class="auth-gate open" id="auth-gate">
     <p class="auth-restore-hint">正在进入…</p>
     <section class="auth-card t-modal is-open" id="auth-card">
-      <div class="auth-brand"><div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#F2B946"/><path fill="#102F31" d="M16 4.8 27.8 28h-5.6l-1.6-4H11.4l-1.6 4H4.2L16 4.8zm-3.2 14.6h6.4L16 12.4l-3.2 7z"/><path fill="none" stroke="#167262" stroke-width="2.15" stroke-linecap="round" d="M7.2 23.2c2.9-2.1 5.2 1.4 8.8-.5 3.6-1.9 5.8 1.6 8.8-.4"/></svg></div><div><strong>ArkFlow</strong><span>运营工作台</span></div></div>
+      <div class="auth-brand"><div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#F2B946"/><path fill="#102F31" d="M22.4 10.6c0-2.7-2.3-4.8-6.4-4.8-4.1 0-6.7 2.2-7.1 5.5h4.5c.25-1.25 1.45-2.2 2.7-2.2 1.25 0 2.05.65 2.05 1.55 0 .95-.75 1.4-3 1.9l-1.55.4c-3.55.85-5.6 2.6-5.6 5.65 0 3.35 2.7 5.5 6.85 5.5 4.35 0 7.05-2.35 7.45-5.75H18.6c-.3 1.4-1.6 2.4-3.15 2.4-1.5 0-2.4-.65-2.4-1.7 0-.95.75-1.45 3-1.95l1.6-.4c3.75-.9 5.75-2.75 5.75-6.05z"/><path fill="none" stroke="#167262" stroke-width="2.15" stroke-linecap="round" d="M7.2 23.2c2.9-2.1 5.2 1.4 8.8-.5 3.6-1.9 5.8 1.6 8.8-.4"/></svg></div><div><strong>SellerForge</strong><span>运营工作台</span></div></div>
       <div id="auth-login-pane">
         <h1>登录</h1><p>使用管理员下发的账号进入工作台。</p>
         <form id="login-form">
@@ -68,8 +75,8 @@
   <div class="app-shell">
     <aside class="sidebar">
       <button class="brand" id="brand-home" type="button" title="运行概览">
-        <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#F2B946"/><path fill="#102F31" d="M16 4.8 27.8 28h-5.6l-1.6-4H11.4l-1.6 4H4.2L16 4.8zm-3.2 14.6h6.4L16 12.4l-3.2 7z"/><path fill="none" stroke="#167262" stroke-width="2.15" stroke-linecap="round" d="M7.2 23.2c2.9-2.1 5.2 1.4 8.8-.5 3.6-1.9 5.8 1.6 8.8-.4"/></svg></div>
-        <div><strong>ArkFlow</strong><span>运营工作台</span></div>
+        <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#F2B946"/><path fill="#102F31" d="M22.4 10.6c0-2.7-2.3-4.8-6.4-4.8-4.1 0-6.7 2.2-7.1 5.5h4.5c.25-1.25 1.45-2.2 2.7-2.2 1.25 0 2.05.65 2.05 1.55 0 .95-.75 1.4-3 1.9l-1.55.4c-3.55.85-5.6 2.6-5.6 5.65 0 3.35 2.7 5.5 6.85 5.5 4.35 0 7.05-2.35 7.45-5.75H18.6c-.3 1.4-1.6 2.4-3.15 2.4-1.5 0-2.4-.65-2.4-1.7 0-.95.75-1.45 3-1.95l1.6-.4c3.75-.9 5.75-2.75 5.75-6.05z"/><path fill="none" stroke="#167262" stroke-width="2.15" stroke-linecap="round" d="M7.2 23.2c2.9-2.1 5.2 1.4 8.8-.5 3.6-1.9 5.8 1.6 8.8-.4"/></svg></div>
+        <div><strong>SellerForge</strong><span>运营工作台</span></div>
       </button>
       <div class="environment" id="env-badge" hidden><i></i><span>测试环境</span></div>
       <nav id="navigation">
@@ -154,7 +161,7 @@
               <button class="ghost-button" id="agent-new-session" type="button">新会话</button>
             </div>
             <label class="session-search-wrap">
-              <input class="session-search" id="agent-session-search" type="search" name="arkflow-session-filter" placeholder="搜索" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore="true" data-lpignore="true" data-form-type="other" readonly>
+              <input class="session-search" id="agent-session-search" type="search" name="sellerforge-session-filter" placeholder="搜索" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore="true" data-lpignore="true" data-form-type="other" readonly>
             </label>
             <div id="agent-session-list" class="agent-session-list"></div>
             <div class="chat-sidebar-foot">
@@ -714,7 +721,7 @@
     </section>
   </div>
   <div class="toast t-toast" id="toast"></div>
-  <script src="/ui/guide.js?v=prod-ui-55" defer></script>
-  <script src="/ui/app.js?v=prod-ui-55" defer></script>
+  <script src="/ui/guide.js?v=prod-ui-56" defer></script>
+  <script src="/ui/app.js?v=prod-ui-56" defer></script>
 </body>
 </html>

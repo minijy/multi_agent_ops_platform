@@ -176,7 +176,7 @@ def register_dingtalk_tools(
                 participant_union_ids=arguments.participant_union_ids,
                 due_time_ms=int(due_at.timestamp() * 1000) if due_at else None,
                 detail_url=arguments.detail_url,
-                source_id=arguments.source_id or f"arkflow-{uuid.uuid4().hex}",
+                source_id=arguments.source_id or f"sellerforge-{uuid.uuid4().hex}",
                 priority=arguments.priority,
             )
             return {

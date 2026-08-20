@@ -360,7 +360,7 @@
   .t-dropdown { transition: none !important; }
 }
 
-/* ArkFlow wiring */
+/* SellerForge wiring */
 .toast.t-toast {
   transform: translateX(-50%) translateY(var(--toast-distance)) scale(var(--toast-scale));
 }

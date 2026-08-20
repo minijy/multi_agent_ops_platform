@@ -1,4 +1,4 @@
-# ArkFlow 前端专用规则
+# SellerForge 前端专用规则
 
 > 本文档是 [ENGINEERING_RULES.md](ENGINEERING_RULES.md) 的前端专项补充。适用于 `frontend/index.html`、`frontend/app.js`、`frontend/styles.css` 以及所有新增前端模块。
 

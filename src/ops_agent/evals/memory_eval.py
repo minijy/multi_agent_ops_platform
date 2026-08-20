@@ -131,7 +131,7 @@ def evaluate_memory(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate ArkFlow long-term memory retrieval")
+    parser = argparse.ArgumentParser(description="Evaluate SellerForge long-term memory retrieval")
     parser.add_argument("dataset", type=Path, help="JSON array of MemoryEvalCase objects")
     parser.add_argument("--output", type=Path)
     parser.add_argument(

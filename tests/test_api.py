@@ -340,7 +340,7 @@ def test_catalog_configuration_and_frontend_are_available(tmp_path: Path):
     with TestClient(create_app(_settings(tmp_path))) as client:
         home = client.get("/")
         assert home.status_code == 200
-        assert "ArkFlow" in home.text
+        assert "SellerForge" in home.text
         assert "长期记忆" in home.text
         assert client.get("/ui/styles.css").status_code == 200
         frontend_script = client.get("/ui/app.js")

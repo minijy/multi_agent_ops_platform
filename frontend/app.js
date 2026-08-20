@@ -1,4 +1,4 @@
-const state={page:'agent-chat',guideTopic:'',summary:null,runs:[],approvals:[],agents:[],catalog:null,connections:[],editingConnection:null,configuration:null,models:null,editingModel:null,knowledgeSpaces:[],editingKnowledgeSpace:null,knowledgeContent:{spaceId:null,items:[],categories:[],category:'',cursor:null,total:0},audit:[],access:null,memories:[],memoryPreferences:null,resultViewer:{resultRef:null,offset:0,limit:50,data:null},session:{apiKey:localStorage.getItem('arkflow.apiKey')||'',tenant:localStorage.getItem('arkflow.tenant')||'tenant-a',userId:localStorage.getItem('arkflow.userId')||'local-admin',role:localStorage.getItem('arkflow.role')||'admin',accessToken:localStorage.getItem('arkflow.accessToken')||'',refreshToken:localStorage.getItem('arkflow.refreshToken')||'',account:null},agentChat:{sessionId:null,sessions:[],events:[],subagents:[],models:[],pendingAttachments:[],selectedModelId:localStorage.getItem('arkflow.modelId')||'',sending:false,interrupting:false,cooldownUntil:0,stream:null,motionKeys:new Set(),stickToBottom:true}};
+const state={page:'agent-chat',guideTopic:'',summary:null,runs:[],approvals:[],agents:[],catalog:null,connections:[],editingConnection:null,configuration:null,models:null,editingModel:null,knowledgeSpaces:[],editingKnowledgeSpace:null,knowledgeContent:{spaceId:null,items:[],categories:[],category:'',cursor:null,total:0},audit:[],access:null,memories:[],memoryPreferences:null,resultViewer:{resultRef:null,offset:0,limit:50,data:null},session:{apiKey:localStorage.getItem('sellerforge.apiKey')||'',tenant:localStorage.getItem('sellerforge.tenant')||'tenant-a',userId:localStorage.getItem('sellerforge.userId')||'local-admin',role:localStorage.getItem('sellerforge.role')||'admin',accessToken:localStorage.getItem('sellerforge.accessToken')||'',refreshToken:localStorage.getItem('sellerforge.refreshToken')||'',account:null},agentChat:{sessionId:null,sessions:[],events:[],subagents:[],models:[],pendingAttachments:[],selectedModelId:localStorage.getItem('sellerforge.modelId')||'',sending:false,interrupting:false,cooldownUntil:0,stream:null,motionKeys:new Set(),stickToBottom:true}};
 const SPECIALIST_ANALYST_IDS=['amazon-finance-analyst','profit-analyst','erp-analyst'];
 const $=(selector,root=document)=>root.querySelector(selector);const $$=(selector,root=document)=>[...root.querySelectorAll(selector)];
 const escapeHTML=value=>String(value??'').replace(/[&<>'"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
@@ -199,8 +199,8 @@ function authRefreshExempt(path){
   return /^\/v1\/auth\/(login|register|refresh|logout)(?:\?|$)/.test(String(path||''));
 }
 function syncAccountTokensFromStorage(){
-  state.session.accessToken=localStorage.getItem('arkflow.accessToken')||'';
-  state.session.refreshToken=localStorage.getItem('arkflow.refreshToken')||'';
+  state.session.accessToken=localStorage.getItem('sellerforge.accessToken')||'';
+  state.session.refreshToken=localStorage.getItem('sellerforge.refreshToken')||'';
   return {accessToken:state.session.accessToken,refreshToken:state.session.refreshToken};
 }
 function expireAccountSession(message='登录已过期，请重新登录'){
@@ -214,7 +214,7 @@ function expireAccountSession(message='登录已过期，请重新登录'){
 async function refreshAccountSession(){
   if(accountRefreshInFlight)return accountRefreshInFlight;
   const run=async()=>{
-    const previous=state.session.refreshToken||localStorage.getItem('arkflow.refreshToken')||'';
+    const previous=state.session.refreshToken||localStorage.getItem('sellerforge.refreshToken')||'';
     syncAccountTokensFromStorage();
     const token=state.session.refreshToken;
     if(!token)throw new Error('登录已过期');
@@ -229,7 +229,7 @@ async function refreshAccountSession(){
     return result;
   };
   const pending=typeof navigator!=='undefined'&&navigator.locks?.request
-    ?navigator.locks.request('arkflow-auth-refresh',run)
+    ?navigator.locks.request('sellerforge-auth-refresh',run)
     :run();
   accountRefreshInFlight=Promise.resolve(pending).finally(()=>{accountRefreshInFlight=null});
   return accountRefreshInFlight;
@@ -237,7 +237,7 @@ async function refreshAccountSession(){
 async function authFetch(path,options={}){
   const send=()=>fetch(path,{...options,headers:{...headers(options.body),...(options.headers||{})}});
   let response=await send();
-  if(response.status!==401||authRefreshExempt(path)||!(state.session.refreshToken||localStorage.getItem('arkflow.refreshToken')))return response;
+  if(response.status!==401||authRefreshExempt(path)||!(state.session.refreshToken||localStorage.getItem('sellerforge.refreshToken')))return response;
   try{
     await refreshAccountSession();
   }catch{
@@ -1164,7 +1164,7 @@ async function loadKnowledgePage(){
   if(createSpace)createSpace.hidden=false;
   const listed=await api('/v1/knowledge/library/spaces');
   const spaces=listed.items||[];
-  const stored=localStorage.getItem('arkflow.knowledgeSpaceId')||'';
+  const stored=localStorage.getItem('sellerforge.knowledgeSpaceId')||'';
   const spaceId=spaces.some(item=>item.id===stored)?stored:(spaces[0]?.id||'');
   state.knowledgeLibrary={spaces,spaceId,categoryId:'',tree:[],documents:[],hits:[],page:1,pageSize:KNOWLEDGE_PAGE_SIZE,total:0};
   fillKnowledgeSpaceSelect(spaces,spaceId);
@@ -1190,7 +1190,7 @@ function closeKnowledgeSpaceDrawer(){closeDrawer('#knowledge-space-drawer')}
 async function createKnowledgeSpace(event){
   event.preventDefault();
   const created=await api('/v1/knowledge/library/spaces',{method:'POST',body:JSON.stringify({name:$('#knowledge-space-name').value.trim(),description:$('#knowledge-space-description').value.trim(),embedding_model:$('#knowledge-space-embedding').value})});
-  localStorage.setItem('arkflow.knowledgeSpaceId',created.id);
+  localStorage.setItem('sellerforge.knowledgeSpaceId',created.id);
   closeKnowledgeSpaceDrawer();
   toast('空间已创建并完成对接','success');
   await loadKnowledgePage();
@@ -1425,7 +1425,7 @@ async function deleteModelEditor(){
     closeDrawer('#model-editor-drawer');
     if(state.agentChat.selectedModelId===editing.id){
       state.agentChat.selectedModelId='';
-      localStorage.removeItem('arkflow.modelId');
+      localStorage.removeItem('sellerforge.modelId');
     }
     state.configuration=null;
     await loadConfiguration();
@@ -1447,7 +1447,7 @@ async function refreshAgentModelSelect(){
   state.agentChat.models=models;
   const selected=selectedAgentModelId(models,data.default_model_id);
   state.agentChat.selectedModelId=selected;
-  if(selected)localStorage.setItem('arkflow.modelId',selected);
+  if(selected)localStorage.setItem('sellerforge.modelId',selected);
   select.innerHTML=models.map(item=>`<option value="${escapeHTML(item.id)}"${item.id===selected?' selected':''}>${escapeHTML(item.name)} (${escapeHTML(item.provider)}/${escapeHTML(item.model_name)})</option>`).join('');
   if(!models.length)select.innerHTML='<option value="">请先在系统设置中配置模型</option>';
   select.disabled=!models.length;
@@ -1460,8 +1460,8 @@ function onAgentModelChange(){
   const select=$('#agent-model-select');
   if(!select)return;
   state.agentChat.selectedModelId=select.value;
-  if(select.value)localStorage.setItem('arkflow.modelId',select.value);
-  else localStorage.removeItem('arkflow.modelId');
+  if(select.value)localStorage.setItem('sellerforge.modelId',select.value);
+  else localStorage.removeItem('sellerforge.modelId');
   const model=selectedAgentModel();
   if(state.agentChat.pendingAttachments.length&&model&&!model.supports_image){state.agentChat.pendingAttachments=[];renderAgentAttachmentPreview();toast('当前模型不支持图片，已移除待发送图片','error')}
   updateAgentAttachmentCapability();
@@ -1537,7 +1537,7 @@ function renderAudit(){
 }
 async function loadAudit(){const data=await api('/v1/audit-events');state.audit=data.items;renderAudit()}
 const roleLabels={admin:'管理员',operator:'操作员',approver:'审批员',viewer:'只读'};
-function agentStorageKey(){return`arkflow.agentSessions.${state.session.tenant}.${state.session.userId}`}
+function agentStorageKey(){return`sellerforge.agentSessions.${state.session.tenant}.${state.session.userId}`}
 function loadStoredAgentSessions(){try{return JSON.parse(localStorage.getItem(agentStorageKey())||'[]')}catch{return[]}}
 function rememberAgentSession(id,title){const sessions=loadStoredAgentSessions().filter(item=>item.id!==id);sessions.unshift({id,title:title.slice(0,48),updatedAt:new Date().toISOString()});state.agentChat.sessions=sessions.slice(0,50);localStorage.setItem(agentStorageKey(),JSON.stringify(state.agentChat.sessions));localStorage.setItem(`${agentStorageKey()}.current`,id)}
 function forgetAgentSession(id){state.agentChat.sessions=loadStoredAgentSessions().filter(item=>item.id!==id);localStorage.setItem(agentStorageKey(),JSON.stringify(state.agentChat.sessions));if(localStorage.getItem(`${agentStorageKey()}.current`)===id)localStorage.removeItem(`${agentStorageKey()}.current`)}
@@ -2286,7 +2286,7 @@ async function loadMemory(){
   const params=new URLSearchParams({include_deleted:'true'});const status=$('#memory-filter-status')?.value||'';const scope=$('#memory-filter-scope')?.value||'';if(status)params.set('status',status);if(scope)params.set('scope',scope);if(owner)params.set('owner_user_id',owner);const result=await api(`/v1/memories?${params}`);state.memories=result.items;renderMemoryItems(state.memories);
 }
 async function saveMemoryPreferences(){try{const retention=$('#memory-retention-days').value;const result=await api('/v1/memory/preferences',{method:'PUT',body:JSON.stringify({enabled:$('#memory-enabled').checked,auto_extract_enabled:$('#memory-auto-extract').checked,allow_sensitive:$('#memory-allow-sensitive').checked,retention_days:retention?Number(retention):null})});state.memoryPreferences=result;toast('记忆设置已保存','success')}catch(error){toast(error.message,'error')}}
-async function exportMyMemories(){try{const data=await api('/v1/memory/export');const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download='arkflow-memory-export.json';link.click();URL.revokeObjectURL(link.href)}catch(error){toast(error.message,'error')}}
+async function exportMyMemories(){try{const data=await api('/v1/memory/export');const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download='sellerforge-memory-export.json';link.click();URL.revokeObjectURL(link.href)}catch(error){toast(error.message,'error')}}
 async function saveMemoryPolicy(){try{await api('/v1/memory/policy',{method:'PUT',body:JSON.stringify({extraction_mode:$('#memory-policy-extraction').value,vector_backend:$('#memory-policy-vector-backend').value,embedding_provider:$('#memory-policy-embedding-provider').value,embedding_model:$('#memory-policy-embedding-model').value.trim(),relevance_threshold:Number($('#memory-policy-threshold').value),snapshot_limit:Number($('#memory-policy-limit').value),sensitive_data_policy:$('#memory-policy-sensitive').value,automatic_candidates:$('#memory-policy-candidates').checked})});toast('租户记忆策略已保存','success')}catch(error){toast(error.message,'error')}}
 async function runMemoryMaintenance(){try{const result=await api('/v1/memory/maintenance',{method:'POST'});toast(`维护完成：过期 ${result.expired}，重新向量化 ${result.reembedded}，索引重试 ${result.retried}`,'success');await loadMemory()}catch(error){toast(error.message,'error')}}
 async function clearMyMemories(){if(!await askConfirm('将擦除你的全部长期记忆，且无法恢复。是否继续？',{title:'清空我的记忆',okLabel:'全部擦除',danger:true}))return;try{await api('/v1/memory/items',{method:'DELETE'});toast('全部记忆已擦除','success');await loadMemory()}catch(error){toast(error.message,'error')}}
@@ -2373,11 +2373,11 @@ function saveAccountSession(result){
   state.session.accessToken=result.access_token;state.session.refreshToken=result.refresh_token;state.session.account=result.account;
   state.session.tenant=result.account.tenant_id;state.session.userId=result.account.user_id;state.session.role=result.account.role;
   if(identityChanged){state.agentChat.sessionId=null;state.agentChat.sessions=[];state.agentChat.events=[];state.agentChat.subagents=[];state.agentChat.stream=null}
-  localStorage.setItem('arkflow.accessToken',result.access_token);localStorage.setItem('arkflow.refreshToken',result.refresh_token);
-  localStorage.setItem('arkflow.tenant',state.session.tenant);localStorage.setItem('arkflow.userId',state.session.userId);localStorage.setItem('arkflow.role',state.session.role);
+  localStorage.setItem('sellerforge.accessToken',result.access_token);localStorage.setItem('sellerforge.refreshToken',result.refresh_token);
+  localStorage.setItem('sellerforge.tenant',state.session.tenant);localStorage.setItem('sellerforge.userId',state.session.userId);localStorage.setItem('sellerforge.role',state.session.role);
   renderCurrentAccount();
 }
-function clearAccountSession(){state.session.accessToken='';state.session.refreshToken='';state.session.account=null;state.agentChat.sessionId=null;state.agentChat.sessions=[];state.agentChat.events=[];state.agentChat.subagents=[];state.agentChat.stream=null;localStorage.removeItem('arkflow.accessToken');localStorage.removeItem('arkflow.refreshToken')}
+function clearAccountSession(){state.session.accessToken='';state.session.refreshToken='';state.session.account=null;state.agentChat.sessionId=null;state.agentChat.sessions=[];state.agentChat.events=[];state.agentChat.subagents=[];state.agentChat.stream=null;localStorage.removeItem('sellerforge.accessToken');localStorage.removeItem('sellerforge.refreshToken')}
 function roleCanAccessPage(page){const role=state.session.role;const restricted={dashboard:['admin'],approvals:['admin','approver'],connectors:['admin'],knowledge:['admin'],skills:['admin'],access:['admin'],audit:['admin'],settings:['admin']};return !restricted[page]||restricted[page].includes(role)}
 function applyRoleVisibility(){const role=state.session.role;$$('[data-role-allow]').forEach(element=>{element.hidden=!String(element.dataset.roleAllow||'').split(/\s+/).includes(role)});$$('[data-go="connectors"]').forEach(element=>{element.hidden=role!=='admin'})}
 function renderCurrentAccount(){applyRoleVisibility();const account=state.session.account;if(!account)return;$('#account-name').textContent=account.display_name||account.user_id;$('#account-meta').textContent=`${account.tenant_id} · ${String(account.role).toUpperCase()}`;$('#account-avatar').textContent=String(account.display_name||account.user_id).slice(0,2).toUpperCase()}
@@ -2422,8 +2422,8 @@ async function submitLogin(event){event.preventDefault();$('#auth-error').textCo
 async function submitRegister(event){event.preventDefault();$('#auth-error').textContent='';const password=$('#register-password').value;if(password!==$('#register-confirm').value){authError(new Error('两次输入的密码不一致。'));return}try{const result=await parseApiResponse(await fetch('/v1/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tenant_id:$('#register-tenant').value.trim(),user_id:$('#register-user').value.trim(),display_name:$('#register-name').value.trim(),password})}));saveAccountSession(result);await enterApplication()}catch(error){authError(error)}}
 async function submitPasswordChange(event){event.preventDefault();$('#auth-error').textContent='';const password=$('#change-new-password').value;if(password!==$('#change-confirm-password').value){authError(new Error('两次输入的新密码不一致。'));return}try{const result=await api('/v1/auth/change-password',{method:'POST',body:JSON.stringify({current_password:$('#change-current-password').value,new_password:password})});saveAccountSession(result);event.target.reset();toast('密码已更新','success');await enterApplication()}catch(error){authError(error)}}
 function fillLoginIdentity(){
-  const tenant=localStorage.getItem('arkflow.tenant')||'';
-  const user=localStorage.getItem('arkflow.userId')||'';
+  const tenant=localStorage.getItem('sellerforge.tenant')||'';
+  const user=localStorage.getItem('sellerforge.userId')||'';
   if($('#login-tenant'))$('#login-tenant').value=tenant;
   if($('#login-user'))$('#login-user').value=user;
   if($('#register-tenant')&&tenant)$('#register-tenant').value=tenant;
@@ -2451,7 +2451,7 @@ async function bootstrapAuth(){
 }
 async function logoutAccount(){const refresh=state.session.refreshToken;try{if(refresh)await fetch('/v1/auth/logout',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({refresh_token:refresh})})}finally{clearAccountSession();fillLoginIdentity();showAuthPane('login')}}
 function hashParts(){return String(location.hash||'').replace(/^#\/?/,'').split(/[/?#]/).filter(Boolean)}
-function guideCatalog(){return window.ArkFlowGuide||{path:[],groups:[],topics:{}}}
+function guideCatalog(){return window.SellerForgeGuide||{path:[],groups:[],topics:{}}}
 function guideTopicMeta(id){return guideCatalog().topics[id]||null}
 function guideIco(){return '<span class="guide-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M4.2 3.2h7.6v10.2H4.2z" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M6 6.2h4M6 8.6h4M6 11h2.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span>'}
 function renderGuideBlock(block){
@@ -2531,7 +2531,7 @@ async function navigate(page,options={}){
   $$('.nav-item').forEach(el=>el.classList.toggle('active',el.dataset.page===page));
   const topic=page==='guide'?guideTopicMeta(state.guideTopic):null;
   $('#page-breadcrumb').textContent=topic?`使用指南 · ${topic.title}`:pageNames[page];
-  document.title=`ArkFlow · ${topic?topic.title:pageNames[page]}`;
+  document.title=`SellerForge · ${topic?topic.title:pageNames[page]}`;
   $$('.nav-item').forEach(el=>{if(el.dataset.page===page)el.setAttribute('aria-current','page');else el.removeAttribute('aria-current')});
   $('#page-agent-chat')?.classList.remove('sessions-open');
   $('.sidebar').classList.remove('open');
@@ -2614,7 +2614,7 @@ $('#knowledge-upload-drawer')?.addEventListener('click',event=>{if(event.target.
 $('#knowledge-category-form')?.addEventListener('submit',event=>createKnowledgeCategory(event).catch(error=>toast(error.message,'error')));
 $('#knowledge-search-form')?.addEventListener('submit',event=>searchKnowledgeLibrary(event).catch(error=>toast(error.message,'error')));
 $('#knowledge-search-clear')?.addEventListener('click',()=>loadKnowledgeDocuments().catch(error=>toast(error.message,'error')));
-$('#knowledge-space-select')?.addEventListener('change',event=>{if(!state.knowledgeLibrary)return;state.knowledgeLibrary.spaceId=event.target.value;state.knowledgeLibrary.categoryId='';state.knowledgeLibrary.page=1;if(event.target.value)localStorage.setItem('arkflow.knowledgeSpaceId',event.target.value);loadKnowledgeDocuments().catch(error=>toast(error.message,'error'))});
+$('#knowledge-space-select')?.addEventListener('change',event=>{if(!state.knowledgeLibrary)return;state.knowledgeLibrary.spaceId=event.target.value;state.knowledgeLibrary.categoryId='';state.knowledgeLibrary.page=1;if(event.target.value)localStorage.setItem('sellerforge.knowledgeSpaceId',event.target.value);loadKnowledgeDocuments().catch(error=>toast(error.message,'error'))});
 $('#knowledge-docs-prev')?.addEventListener('click',()=>{const lib=knowledgeLibrary();if((lib.page||1)<=1)return;lib.page=(lib.page||1)-1;loadKnowledgeDocuments().catch(error=>toast(error.message,'error'))});
 $('#knowledge-docs-next')?.addEventListener('click',()=>{const lib=knowledgeLibrary();lib.page=(lib.page||1)+1;loadKnowledgeDocuments().catch(error=>toast(error.message,'error'))});
 $('#knowledge-create-space-button')?.addEventListener('click',()=>openKnowledgeSpaceDrawer().catch(error=>toast(error.message,'error')));
@@ -2647,17 +2647,17 @@ function setNavCollapsed(collapsed){
     btn.setAttribute('aria-label',label);
     btn.title=label;
   }
-  try{localStorage.setItem('arkflow.navCollapsed',collapsed?'1':'0')}catch(_error){}
+  try{localStorage.setItem('sellerforge.navCollapsed',collapsed?'1':'0')}catch(_error){}
 }
 $$('.nav-item').forEach(button=>{if(!button.title)button.title=button.textContent.replace(/\s+/g,' ').trim().replace(/\s*\d+\s*$/,'')});
 $('#sidebar-toggle')?.addEventListener('click',()=>setNavCollapsed(!$('.app-shell')?.classList.contains('nav-collapsed')));
 $('#brand-home')?.addEventListener('click',()=>navigate('dashboard'));
-try{setNavCollapsed(localStorage.getItem('arkflow.navCollapsed')==='1')}catch(_error){}
-$('#mobile-menu').addEventListener('click',()=>$('.sidebar').classList.toggle('open'));$('#api-key-input')&&($('#api-key-input').value=state.session.apiKey);$('#tenant-input')&&($('#tenant-input').value=state.session.tenant);$('#user-id-input')&&($('#user-id-input').value=state.session.userId);$('#role-input')&&($('#role-input').value=state.session.role);$('#save-session')?.addEventListener('click',()=>{if(!isDevEnvironment())return;state.session.apiKey=$('#api-key-input').value;state.session.tenant=$('#tenant-input').value.trim();state.session.userId=$('#user-id-input').value.trim();state.session.role=$('#role-input').value;localStorage.setItem('arkflow.apiKey',state.session.apiKey);localStorage.setItem('arkflow.tenant',state.session.tenant);localStorage.setItem('arkflow.userId',state.session.userId);localStorage.setItem('arkflow.role',state.session.role);state.agentChat.sessionId=null;state.catalog=null;state.access=null;toast('开发会话已保存');navigate(state.page)});
+try{setNavCollapsed(localStorage.getItem('sellerforge.navCollapsed')==='1')}catch(_error){}
+$('#mobile-menu').addEventListener('click',()=>$('.sidebar').classList.toggle('open'));$('#api-key-input')&&($('#api-key-input').value=state.session.apiKey);$('#tenant-input')&&($('#tenant-input').value=state.session.tenant);$('#user-id-input')&&($('#user-id-input').value=state.session.userId);$('#role-input')&&($('#role-input').value=state.session.role);$('#save-session')?.addEventListener('click',()=>{if(!isDevEnvironment())return;state.session.apiKey=$('#api-key-input').value;state.session.tenant=$('#tenant-input').value.trim();state.session.userId=$('#user-id-input').value.trim();state.session.role=$('#role-input').value;localStorage.setItem('sellerforge.apiKey',state.session.apiKey);localStorage.setItem('sellerforge.tenant',state.session.tenant);localStorage.setItem('sellerforge.userId',state.session.userId);localStorage.setItem('sellerforge.role',state.session.role);state.agentChat.sessionId=null;state.catalog=null;state.access=null;toast('开发会话已保存');navigate(state.page)});
 $('#login-form').addEventListener('submit',submitLogin);$('#register-form')?.addEventListener('submit',submitRegister);$('#change-password-form').addEventListener('submit',submitPasswordChange);$('#show-register')?.addEventListener('click',()=>showAuthPane('register'));$('#show-login')?.addEventListener('click',()=>showAuthPane('login'));$('#logout-button')?.addEventListener('click',logoutAccount);$('#cancel-password')?.addEventListener('click',()=>{if(state.session.accessToken)closeAuthGate();else showAuthPane('login')});$('#change-password-button')?.addEventListener('click',()=>{closeMenu($('#account-menu-panel'),true);$('.account-menu')?.classList.remove('open');showAuthPane('password','account')});$('#account-menu-button')?.addEventListener('click',event=>{event.stopPropagation();const panel=$('#account-menu-panel');const opening=!panel.classList.contains('is-open');closeMenu(panel,true);$('.account-menu')?.classList.remove('open');if(opening){openMenu(panel);$('.account-menu')?.classList.add('open');event.currentTarget.setAttribute('aria-expanded','true')}else event.currentTarget.setAttribute('aria-expanded','false')});document.addEventListener('click',event=>{if(!event.target.closest('.account-menu')){closeMenu($('#account-menu-panel'),true);$('.account-menu')?.classList.remove('open');$('#account-menu-button')?.setAttribute('aria-expanded','false')}});$('#chat-sessions-toggle')?.addEventListener('click',()=>$('#page-agent-chat')?.classList.toggle('sessions-open'));$('#app-dialog')?.addEventListener('click',event=>{if(event.target.id==='app-dialog')$('#app-dialog-cancel')?.click()});$('#access-user-generate-password')?.addEventListener('change',event=>{$('#access-user-password').disabled=event.target.checked});
 window.addEventListener('storage',event=>{
-  if(event.key==='arkflow.accessToken')state.session.accessToken=event.newValue||'';
-  if(event.key==='arkflow.refreshToken'){
+  if(event.key==='sellerforge.accessToken')state.session.accessToken=event.newValue||'';
+  if(event.key==='sellerforge.refreshToken'){
     state.session.refreshToken=event.newValue||'';
     if(!event.newValue){state.session.account=null;showAuthPane('login')}
   }

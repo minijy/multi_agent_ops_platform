@@ -427,7 +427,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
 
     application = FastAPI(
-        title="Multi-Agent Ops Platform",
+        title="SellerForge",
         version="0.1.0",
         lifespan=lifespan,
     )

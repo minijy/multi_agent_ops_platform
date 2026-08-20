@@ -1,8 +1,8 @@
-# ArkFlow Multi-Agent Operations Platform 项目介绍
+# SellerForge Multi-Agent Operations Platform 项目介绍
 
 ## 1. 项目概述
 
-ArkFlow 是一套面向企业数据分析和运营协作场景的 Multi-Agent 平台。
+SellerForge 是一套面向企业数据分析和运营协作场景的 Multi-Agent 平台。
 它将大模型、专业 Agent、业务 Tool、外部系统连接器、权限治理、知识库和长期记忆
 整合到同一个可视化运行平台中，用户可以以自然语言提交复杂任务，由系统完成拆解、并行执行、
 数据查询、统计计算、结果汇总和受控的外部操作。
@@ -12,7 +12,7 @@ Agent Runtime 控制面。
 
 ## 2. 项目目标
 
-ArkFlow 主要解决以下问题：
+SellerForge 主要解决以下问题：
 
 - 复杂业务问题需要跨多个数据源和业务系统才能回答。
 - 大数据量直接输入模型会导致 Token 超限、成本过高和统计口径不稳定。
@@ -287,5 +287,5 @@ scripts/start_local.sh
 
 ---
 
-ArkFlow 的核心价值不是让模型可以调用更多工具，而是让多 Agent 在可控的身份、权限、数据、
+SellerForge 的核心价值不是让模型可以调用更多工具，而是让多 Agent 在可控的身份、权限、数据、
 成本和审计边界中完成真实业务任务。

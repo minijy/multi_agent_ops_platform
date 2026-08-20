@@ -1,4 +1,4 @@
-window.ArkFlowGuide = {
+window.SellerForgeGuide = {
   path: [
     {n: "1", title: "账号与权限", topic: "access", text: "管理员创建用户、权限组，并勾选该组能用的业务工具。"},
     {n: "2", title: "连接器与工具", topic: "connectors", text: "先配好数据库、领星、金蝶或搜索凭证，再到工具页绑定连接和数据范围。"},
@@ -17,7 +17,7 @@ window.ArkFlowGuide = {
       page: "agent-chat",
       pageLabel: "打开任务",
       summary: "用自然语言提交运营问题。协调助手拆任务，分析助手查数，结果在同一会话里汇总。",
-      intro: "任务页是 ArkFlow 的工作台。左侧是会话和后台子任务，中间是对话，底部输入。系统不会把整表明细塞进模型，而是让数据库做汇总，模型只解释摘要。",
+      intro: "任务页是 SellerForge 的工作台。左侧是会话和后台子任务，中间是对话，底部输入。系统不会把整表明细塞进模型，而是让数据库做汇总，模型只解释摘要。",
       blocks: [
         {
           heading: "什么时候用",
@@ -95,7 +95,7 @@ window.ArkFlowGuide = {
       page: "knowledge",
       pageLabel: "打开知识库",
       summary: "制度、手册、官方说明放进文枢知识空间。任务里检索的是切片，不是整份文件。",
-      intro: "ArkFlow 的知识页是外壳：分类、上传、检索和状态展示走运营平台，解析、切片、向量化在文枢完成。不要在连接器里给知识文档手工对接 Collection。",
+      intro: "SellerForge 的知识页是外壳：分类、上传、检索和状态展示走运营平台，解析、切片、向量化在文枢完成。不要在连接器里给知识文档手工对接 Collection。",
       blocks: [
         {
           heading: "和长期记忆的区别",
