@@ -45,9 +45,10 @@ class ToolConnectionBindingRequest(BaseModel):
 
 
 class ToolBindingRegistry:
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, path: Path | None = None, *, persistence: Any | None = None) -> None:
         self._bindings: dict[str, ToolBinding] = {}
         self.path = path.expanduser().resolve() if path is not None else None
+        self._persistence = persistence
         self._lock = threading.RLock()
         self._selections: dict[str, str] = {}
         self._resource_scopes: dict[str, dict[str, list[str]]] = {}
@@ -58,6 +59,9 @@ class ToolBindingRegistry:
         return f"{tenant_id}:{tool_name}"
 
     def reload(self) -> None:
+        if self._persistence is not None:
+            self._selections, self._resource_scopes = self._persistence.load()
+            return
         if self.path is None or not self.path.is_file():
             self._selections = {}
             self._resource_scopes = {}
@@ -90,6 +94,9 @@ class ToolBindingRegistry:
             self._resource_scopes = {}
 
     def _save(self) -> None:
+        if self._persistence is not None:
+            self._persistence.save(self._selections, self._resource_scopes)
+            return
         if self.path is None:
             return
         write_json_atomic(
@@ -717,8 +724,10 @@ def create_connector_runtime(
     )
 
 
-def create_tool_bindings(path: Path | None = None) -> ToolBindingRegistry:
-    registry = ToolBindingRegistry(path)
+def create_tool_bindings(
+    path: Path | None = None, *, persistence: Any | None = None
+) -> ToolBindingRegistry:
+    registry = ToolBindingRegistry(path, persistence=persistence)
     for binding in (
         ToolBinding("amazon_finance_query", "analytics", "query_settlements"),
         ToolBinding(

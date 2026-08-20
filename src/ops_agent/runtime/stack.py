@@ -78,6 +78,7 @@ class RuntimeStack:
     result_store: ResultStore | None = None
     memory_service: MemoryService | None = None
     knowledge_spaces: KnowledgeSpaceRegistry | None = None
+    tool_catalog: object | None = None
 
 
 @contextmanager
@@ -91,14 +92,38 @@ def open_runtime_stack(settings: Settings) -> Iterator[RuntimeStack]:
     )
     seed_skills_from_paths(agent_skill_store, settings.skills_paths)
     agent_registry = create_agent_registry(store=agent_skill_store)
+    binding_persistence = None
+    tool_catalog = None
+    if settings.control_plane_backend == "postgres":
+        from ..connector_control_plane import (
+            PostgresBindingPersistence,
+            PostgresToolCatalog,
+            delete_hybrid_agents,
+            import_json_bindings,
+            seed_tool_catalog,
+        )
+
+        binding_persistence = PostgresBindingPersistence(settings.postgres_dsn)
+        import_json_bindings(binding_persistence, settings.tool_bindings_path)
+        tool_catalog = PostgresToolCatalog(settings.postgres_dsn)
+        seed_tool_catalog(tool_catalog, agent_skill_store.list_agents())
+        if delete_hybrid_agents(agent_skill_store):
+            agent_registry.reload()
     connection_registry = create_connection_registry(
         settings.connection_definitions_path,
         settings.connection_secrets_path,
+        settings=settings,
     )
+    if binding_persistence is not None:
+        from ..connector_control_plane import seed_default_bindings
+
+        seed_default_bindings(binding_persistence, connection_registry.list_all())
     knowledge_spaces = create_knowledge_space_registry(
         settings.knowledge_spaces_path, connection_registry
     )
-    tool_bindings = create_tool_bindings(settings.tool_bindings_path)
+    tool_bindings = create_tool_bindings(
+        settings.tool_bindings_path, persistence=binding_persistence
+    )
     access_control = create_access_control_store(settings)
     connector_runtime = create_connector_runtime(connection_registry, tool_bindings)
     model_registry = create_model_registry(settings.model_definitions_path, settings)
@@ -164,6 +189,7 @@ def open_runtime_stack(settings: Settings) -> Iterator[RuntimeStack]:
         tool_bindings=tool_bindings,
         result_store=result_store,
         memory_service=memory_service,
+        tool_catalog=tool_catalog,
     )
     subagent_manager = SubagentManager(
         runtime=agent_runtime,
@@ -196,6 +222,7 @@ def open_runtime_stack(settings: Settings) -> Iterator[RuntimeStack]:
         result_store=result_store,
         memory_service=memory_service,
         knowledge_spaces=knowledge_spaces,
+        tool_catalog=tool_catalog,
     )
     try:
         yield stack

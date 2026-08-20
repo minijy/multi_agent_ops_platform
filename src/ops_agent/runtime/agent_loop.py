@@ -204,6 +204,7 @@ class AgentRuntime:
         tool_bindings=None,
         result_store=None,
         memory_service: MemoryService | None = None,
+        tool_catalog=None,
     ) -> None:
         self.router = router
         self.registry = registry
@@ -223,6 +224,7 @@ class AgentRuntime:
         self.tool_bindings = tool_bindings
         self.result_store = result_store
         self.memory_service = memory_service
+        self.tool_catalog = tool_catalog
         self.live_hub = SessionLiveHub()
         self.graph = self._build_graph()
 
@@ -306,6 +308,7 @@ class AgentRuntime:
             self.registry,
             self.connection_registry,
             tenant_id,
+            getattr(self, "tool_catalog", None),
         )
         if self.access_control is not None and tenant_id and user_id:
             decision = self.access_control.effective_access(tenant_id, user_id, role)

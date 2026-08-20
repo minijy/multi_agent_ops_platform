@@ -549,6 +549,14 @@ def seed_agents_from_defaults(
     from .agent_registry import default_agent_definitions
 
     defaults = {item.id: item.model_dump(mode="json") for item in default_agent_definitions()}
+    if isinstance(store, PostgresAgentSkillStore):
+        from .connector_control_plane import HYBRID_AGENT_TO_TOOL
+
+        defaults = {
+            agent_id: payload
+            for agent_id, payload in defaults.items()
+            if agent_id not in HYBRID_AGENT_TO_TOOL and payload.get("kind") != "hybrid"
+        }
     if legacy_json and legacy_json.is_file():
         try:
             loaded = json.loads(legacy_json.read_text(encoding="utf-8"))

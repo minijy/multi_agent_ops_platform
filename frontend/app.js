@@ -714,7 +714,12 @@ async function openApprovalSession(sessionId){
 async function decideRuntimeApproval(id,approved){const commentEl=$(`[data-approval-comment="${CSS.escape(id)}"]`);const comment=commentEl?.value.trim()||'';if(!approved&&!comment){toast('请填写拒绝原因','error');commentEl?.focus();return}try{const result=await api(`/v1/agent/approvals/${id}`,{method:'POST',body:JSON.stringify({approved,comment})});toast(approved?'本次工具调用已批准并恢复':'工具调用已拒绝');await Promise.all([loadApprovals(),loadDashboard()]);if(state.agentChat.sessionId===result.session_id){await refreshAgentEvents();renderAgentMessages()}}catch(error){toast(error.message)}}
 const TOOL_CAPABILITY_AGENTS={amazon_finance_query:'amazon-finance-query',lingxing_profit_query:'lingxing-profit-report',profit_report_query:'profit-report-query',kingdee_cloud_query:'kingdee-cloud'};
 function toolIconMarkup(tool){return tool.builtin?'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 12h8M12 8v8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><rect x="4" y="4" width="16" height="16" rx="4" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>':'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 14.5 5 5M8.5 6.5l-3 3a2.1 2.1 0 0 0 0 3l7 7a2.1 2.1 0 0 0 3 0l3-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M14 5l5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>'}
-function capabilityAgent(toolName){const agentId=TOOL_CAPABILITY_AGENTS[toolName];return (state.agents||[]).find(item=>item.id===agentId)||null}
+function capabilityForTool(toolName){
+  const fromCatalog=(state.catalog?.tool_capabilities||[]).find(item=>item.tool_name===toolName);
+  if(fromCatalog)return fromCatalog;
+  const agentId=TOOL_CAPABILITY_AGENTS[toolName];
+  return (state.agents||[]).find(item=>item.id===agentId)||null;
+}
 async function loadCatalog(){
   const root=$('#tool-groups')||$('#tool-grid');
   if(!root)return;
@@ -723,7 +728,7 @@ async function loadCatalog(){
   const bindingByTool=new Map(bindings.map(item=>[item.tool_name,item]));
   const card=tool=>{
     const binding=bindingByTool.get(tool.id);
-    const capability=capabilityAgent(tool.id);
+    const capability=capabilityForTool(tool.id);
     const riskLabel=({low:'低风险',medium:'中风险',high:'高风险'})[tool.risk]||tool.risk;
     const modeLabel=({read:'只读',write:'写入',custom:'自定义'})[tool.mode]||tool.mode;
     const bound=!!binding?.connection_id;
@@ -751,7 +756,7 @@ function openToolBindingDrawer(toolId){
   const tool=(catalog.tools||[]).find(item=>item.id===toolId);
   const binding=(catalog.tool_bindings||[]).find(item=>item.tool_name===toolId)||null;
   if(!tool){toast('工具不存在','error');return}
-  const capability=capabilityAgent(toolId);
+  const capability=capabilityForTool(toolId);
   state.editingTool={id:toolId,binding,capability};
   $('#tool-binding-title').textContent=toolDisplayName(tool.id);
   $('#tool-binding-subtitle').textContent=tool.approval?'写操作会进入审批。连接和范围只在本页保存。':'只读查询。连接和范围只在本页保存。';
@@ -803,9 +808,14 @@ async function saveToolBinding(event){
   finally{submit.disabled=false}
 }
 async function toggleToolCapability(toolName,enabled,{quiet=false}={}){
-  const agentId=TOOL_CAPABILITY_AGENTS[toolName];
-  if(!agentId)return;
-  await api(`/v1/agents/${encodeURIComponent(agentId)}`,{method:'PATCH',body:JSON.stringify({enabled})});
+  const caps=state.catalog?.tool_capabilities||[];
+  if(caps.some(item=>item.tool_name===toolName)){
+    await api(`/v1/tools/${encodeURIComponent(toolName)}`,{method:'PATCH',body:JSON.stringify({enabled})});
+  }else{
+    const agentId=TOOL_CAPABILITY_AGENTS[toolName];
+    if(!agentId)return;
+    await api(`/v1/agents/${encodeURIComponent(agentId)}`,{method:'PATCH',body:JSON.stringify({enabled})});
+  }
   if(!quiet){toast(enabled?'工具已启用':'工具已停用','success');state.catalog=null;await loadToolsPage()}
 }
 function renderBuiltinToolChips(names,toolCatalog){const lookup=new Map((toolCatalog||[]).map(item=>[item.name,item]));$('#agent-builtin-tools').innerHTML=names.map(name=>{const tool=lookup.get(name)||{name};return `<span class="tool-chip locked" title="系统内置，不可移除">${escapeHTML(tool.name)}<span class="tag">builtin</span></span>`}).join('')||'<span class="form-hint">暂无</span>'}
@@ -1929,10 +1939,50 @@ function renderAgentMessages(){
   watchAgentTranscriptSize();
   scrollAgentTranscript();
 }
+function sessionSearchNoiseValues(){
+  const account=state.session.account||{};
+  return [account.display_name,account.user_id,state.session.userId]
+    .filter(Boolean)
+    .map(value=>String(value).trim().toLowerCase());
+}
+function isAgentSessionSearchNoise(value){
+  const text=String(value||'').trim().toLowerCase();
+  return !!text&&sessionSearchNoiseValues().includes(text);
+}
+function clearAgentSessionSearch({rerender=false}={}){
+  const search=$('#agent-session-search');
+  if(!search)return;
+  search.value='';
+  delete search.dataset.userTyped;
+  search.setAttribute('readonly','readonly');
+  if(rerender)renderAgentSessionList();
+}
+function unlockAgentSessionSearch(event){
+  const search=event.currentTarget;
+  search.removeAttribute('readonly');
+}
+function onAgentSessionSearchInput(event){
+  const search=event.currentTarget;
+  const intentional=[
+    'insertText','insertCompositionText','insertFromPaste','insertFromDrop',
+    'deleteContentBackward','deleteContentForward','deleteByCut','deleteByDrag',
+    'deleteSoftLineBackward','deleteSoftLineForward','deleteWordBackward','deleteWordForward',
+  ].includes(event.inputType||'');
+  if(intentional){
+    search.dataset.userTyped=search.value.trim()?'1':'';
+  }else if(isAgentSessionSearchNoise(search.value)||!search.value.trim()){
+    // 浏览器常把登录名自动填进会话搜索框；忽略这类非手输变更。
+    search.value='';
+    delete search.dataset.userTyped;
+  }
+  renderAgentSessionList();
+}
 function sessionSearchQuery(){
   const el=$('#agent-session-search');
   if(!el||el.dataset.userTyped!=='1')return '';
-  return el.value.trim().toLowerCase();
+  const query=el.value.trim().toLowerCase();
+  if(!query||isAgentSessionSearchNoise(query))return '';
+  return query;
 }
 function sessionGroupLabel(iso){
   const value=new Date(iso||0);
@@ -1996,8 +2046,7 @@ function isInterruptedAgentTurn(events){
   return false;
 }
 async function loadAgentChat(){
-  const search=$('#agent-session-search');
-  if(search){search.value='';delete search.dataset.userTyped}
+  clearAgentSessionSearch();
   await restoreAgentSessions();
   if(!state.agentChat.sessionId)state.agentChat.sessionId=localStorage.getItem(`${agentStorageKey()}.current`);
   const configurationPromise=state.configuration?Promise.resolve(state.configuration):api('/v1/configuration');
@@ -2009,12 +2058,19 @@ async function loadAgentChat(){
     try{await refreshAgentEvents()}
     catch{startNewAgentSession()}
   }
+  clearAgentSessionSearch();
   renderAgentSessionList();
   renderAgentMessages();
   setAgentSessionLabel(state.agentChat.sessionId);
   await loadAgentSubagents();
   updateAgentSendButton();
   await maybeResumeAgentTurn();
+  // 页面切换后浏览器可能异步回填登录名，延迟再清一次噪声搜索词。
+  window.setTimeout(()=>{
+    const search=$('#agent-session-search');
+    if(!search||search.dataset.userTyped==='1')return;
+    if(isAgentSessionSearchNoise(search.value))clearAgentSessionSearch({rerender:true});
+  },120);
 }
 let agentCooldownTimer=null;
 function updateAgentSendButton(){
@@ -2212,7 +2268,16 @@ function renderMemoryItems(items){
   $$('[data-memory-compliance]').forEach(button=>button.addEventListener('click',async()=>{if(await askConfirm(`将不可逆擦除用户 ${button.dataset.memoryCompliance} 的全部记忆内容，是否继续？`,{title:'合规删除',okLabel:'擦除',danger:true}))await memoryAction(`/v1/memories/users/${encodeURIComponent(button.dataset.memoryCompliance)}/compliance`,{method:'DELETE'},'用户记忆已合规删除')}));
 }
 async function loadMemory(){
-  const preferences=await api('/v1/memory/preferences');state.memoryPreferences=preferences;$('#memory-enabled').checked=!!preferences.enabled;$('#memory-auto-extract').checked=!!preferences.auto_extract_enabled;$('#memory-allow-sensitive').checked=!!preferences.allow_sensitive;$('#memory-retention-days').value=preferences.retention_days||'';
+  let preferences;
+  try{
+    preferences=await api('/v1/memory/preferences');
+  }catch(error){
+    if(error.status===404){
+      throw new Error('长期记忆接口未加载。请重启运营平台：scripts/start_local.sh --restart');
+    }
+    throw error;
+  }
+  state.memoryPreferences=preferences;$('#memory-enabled').checked=!!preferences.enabled;$('#memory-auto-extract').checked=!!preferences.auto_extract_enabled;$('#memory-allow-sensitive').checked=!!preferences.allow_sensitive;$('#memory-retention-days').value=preferences.retention_days||'';
   if(state.session.role!=='admin'){const result=await api('/v1/memory/items?include_deleted=true');state.memories=result.items;renderMemoryItems(state.memories);return}
   const policy=await api('/v1/memory/policy');$('#memory-policy-extraction').value=policy.extraction_mode||'heuristic';$('#memory-policy-vector-backend').value=policy.vector_backend||'auto';$('#memory-policy-embedding-provider').value=policy.embedding_provider||'hash';$('#memory-policy-embedding-model').value=policy.embedding_model||'';$('#memory-policy-threshold').value=policy.relevance_threshold;$('#memory-policy-limit').value=policy.snapshot_limit;$('#memory-policy-sensitive').value=policy.sensitive_data_policy||'block';$('#memory-policy-candidates').checked=!!policy.automatic_candidates;
   const query=$('#memory-filter-query')?.value.trim()||'';
@@ -2569,8 +2634,8 @@ function handleAgentQuestionKeydown(event){
 }
 $('#agent-question')?.addEventListener('input',autosizeAgentQuestion);
 autosizeAgentQuestion();
-$$('.nav-item').forEach(button=>button.addEventListener('click',()=>{const page=button.dataset.page;if(page==='guide')navigate('guide',{topic:''});else navigate(page)}));$$('[data-go]').forEach(button=>button.addEventListener('click',()=>navigate(button.dataset.go)));$('#context-window-form').addEventListener('submit',saveContextWindow);$('#agent-editor-form').addEventListener('submit',saveAgentEditor);$('#skill-editor-form')?.addEventListener('submit',saveSkillEditor);$('#skill-add-button')?.addEventListener('click',()=>openSkillEditor());$('#skill-edit-delete')?.addEventListener('click',deleteSkillEditor);$$('[data-close-skill-editor]').forEach(button=>button.addEventListener('click',()=>closeDrawer('#skill-editor-drawer')));$('#skill-editor-drawer')?.addEventListener('click',event=>{if(event.target.id==='skill-editor-drawer')closeDrawer(event.currentTarget)});$('#connection-editor-form')?.addEventListener('submit',saveConnectionEditor);$('#connection-add-button')?.addEventListener('click',()=>openConnectionEditor());$('#connection-edit-type')?.addEventListener('change',updateConnectionFields);$('#connection-edit-delete')?.addEventListener('click',deleteConnectionEditor);$$('[data-close-connection-editor]').forEach(button=>button.addEventListener('click',()=>closeDrawer('#connection-editor-drawer')));$('#connection-editor-drawer')?.addEventListener('click',event=>{if(event.target.id==='connection-editor-drawer')closeDrawer(event.currentTarget)});$('#model-editor-form').addEventListener('submit',saveModelEditor);$('#model-add-button')?.addEventListener('click',()=>openModelEditor());$('#model-edit-delete')?.addEventListener('click',deleteModelEditor);$('#model-edit-provider')?.addEventListener('change',()=>applyModelProviderDefaults());$('#agent-model-select')?.addEventListener('change',onAgentModelChange);$$('[data-close-model-editor]').forEach(button=>button.addEventListener('click',()=>closeDrawer('#model-editor-drawer')));$('#model-editor-drawer')?.addEventListener('click',event=>{if(event.target.id==='model-editor-drawer')closeDrawer(event.currentTarget)});$$('[data-close-agent-editor]').forEach(button=>button.addEventListener('click',()=>{closeToolMenu();closeDrawer('#agent-editor-drawer')}));$('#agent-editor-drawer').addEventListener('click',event=>{if(event.target.id==='agent-editor-drawer'){closeToolMenu();closeDrawer(event.currentTarget)}});$('#agent-add-tool-button').addEventListener('click',event=>{event.stopPropagation();const menu=$('#agent-tool-menu');const opening=!menu.classList.contains('is-open');if(opening){renderToolMenuOptions();openMenu(menu)}else closeToolMenu()});document.addEventListener('click',event=>{if(!event.target.closest('.tool-picker-add'))closeToolMenu();if(!event.target.closest('.agent-session-menu'))closeAgentSessionMenu()});$('#context-window-form').addEventListener('submit',saveContextWindow);$('#agent-chat-form').addEventListener('submit',sendAgentMessage);$('#agent-question').addEventListener('keydown',handleAgentQuestionKeydown);$('#agent-session-search')?.addEventListener('input',event=>{event.currentTarget.dataset.userTyped=event.currentTarget.value.trim()?'1':'';renderAgentSessionList()});
-$$('[data-toggle-password]').forEach(button=>button.addEventListener('click',()=>{const input=$(`#${button.dataset.togglePassword}`);if(!input)return;const show=input.type==='password';input.type=show?'text':'password';button.textContent=show?'隐藏':'显示';button.setAttribute('aria-label',show?'隐藏密码':'显示密码')}));$('#agent-session-search')?.addEventListener('input',event=>{event.currentTarget.dataset.userTyped=event.currentTarget.value.trim()?'1':'';renderAgentSessionList()});$('#agent-new-session').addEventListener('click',startNewAgentSession);$('#agent-delete-session').addEventListener('click',()=>deleteAgentSession(state.agentChat.sessionId));$('#agent-attach-image').addEventListener('click',()=>$('#agent-image-input').click());$('#agent-image-input').addEventListener('change',handleAgentImageSelect);$('#agent-interrupt-button').addEventListener('click',interruptAgentTurn);$('#agent-resume-button').addEventListener('click',resumeInterruptedTurn);$('#tool-binding-form')?.addEventListener('submit',saveToolBinding);$$('[data-close-tool-binding]').forEach(button=>button.addEventListener('click',closeToolBindingDrawer));$('#tool-binding-drawer')?.addEventListener('click',event=>{if(event.target.id==='tool-binding-drawer')closeToolBindingDrawer()});$('#tool-binding-to-connectors')?.addEventListener('click',()=>{closeToolBindingDrawer();navigate('connectors')});$('#refresh-button').addEventListener('click',()=>navigate(state.page,{replace:true}));
+$$('.nav-item').forEach(button=>button.addEventListener('click',()=>{const page=button.dataset.page;if(page==='guide')navigate('guide',{topic:''});else navigate(page)}));$$('[data-go]').forEach(button=>button.addEventListener('click',()=>navigate(button.dataset.go)));$('#context-window-form').addEventListener('submit',saveContextWindow);$('#agent-editor-form').addEventListener('submit',saveAgentEditor);$('#skill-editor-form')?.addEventListener('submit',saveSkillEditor);$('#skill-add-button')?.addEventListener('click',()=>openSkillEditor());$('#skill-edit-delete')?.addEventListener('click',deleteSkillEditor);$$('[data-close-skill-editor]').forEach(button=>button.addEventListener('click',()=>closeDrawer('#skill-editor-drawer')));$('#skill-editor-drawer')?.addEventListener('click',event=>{if(event.target.id==='skill-editor-drawer')closeDrawer(event.currentTarget)});$('#connection-editor-form')?.addEventListener('submit',saveConnectionEditor);$('#connection-add-button')?.addEventListener('click',()=>openConnectionEditor());$('#connection-edit-type')?.addEventListener('change',updateConnectionFields);$('#connection-edit-delete')?.addEventListener('click',deleteConnectionEditor);$$('[data-close-connection-editor]').forEach(button=>button.addEventListener('click',()=>closeDrawer('#connection-editor-drawer')));$('#connection-editor-drawer')?.addEventListener('click',event=>{if(event.target.id==='connection-editor-drawer')closeDrawer(event.currentTarget)});$('#model-editor-form').addEventListener('submit',saveModelEditor);$('#model-add-button')?.addEventListener('click',()=>openModelEditor());$('#model-edit-delete')?.addEventListener('click',deleteModelEditor);$('#model-edit-provider')?.addEventListener('change',()=>applyModelProviderDefaults());$('#agent-model-select')?.addEventListener('change',onAgentModelChange);$$('[data-close-model-editor]').forEach(button=>button.addEventListener('click',()=>closeDrawer('#model-editor-drawer')));$('#model-editor-drawer')?.addEventListener('click',event=>{if(event.target.id==='model-editor-drawer')closeDrawer(event.currentTarget)});$$('[data-close-agent-editor]').forEach(button=>button.addEventListener('click',()=>{closeToolMenu();closeDrawer('#agent-editor-drawer')}));$('#agent-editor-drawer').addEventListener('click',event=>{if(event.target.id==='agent-editor-drawer'){closeToolMenu();closeDrawer(event.currentTarget)}});$('#agent-add-tool-button').addEventListener('click',event=>{event.stopPropagation();const menu=$('#agent-tool-menu');const opening=!menu.classList.contains('is-open');if(opening){renderToolMenuOptions();openMenu(menu)}else closeToolMenu()});document.addEventListener('click',event=>{if(!event.target.closest('.tool-picker-add'))closeToolMenu();if(!event.target.closest('.agent-session-menu'))closeAgentSessionMenu()});$('#context-window-form').addEventListener('submit',saveContextWindow);$('#agent-chat-form').addEventListener('submit',sendAgentMessage);$('#agent-question').addEventListener('keydown',handleAgentQuestionKeydown);$('#agent-session-search')?.addEventListener('focus',unlockAgentSessionSearch);$('#agent-session-search')?.addEventListener('pointerdown',unlockAgentSessionSearch);$('#agent-session-search')?.addEventListener('input',onAgentSessionSearchInput);
+$$('[data-toggle-password]').forEach(button=>button.addEventListener('click',()=>{const input=$(`#${button.dataset.togglePassword}`);if(!input)return;const show=input.type==='password';input.type=show?'text':'password';button.textContent=show?'隐藏':'显示';button.setAttribute('aria-label',show?'隐藏密码':'显示密码')}));$('#agent-new-session').addEventListener('click',startNewAgentSession);$('#agent-delete-session').addEventListener('click',()=>deleteAgentSession(state.agentChat.sessionId));$('#agent-attach-image').addEventListener('click',()=>$('#agent-image-input').click());$('#agent-image-input').addEventListener('change',handleAgentImageSelect);$('#agent-interrupt-button').addEventListener('click',interruptAgentTurn);$('#agent-resume-button').addEventListener('click',resumeInterruptedTurn);$('#tool-binding-form')?.addEventListener('submit',saveToolBinding);$$('[data-close-tool-binding]').forEach(button=>button.addEventListener('click',closeToolBindingDrawer));$('#tool-binding-drawer')?.addEventListener('click',event=>{if(event.target.id==='tool-binding-drawer')closeToolBindingDrawer()});$('#tool-binding-to-connectors')?.addEventListener('click',()=>{closeToolBindingDrawer();navigate('connectors')});$('#refresh-button').addEventListener('click',()=>navigate(state.page,{replace:true}));
 function setNavCollapsed(collapsed){
   const shell=$('.app-shell');
   if(!shell)return;

@@ -165,19 +165,21 @@ if [[ "$needs_postgres" -eq 1 ]]; then
 fi
 
 health_url="http://${HOST}:${PORT}/health"
-openapi_url="http://${HOST}:${PORT}/openapi.json"
 ui_url="http://${HOST}:${PORT}/ui"
 
+route_registered() {
+  local path="$1"
+  local code
+  code="$(curl -sS -m 3 -o /dev/null -w "%{http_code}" "http://${HOST}:${PORT}${path}" || true)"
+  # FastAPI 缺路由是 404；401/403/200/503 都说明路由已注册。
+  [[ "$code" != "404" && "$code" != "000" && -n "$code" ]]
+}
+
 required_routes_ready() {
-  curl -sf "$openapi_url" 2>/dev/null | "$PYTHON" -c '
-import json, sys
-try:
-    paths = json.load(sys.stdin).get("paths", {})
-except (json.JSONDecodeError, OSError):
-    raise SystemExit(1)
-required = {"/v1/memories", "/v1/auth/login", "/v1/access-control"}
-raise SystemExit(0 if required <= set(paths) else 1)
-'
+  route_registered "/v1/auth/login" \
+    && route_registered "/v1/memories" \
+    && route_registered "/v1/memory/preferences" \
+    && route_registered "/v1/access-control"
 }
 
 port_pids() {

@@ -260,12 +260,16 @@ class AgentRegistry:
     def reload(self) -> None:
         defaults = {item.id: item for item in default_agent_definitions()}
         if self.store is not None:
+            from .connector_control_plane import HYBRID_AGENT_TO_TOOL
+
             stored_items = {
                 item["id"]: item for item in self.store.list_agents() if item.get("id")
             }
             merged: dict[str, AgentDefinition] = {}
             for agent_id, default in defaults.items():
                 override = stored_items.get(agent_id, {})
+                if agent_id in HYBRID_AGENT_TO_TOOL and not override:
+                    continue
                 if override:
                     if agent_id == COORDINATOR_AGENT_ID:
                         override = _migrate_coordinator_override(default, override)
@@ -530,50 +534,22 @@ def snapshot_agents(
         {
             "id": "amazon-finance-query-v1",
             "name": "Amazon 结算数据查询",
-            "status": next(
-                (
-                    item["status"]
-                    for item in agents
-                    if item["id"] == "amazon-finance-query"
-                ),
-                "disabled",
-            ),
+            "status": "active" if amazon_active else "disabled",
         },
         {
             "id": "lingxing-profit-report-v1",
             "name": "领星开放平台 · 利润报表 API",
-            "status": next(
-                (
-                    item["status"]
-                    for item in agents
-                    if item["id"] == "lingxing-profit-report"
-                ),
-                "disabled",
-            ),
+            "status": "active" if lingxing_active else "disabled",
         },
         {
             "id": "profit-report-query-v1",
             "name": "利润报表 · 分析数据库",
-            "status": next(
-                (
-                    item["status"]
-                    for item in agents
-                    if item["id"] == "profit-report-query"
-                ),
-                "disabled",
-            ),
+            "status": "active" if profit_report_active else "disabled",
         },
         {
             "id": "kingdee-cloud-v1",
             "name": "金蝶云星空 · WebAPI",
-            "status": next(
-                (
-                    item["status"]
-                    for item in agents
-                    if item["id"] == "kingdee-cloud"
-                ),
-                "disabled",
-            ),
+            "status": "active" if kingdee_active else "disabled",
         },
     ]
     return {"workflows": workflows, "agents": agents}

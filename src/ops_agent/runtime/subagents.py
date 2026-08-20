@@ -289,6 +289,7 @@ class SubagentManager:
                 self.registry,
                 getattr(self.runtime, "connection_registry", None),
                 tenant_id,
+                getattr(self.runtime, "tool_catalog", None),
             ) & visible
         else:
             base = set(visible)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..agent_registry import AgentDefinition, AgentRegistry
 from ..config import Settings
@@ -31,6 +31,18 @@ def _has_connection(
         return connections.get_default(tenant_id, connector_type) is not None
     return connections.configured(connector_type)
 
+
+def _capability_enabled(
+    tool_catalog: Any | None,
+    tool_name: str,
+    registry: AgentRegistry,
+    agent_id: str,
+) -> bool:
+    if tool_catalog is not None:
+        return tool_catalog.is_enabled(tool_name)
+    agent = registry.get(agent_id)
+    return True if agent is None else agent.enabled
+
 DATA_QUERY_TOOL_AGENTS: dict[str, str] = {
     "amazon_finance_query": "amazon-finance-query",
     "lingxing_profit_query": "lingxing-profit-report",
@@ -51,19 +63,24 @@ def amazon_finance_tool_active(
     settings: Settings,
     connections: ConnectionRegistry | None = None,
     tenant_id: str | None = None,
+    tool_catalog: Any | None = None,
 ) -> bool:
     configured = _has_connection(connections, "analytics", tenant_id)
-    return configured and registry.amazon_finance_config().enabled
+    return configured and _capability_enabled(
+        tool_catalog, "amazon_finance_query", registry, "amazon-finance-query"
+    )
 
 
 def lingxing_profit_tool_active(
     registry: AgentRegistry,
     connections: ConnectionRegistry | None = None,
     tenant_id: str | None = None,
+    tool_catalog: Any | None = None,
 ) -> bool:
-    agent = registry.lingxing_profit_config()
     configured = _has_connection(connections, "lingxing", tenant_id)
-    return agent.enabled and configured
+    return configured and _capability_enabled(
+        tool_catalog, "lingxing_profit_query", registry, "lingxing-profit-report"
+    )
 
 
 def profit_report_tool_active(
@@ -71,19 +88,24 @@ def profit_report_tool_active(
     settings: Settings,
     connections: ConnectionRegistry | None = None,
     tenant_id: str | None = None,
+    tool_catalog: Any | None = None,
 ) -> bool:
     configured = _has_connection(connections, "analytics", tenant_id)
-    return configured and registry.profit_report_config().enabled
+    return configured and _capability_enabled(
+        tool_catalog, "profit_report_query", registry, "profit-report-query"
+    )
 
 
 def kingdee_cloud_tool_active(
     registry: AgentRegistry,
     connections: ConnectionRegistry | None = None,
     tenant_id: str | None = None,
+    tool_catalog: Any | None = None,
 ) -> bool:
-    agent = registry.kingdee_cloud_config()
     configured = _has_connection(connections, "kingdee", tenant_id)
-    return agent.enabled and configured
+    return configured and _capability_enabled(
+        tool_catalog, "kingdee_cloud_query", registry, "kingdee-cloud"
+    )
 
 
 def active_data_query_tools(
@@ -91,15 +113,20 @@ def active_data_query_tools(
     settings: Settings,
     connections: ConnectionRegistry | None = None,
     tenant_id: str | None = None,
+    tool_catalog: Any | None = None,
 ) -> frozenset[str]:
     active: set[str] = set()
-    if amazon_finance_tool_active(registry, settings, connections, tenant_id):
+    if amazon_finance_tool_active(
+        registry, settings, connections, tenant_id, tool_catalog
+    ):
         active.add("amazon_finance_query")
-    if lingxing_profit_tool_active(registry, connections, tenant_id):
+    if lingxing_profit_tool_active(registry, connections, tenant_id, tool_catalog):
         active.add("lingxing_profit_query")
-    if profit_report_tool_active(registry, settings, connections, tenant_id):
+    if profit_report_tool_active(
+        registry, settings, connections, tenant_id, tool_catalog
+    ):
         active.add("profit_report_query")
-    if kingdee_cloud_tool_active(registry, connections, tenant_id):
+    if kingdee_cloud_tool_active(registry, connections, tenant_id, tool_catalog):
         active.add("kingdee_cloud_query")
     return frozenset(active)
 
@@ -109,9 +136,10 @@ def inactive_data_query_tools(
     settings: Settings,
     connections: ConnectionRegistry | None = None,
     tenant_id: str | None = None,
+    tool_catalog: Any | None = None,
 ) -> frozenset[str]:
     return frozenset(DATA_QUERY_TOOL_AGENTS) - active_data_query_tools(
-        registry, settings, connections, tenant_id
+        registry, settings, connections, tenant_id, tool_catalog
     )
 
 
@@ -132,10 +160,13 @@ def runtime_tool_allowlist(
     runtime_optional_tools: list[str] | None,
     connections: ConnectionRegistry | None = None,
     tenant_id: str | None = None,
+    tool_catalog: Any | None = None,
 ) -> set[str] | None:
-    """Resolve Runtime tool visibility; drop data tools for disabled Agents."""
+    """Resolve Runtime tool visibility; drop data tools for disabled capabilities."""
     all_names = set(tool_registry.tool_names())
-    blocked = inactive_data_query_tools(registry, settings, connections, tenant_id)
+    blocked = inactive_data_query_tools(
+        registry, settings, connections, tenant_id, tool_catalog
+    )
     configured = tool_registry.resolve_allowed_tools(runtime_optional_tools)
     if configured is None:
         return all_names - blocked
@@ -149,9 +180,12 @@ def resolve_agent_tool_allowlist(
     tool_registry: ToolRegistry,
     connections: ConnectionRegistry | None = None,
     tenant_id: str | None = None,
+    tool_catalog: Any | None = None,
 ) -> set[str]:
     """Resolve the complete tool set for a decision-core Agent."""
-    blocked = inactive_data_query_tools(registry, settings, connections, tenant_id)
+    blocked = inactive_data_query_tools(
+        registry, settings, connections, tenant_id, tool_catalog
+    )
     visible = set(tool_registry.tool_names()) - blocked
     if agent.strict_tool_allowlist:
         requested = set(agent.allowed_tools)
@@ -191,6 +225,7 @@ def resolve_agent_tool_allowlist(
         agent.allowed_tools,
         connections,
         tenant_id,
+        tool_catalog,
     )
     return visible if allowlist is None else allowlist
 

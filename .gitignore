@@ -32,6 +32,8 @@ backups/
 .DS_Store
 .idea/
 .vscode/
+.cursor/
+.codex/
 *.swp
 *.swo
 *~

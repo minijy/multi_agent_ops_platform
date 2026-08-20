@@ -20,6 +20,12 @@ from fastapi.staticfiles import StaticFiles
 from ..agent_integration import mask_agent_integration
 from ..access_control import ToolAssignmentConflict
 from ..accounts import AccountError, create_account_service
+from ..connector_control_plane import (
+    HYBRID_AGENT_TO_TOOL,
+    TOOL_TO_HYBRID,
+    ToolCapability,
+    capability_for_query_tool,
+)
 from ..connections import (
     ConnectionCreateRequest,
     ConnectionUpdateRequest,
@@ -228,6 +234,22 @@ class MemoryPolicyUpdate(BaseModel):
     sensitive_data_policy: Literal["block", "review"] | None = None
 
 
+class SkillUpsertRequest(BaseModel):
+    name: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=64)
+    description: str = Field(min_length=1, max_length=500)
+    content: str = Field(default="", max_length=100_000)
+    body: str = Field(default="", max_length=100_000)
+    model_invocable: bool = True
+    user_invocable: bool = True
+
+
+class ToolCapabilityUpdateRequest(BaseModel):
+    enabled: bool | None = None
+    system_prompt: str | None = Field(default=None, max_length=12000)
+    display_name: str | None = Field(default=None, max_length=120)
+    description: str | None = Field(default=None, max_length=2000)
+
+
 @dataclass(frozen=True)
 class Principal:
     tenant_id: str
@@ -235,48 +257,100 @@ class Principal:
     role: str
 
 
+def _tool_catalog(source: Any) -> Any:
+    if source is None:
+        return None
+    catalog = getattr(source, "tool_catalog", None)
+    if catalog is not None:
+        return catalog
+    state = getattr(source, "state", None)
+    return getattr(state, "tool_catalog", None) if state is not None else None
+
+
+def _query_capability(registry: AgentRegistry, tool_name: str, catalog=None) -> ToolCapability:
+    return capability_for_query_tool(catalog, registry, tool_name)
+
+
 def _amazon_finance_active(
-    settings: Settings, registry: AgentRegistry, connections=None, tenant_id=None
+    settings: Settings,
+    registry: AgentRegistry,
+    connections=None,
+    tenant_id=None,
+    tool_catalog=None,
 ) -> bool:
-    return amazon_finance_tool_active(registry, settings, connections, tenant_id)
+    return amazon_finance_tool_active(
+        registry, settings, connections, tenant_id, tool_catalog
+    )
 
 
-def _lingxing_profit_active(registry: AgentRegistry, connections=None, tenant_id=None) -> bool:
-    return lingxing_profit_tool_active(registry, connections, tenant_id)
+def _lingxing_profit_active(
+    registry: AgentRegistry, connections=None, tenant_id=None, tool_catalog=None
+) -> bool:
+    return lingxing_profit_tool_active(
+        registry, connections, tenant_id, tool_catalog
+    )
 
 
 def _profit_report_active(
-    settings: Settings, registry: AgentRegistry, connections=None, tenant_id=None
+    settings: Settings,
+    registry: AgentRegistry,
+    connections=None,
+    tenant_id=None,
+    tool_catalog=None,
 ) -> bool:
-    return profit_report_tool_active(registry, settings, connections, tenant_id)
+    return profit_report_tool_active(
+        registry, settings, connections, tenant_id, tool_catalog
+    )
 
 
-def _kingdee_cloud_active(registry: AgentRegistry, connections=None, tenant_id=None) -> bool:
-    return kingdee_cloud_tool_active(registry, connections, tenant_id)
+def _kingdee_cloud_active(
+    registry: AgentRegistry, connections=None, tenant_id=None, tool_catalog=None
+) -> bool:
+    return kingdee_cloud_tool_active(registry, connections, tenant_id, tool_catalog)
 
 
-def _sync_amazon_finance_agent(agent: AmazonFinanceAgent, registry: AgentRegistry) -> None:
-    config = registry.amazon_finance_config()
-    agent.set_system_prompt(config.effective_system_prompt(AMAZON_SYSTEM_PROMPT))
+def _sync_amazon_finance_agent(
+    agent: AmazonFinanceAgent, registry: AgentRegistry, tool_catalog=None
+) -> None:
+    capability = _query_capability(registry, "amazon_finance_query", tool_catalog)
+    agent.set_system_prompt(capability.system_prompt or AMAZON_SYSTEM_PROMPT)
 
 
-def _sync_lingxing_profit_agent(agent: LingXingProfitAgent, registry: AgentRegistry) -> None:
-    config = registry.lingxing_profit_config()
-    agent.set_system_prompt(config.effective_system_prompt(LINGXING_SYSTEM_PROMPT))
-    raw = config.integration if isinstance(config.integration, dict) else {}
-    agent.set_integration(LingXingIntegrationConfig.model_validate(raw))
+def _sync_lingxing_profit_agent(
+    agent: LingXingProfitAgent, registry: AgentRegistry, tool_catalog=None
+) -> None:
+    capability = _query_capability(registry, "lingxing_profit_query", tool_catalog)
+    agent.set_system_prompt(capability.system_prompt or LINGXING_SYSTEM_PROMPT)
+    hybrid = registry.get("lingxing-profit-report")
+    if hybrid is not None:
+        raw = hybrid.integration if isinstance(hybrid.integration, dict) else {}
+        agent.set_integration(LingXingIntegrationConfig.model_validate(raw))
 
 
-def _sync_profit_report_agent(agent: ProfitReportAgent, registry: AgentRegistry) -> None:
-    config = registry.profit_report_config()
-    agent.set_system_prompt(config.effective_system_prompt(PROFIT_REPORT_SYSTEM_PROMPT))
+def _sync_profit_report_agent(
+    agent: ProfitReportAgent, registry: AgentRegistry, tool_catalog=None
+) -> None:
+    capability = _query_capability(registry, "profit_report_query", tool_catalog)
+    agent.set_system_prompt(capability.system_prompt or PROFIT_REPORT_SYSTEM_PROMPT)
 
 
-def _sync_kingdee_cloud_agent(agent: KingdeeCloudAgent, registry: AgentRegistry) -> None:
-    config = registry.kingdee_cloud_config()
-    agent.set_system_prompt(config.effective_system_prompt(KINGDEE_SYSTEM_PROMPT))
-    raw = config.integration if isinstance(config.integration, dict) else {}
-    agent.set_integration(KingdeeIntegrationConfig.model_validate(raw))
+def _sync_kingdee_cloud_agent(
+    agent: KingdeeCloudAgent, registry: AgentRegistry, tool_catalog=None
+) -> None:
+    capability = _query_capability(registry, "kingdee_cloud_query", tool_catalog)
+    agent.set_system_prompt(capability.system_prompt or KINGDEE_SYSTEM_PROMPT)
+    hybrid = registry.get("kingdee-cloud")
+    if hybrid is not None:
+        raw = hybrid.integration if isinstance(hybrid.integration, dict) else {}
+        agent.set_integration(KingdeeIntegrationConfig.model_validate(raw))
+
+
+def _sync_query_agents(application: FastAPI, registry: AgentRegistry, tool_catalog=None) -> None:
+    catalog = tool_catalog if tool_catalog is not None else _tool_catalog(application)
+    _sync_amazon_finance_agent(application.state.amazon_finance_agent, registry, catalog)
+    _sync_lingxing_profit_agent(application.state.lingxing_profit_agent, registry, catalog)
+    _sync_profit_report_agent(application.state.profit_report_agent, registry, catalog)
+    _sync_kingdee_cloud_agent(application.state.kingdee_cloud_agent, registry, catalog)
 
 
 def _reload_model_router(application: FastAPI) -> None:
@@ -334,21 +408,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             application.state.knowledge_gateway = KnowledgeGateway.from_settings(runtime_settings)
             application.state.runtime_tool_registry = stack.tool_registry
             application.state.runtime_tool_executor = stack.agent_runtime.executor
-            _sync_amazon_finance_agent(
-                application.state.amazon_finance_agent,
-                stack.agent_registry,
-            )
-            _sync_lingxing_profit_agent(
-                application.state.lingxing_profit_agent,
-                stack.agent_registry,
-            )
-            _sync_profit_report_agent(
-                application.state.profit_report_agent,
-                stack.agent_registry,
-            )
-            _sync_kingdee_cloud_agent(
-                application.state.kingdee_cloud_agent,
-                stack.agent_registry,
+            application.state.tool_catalog = stack.tool_catalog
+            _sync_query_agents(
+                application, stack.agent_registry, stack.tool_catalog
             )
             application.state.session_events = stack.session_events
             application.state.metrics_store = stack.metrics_store
@@ -840,6 +902,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if _lingxing_profit_active(
                     request.app.state.agent_registry,
                     request.app.state.connection_registry,
+                    tool_catalog=_tool_catalog(request.app),
                 )
                 else "disabled"
             ),
@@ -849,6 +912,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     settings,
                     request.app.state.agent_registry,
                     request.app.state.connection_registry,
+                    tool_catalog=_tool_catalog(request.app),
                 )
                 else "disabled"
             ),
@@ -857,6 +921,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if _kingdee_cloud_active(
                     request.app.state.agent_registry,
                     request.app.state.connection_registry,
+                    tool_catalog=_tool_catalog(request.app),
                 )
                 else "disabled"
             ),
@@ -1406,14 +1471,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         items = [item.as_dict() for item in request.app.state.skill_registry.list()]
         return {"items": items, "count": len(items)}
 
-    class SkillUpsertRequest(BaseModel):
-        name: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=64)
-        description: str = Field(min_length=1, max_length=500)
-        content: str = Field(default="", max_length=100_000)
-        body: str = Field(default="", max_length=100_000)
-        model_invocable: bool = True
-        user_invocable: bool = True
-
     def _refresh_skill_tool(request: Request) -> None:
         register_skill_tool(
             request.app.state.runtime_tool_registry,
@@ -1738,14 +1795,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> AmazonFinanceQueryResponse:
         principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         registry: AgentRegistry = request.app.state.agent_registry
-        config = registry.amazon_finance_config()
-        if not config.enabled:
+        catalog = _tool_catalog(request.app)
+        capability = _query_capability(registry, "amazon_finance_query", catalog)
+        if not capability.enabled:
             raise HTTPException(status_code=503, detail="Amazon Finance Agent is disabled")
         if not _amazon_finance_active(
             request.app.state.settings,
             registry,
             request.app.state.connection_registry,
             principal.tenant_id,
+            catalog,
         ):
             raise HTTPException(
                 status_code=503,
@@ -1800,11 +1859,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> KingdeeQueryResponse:
         principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         registry: AgentRegistry = request.app.state.agent_registry
-        config = registry.kingdee_cloud_config()
-        if not config.enabled:
+        catalog = _tool_catalog(request.app)
+        capability = _query_capability(registry, "kingdee_cloud_query", catalog)
+        if not capability.enabled:
             raise HTTPException(status_code=503, detail="Kingdee Cloud Agent is disabled")
         if not _kingdee_cloud_active(
-            registry, request.app.state.connection_registry, principal.tenant_id
+            registry,
+            request.app.state.connection_registry,
+            principal.tenant_id,
+            catalog,
         ):
             raise HTTPException(
                 status_code=503,
@@ -1834,7 +1897,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             actor_role=principal.role,
             action="kingdee_cloud.queried",
             resource_type="kingdee_cloud",
-            resource_id=config.id,
+            resource_id="kingdee-cloud",
             detail={
                 "document_type": result.plan.document_type,
                 "start_date": str(result.plan.start_date),
@@ -1858,11 +1921,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> LingXingProfitQueryResponse:
         principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         registry: AgentRegistry = request.app.state.agent_registry
-        config = registry.lingxing_profit_config()
-        if not config.enabled:
+        catalog = _tool_catalog(request.app)
+        capability = _query_capability(registry, "lingxing_profit_query", catalog)
+        if not capability.enabled:
             raise HTTPException(status_code=503, detail="LingXing Profit Agent is disabled")
         if not _lingxing_profit_active(
-            registry, request.app.state.connection_registry, principal.tenant_id
+            registry,
+            request.app.state.connection_registry,
+            principal.tenant_id,
+            catalog,
         ):
             raise HTTPException(
                 status_code=503,
@@ -1890,7 +1957,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             actor_role=principal.role,
             action="lingxing_profit.queried",
             resource_type="lingxing_profit",
-            resource_id=config.id,
+            resource_id="lingxing-profit",
             detail={
                 "start_date": str(result.plan.start_date),
                 "end_date": str(result.plan.end_date),
@@ -1915,14 +1982,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> ProfitReportQueryResponse:
         principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         registry: AgentRegistry = request.app.state.agent_registry
-        config = registry.profit_report_config()
-        if not config.enabled:
+        catalog = _tool_catalog(request.app)
+        capability = _query_capability(registry, "profit_report_query", catalog)
+        if not capability.enabled:
             raise HTTPException(status_code=503, detail="Profit Report Agent is disabled")
         if not _profit_report_active(
             request.app.state.settings,
             registry,
             request.app.state.connection_registry,
             principal.tenant_id,
+            catalog,
         ):
             raise HTTPException(
                 status_code=503,
@@ -1954,7 +2023,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             actor_role=principal.role,
             action="profit_report.queried",
             resource_type="profit_report",
-            resource_id=config.id,
+            resource_id="profit-report",
             detail={
                 "metric": result.plan.metric,
                 "start_date": str(result.plan.start_date or ""),
@@ -2414,6 +2483,68 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 principal.tenant_id, tool_name, request.app.state.connection_registry
             ),
         }
+
+    @application.patch("/v1/tools/{tool_name}")
+    def patch_tool_capability(
+        tool_name: str,
+        payload: ToolCapabilityUpdateRequest,
+        request: Request,
+        x_api_key: str | None = Header(default=None),
+        x_tenant_id: str | None = Header(default=None),
+        x_user_id: str | None = Header(default=None),
+        x_user_role: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        principal = principal_from_headers(
+            request, x_api_key, x_tenant_id, x_user_id, x_user_role, {"admin"}
+        )
+        updates = payload.model_dump(exclude_unset=True)
+        catalog = _tool_catalog(request.app)
+        registry: AgentRegistry = request.app.state.agent_registry
+        if catalog is not None:
+            current = catalog.get(tool_name)
+            if current is None:
+                raise HTTPException(status_code=404, detail="tool not found")
+            updated = ToolCapability(**{**current.as_dict(), **updates})
+            catalog.upsert(updated)
+            _sync_query_agents(request.app, registry, catalog)
+            request.app.state.store.audit(
+                tenant_id=principal.tenant_id,
+                actor_id=principal.user_id,
+                actor_role=principal.role,
+                action="tool.updated",
+                resource_type="tool",
+                resource_id=tool_name,
+                detail={key: value for key, value in updates.items() if key != "system_prompt"},
+            )
+            return updated.as_dict()
+        agent_id = TOOL_TO_HYBRID.get(tool_name)
+        if agent_id is None:
+            raise HTTPException(status_code=404, detail="tool not found")
+        try:
+            registry.update(
+                agent_id,
+                AgentUpdateRequest.model_validate(
+                    {
+                        key: value
+                        for key, value in updates.items()
+                        if key in {"enabled", "system_prompt"}
+                    }
+                ),
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="tool not found") from exc
+        _sync_query_agents(request.app, registry)
+        capability = _query_capability(registry, tool_name)
+        request.app.state.store.audit(
+            tenant_id=principal.tenant_id,
+            actor_id=principal.user_id,
+            actor_role=principal.role,
+            action="tool.updated",
+            resource_type="tool",
+            resource_id=tool_name,
+            detail={key: value for key, value in updates.items() if key != "system_prompt"},
+        )
+        return capability.as_dict()
 
     def _memory_service(request: Request):
         service = request.app.state.memory_service
@@ -3345,7 +3476,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             principal.tenant_id, principal.user_id, principal.role
         )
         items = []
+        catalog = _tool_catalog(request.app)
         for agent in registry.list():
+            if agent.kind == "hybrid" and catalog is not None:
+                continue
             if not agent_visible_for_access(agent, decision.allowed_tools):
                 continue
             payload = mask_agent_integration(agent)
@@ -3373,10 +3507,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 registry,
                 request.app.state.connection_registry,
                 principal.tenant_id,
+                catalog,
             ):
                 payload["status"] = "disabled"
             elif agent.id == "lingxing-profit-report" and not _lingxing_profit_active(
-                registry, request.app.state.connection_registry, principal.tenant_id
+                registry,
+                request.app.state.connection_registry,
+                principal.tenant_id,
+                catalog,
             ):
                 payload["status"] = "disabled"
             elif agent.id == "profit-report-query" and not _profit_report_active(
@@ -3384,10 +3522,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 registry,
                 request.app.state.connection_registry,
                 principal.tenant_id,
+                catalog,
             ):
                 payload["status"] = "disabled"
             elif agent.id == "kingdee-cloud" and not _kingdee_cloud_active(
-                registry, request.app.state.connection_registry, principal.tenant_id
+                registry,
+                request.app.state.connection_registry,
+                principal.tenant_id,
+                catalog,
             ):
                 payload["status"] = "disabled"
             items.append(payload)
@@ -3405,7 +3547,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
         registry: AgentRegistry = request.app.state.agent_registry
         agent = registry.get(agent_id)
-        if agent is None:
+        if agent is None or (
+            agent.kind == "hybrid" and _tool_catalog(request.app) is not None
+        ):
             raise HTTPException(status_code=404, detail="agent not found")
         decision = request.app.state.access_control.effective_access(
             principal.tenant_id, principal.user_id, principal.role
@@ -3469,6 +3613,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             {"admin"},
         )
         registry: AgentRegistry = request.app.state.agent_registry
+        if agent_id in HYBRID_AGENT_TO_TOOL and _tool_catalog(request.app) is not None:
+            raise HTTPException(status_code=404, detail="agent not found")
         decision_agents = {
             COORDINATOR_AGENT_ID,
             ANALYST_AGENT_ID,
@@ -3515,26 +3661,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             updated = registry.update(agent_id, safe_payload)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="agent not found") from exc
-        if agent_id == "amazon-finance-query":
-            _sync_amazon_finance_agent(
-                request.app.state.amazon_finance_agent,
-                registry,
-            )
-        if agent_id == "lingxing-profit-report":
-            _sync_lingxing_profit_agent(
-                request.app.state.lingxing_profit_agent,
-                registry,
-            )
-        if agent_id == "profit-report-query":
-            _sync_profit_report_agent(
-                request.app.state.profit_report_agent,
-                registry,
-            )
-        if agent_id == "kingdee-cloud":
-            _sync_kingdee_cloud_agent(
-                request.app.state.kingdee_cloud_agent,
-                registry,
-            )
+        if agent_id in HYBRID_AGENT_TO_TOOL:
+            _sync_query_agents(request.app, registry)
         request.app.state.store.audit(
             tenant_id=principal.tenant_id,
             actor_id=principal.user_id,
@@ -3744,6 +3872,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             allowed_tool_names=decision.allowed_tools,
         )
         runtime_tools = request.app.state.runtime_tool_registry.catalog_for(tool_context)
+        catalog = _tool_catalog(request.app)
         agent_snapshot = snapshot_agents(
             request.app.state.agent_registry,
             amazon_active=_amazon_finance_active(
@@ -3751,24 +3880,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 request.app.state.agent_registry,
                 request.app.state.connection_registry,
                 principal.tenant_id,
+                catalog,
             ),
             lingxing_active=_lingxing_profit_active(
                 request.app.state.agent_registry,
                 request.app.state.connection_registry,
                 principal.tenant_id,
+                catalog,
             ),
             profit_report_active=_profit_report_active(
                 request.app.state.settings,
                 request.app.state.agent_registry,
                 request.app.state.connection_registry,
                 principal.tenant_id,
+                catalog,
             ),
             kingdee_active=_kingdee_cloud_active(
                 request.app.state.agent_registry,
                 request.app.state.connection_registry,
                 principal.tenant_id,
+                catalog,
             ),
         )
+        if catalog is not None:
+            agent_snapshot["agents"] = [
+                item for item in agent_snapshot["agents"] if item.get("kind") != "hybrid"
+            ]
         tool_bindings = request.app.state.tool_bindings.catalog(
             principal.tenant_id, request.app.state.connection_registry
         )
@@ -3776,10 +3913,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             tool_bindings = [
                 item for item in tool_bindings if item["tool_name"] in decision.allowed_tools
             ]
+        tool_capabilities = [item.as_dict() for item in catalog.list()] if catalog is not None else []
         return {
             **agent_snapshot,
             "tools": runtime_tools,
             "tool_bindings": tool_bindings,
+            "tool_capabilities": tool_capabilities,
         }
 
     @application.get("/v1/configuration")
@@ -3838,6 +3977,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     request.app.state.agent_registry,
                     request.app.state.connection_registry,
                     principal.tenant_id,
+                    _tool_catalog(request.app),
                 ),
                 "data_scope": "RELEASED only",
                 "statement_timeout_ms": settings.analytics_statement_timeout_ms,
@@ -3847,6 +3987,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     request.app.state.agent_registry,
                     request.app.state.connection_registry,
                     principal.tenant_id,
+                    _tool_catalog(request.app),
                 ),
                 "endpoint": ("/basicOpen/finance/profitReport/order/transcation/list"),
                 "credential_source": "tenant_connection",
@@ -3857,6 +3998,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     request.app.state.agent_registry,
                     request.app.state.connection_registry,
                     principal.tenant_id,
+                    _tool_catalog(request.app),
                 ),
                 "data_source": "领星利润分析数据（分析仓）",
                 "import_script": "scripts/import_lingxing_profit_xlsx.py",
@@ -3866,6 +4008,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     request.app.state.agent_registry,
                     request.app.state.connection_registry,
                     principal.tenant_id,
+                    _tool_catalog(request.app),
                 ),
                 "method": "DynamicFormService.ExecuteBillQuery",
                 "documents": [

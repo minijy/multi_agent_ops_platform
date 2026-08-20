@@ -48,10 +48,12 @@ PostgreSQL。删除 Session 时会同步删除父、子 Session 对应的物化�
 | Agent ID | 说明 | 默认状态 |
 |---|---|---|
 | `function-calling-runtime` | Coordinator：拆任务、委派 Analyst、检索知识库、公开网页搜索 | 启用 |
-| `amazon-finance-query` | Amazon 结算只读查询 | 需在连接器页配置 PostgreSQL 或 MySQL 并绑定工具 |
-| `lingxing-profit-report` | 领星 OpenAPI 利润报表 | 需配置领星凭证 |
-| `profit-report-query` | 已导入分析数据库的领星利润表查询 | 需在连接器页配置 PostgreSQL 或 MySQL 并绑定工具 |
-| `kingdee-cloud` | 金蝶云星空 WebAPI 单据查询 | 默认禁用，需配置金蝶凭证 |
+| `analyst` | 通用分析：受委派调用只读查询工具 | 启用 |
+| `amazon-finance-analyst` | Amazon 结算分析 | 启用 |
+| `profit-analyst` | 利润报表分析 | 启用 |
+| `erp-analyst` | 金蝶销售与应收分析 | 启用 |
+
+查询能力由 Tool 目录管理，不再作为独立 Agent：`amazon_finance_query`、`lingxing_profit_query`、`profit_report_query`、`kingdee_cloud_query`（金蝶默认停用）。在「连接器」配置凭证，在「工具」页启用并绑定连接。
 
 ## 快速开始（SQLite + mock 模型）
 
@@ -256,9 +258,9 @@ POSTGRES_PASSWORD='replace-me' docker compose -f docker-compose.production.yml u
 通义千问或 DeepSeek 模型，填写 API Key 并设为默认模型。保存后立即生效，
 无需修改 `.env` 或重启服务。
 
-## 金蝶云星空 Agent
+## 金蝶云星空查询
 
-在管理控制台 **Agents & 工具** 中启用 `kingdee-cloud`，配置以下凭证字段：
+在管理控制台 **工具** 中启用 `kingdee_cloud_query`，并在 **连接器** 配置以下凭证字段：
 
 - `server_url` — 私有云 WebAPI 地址
 - `acct_id` — 账套 ID
@@ -269,10 +271,11 @@ POSTGRES_PASSWORD='replace-me' docker compose -f docker-compose.production.yml u
 
 ## Connector 与租户资源范围
 
-外部账号按 tenant 保存为 Connection；公开配置写入
+外部账号按 tenant 保存为 Connection。PostgreSQL 控制面写入
+`ops_connections` / `ops_connection_secrets`；SQLite 开发模式仍使用
 `data/connections.json`，凭证仅通过 `secret_ref` 从独立的
 `data/connection_secrets.json` 读取。本地 Secret 文件会设置为 `0600`；
-模型与连接凭证不会写入公开定义文件，本地 Secret 文件权限为 `0600`。生产环境仍建议将 `LocalSecretStore` 替换为 Vault/KMS 实现。
+模型与连接凭证不会写入公开定义文件。生产环境仍建议将 `LocalSecretStore` 替换为 Vault/KMS 实现。工具与连接的绑定保存在 `ops_tool_bindings`（或本地 `data/tool_bindings.json`）。
 
 ### 钉钉连接与推送
 

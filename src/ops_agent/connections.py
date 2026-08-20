@@ -142,9 +142,16 @@ class ConnectionRegistry:
         "tavily": frozenset({"api_key"}),
     }
 
-    def __init__(self, path: Path, secrets: LocalSecretStore) -> None:
-        self.path = path.expanduser().resolve()
+    def __init__(
+        self,
+        path: Path | None,
+        secrets: LocalSecretStore,
+        *,
+        persistence: Any | None = None,
+    ) -> None:
+        self.path = path.expanduser().resolve() if path is not None else None
         self.secrets = secrets
+        self._persistence = persistence
         self._lock = threading.RLock()
         self._connections: dict[str, ConnectionDefinition] = {}
         self.reload()
@@ -155,7 +162,10 @@ class ConnectionRegistry:
 
     def reload(self) -> None:
         with self._lock:
-            if not self.path.is_file():
+            if self._persistence is not None:
+                self._connections = {item.id: item for item in self._persistence.load()}
+                return
+            if self.path is None or not self.path.is_file():
                 self._connections = {}
                 return
             try:
@@ -195,6 +205,11 @@ class ConnectionRegistry:
         }
 
     def _save(self) -> None:
+        if self._persistence is not None:
+            self._persistence.save(list(self._connections.values()))
+            return
+        if self.path is None:
+            return
         write_json_atomic(
             self.path,
             [item.model_dump(mode="json") for item in self._connections.values()],
@@ -465,6 +480,12 @@ class ConnectionRegistry:
             for item in self._connections.values()
         )
 
+    def list_all(self) -> list[ConnectionDefinition]:
+        return sorted(
+            self._connections.values(),
+            key=lambda item: (item.tenant_id, item.connector_type, item.id),
+        )
+
     def list_for_tenant(self, tenant_id: str) -> list[ConnectionDefinition]:
         return sorted(
             (
@@ -498,6 +519,20 @@ class ConnectionRegistry:
 
 
 def create_connection_registry(
-    definitions_path: Path, secrets_path: Path
+    definitions_path: Path,
+    secrets_path: Path,
+    *,
+    settings: Any | None = None,
 ) -> ConnectionRegistry:
+    if settings is not None and getattr(settings, "control_plane_backend", "") == "postgres":
+        from .connector_control_plane import (
+            PostgresConnectionPersistence,
+            PostgresSecretStore,
+            import_json_connections,
+        )
+
+        secrets = PostgresSecretStore(settings.postgres_dsn)
+        persistence = PostgresConnectionPersistence(settings.postgres_dsn)
+        import_json_connections(persistence, secrets, definitions_path, secrets_path)
+        return ConnectionRegistry(definitions_path, secrets, persistence=persistence)
     return ConnectionRegistry(definitions_path, LocalSecretStore(secrets_path))
