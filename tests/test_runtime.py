@@ -25,7 +25,7 @@ from ops_agent.runtime.domain import (
 from ops_agent.runtime.mcp_client import MCPClientManager
 from ops_agent.runtime.model_errors import ModelProviderError
 from ops_agent.runtime.model_router import ModelRouter, create_model_router
-from ops_agent.runtime.session_events import SQLiteSessionEventStore
+from ops_agent.runtime.session_events import PostgresSessionEventStore
 from ops_agent.runtime.skills import SkillRegistry, register_skill_tool
 from ops_agent.runtime.subagents import DelegateSubagentArguments
 from ops_agent.runtime.tools import (
@@ -85,7 +85,7 @@ def test_tool_registry_validates_and_executes():
     assert registry.schemas()[0]["function"]["name"] == "echo"
 
 
-def test_runtime_function_call_and_session_events(tmp_path: Path):
+def test_runtime_function_call_and_session_events(tmp_path: Path, postgres_dsn):
     registry = ToolRegistry()
     registry.register(
         ToolDefinition(
@@ -95,7 +95,7 @@ def test_runtime_function_call_and_session_events(tmp_path: Path):
             handler=lambda args, _context: {"text": args.text},
         )
     )
-    event_store = SQLiteSessionEventStore(tmp_path / "events.sqlite3")
+    event_store = PostgresSessionEventStore(postgres_dsn)
     adapter = FakeFunctionCallingAdapter()
     runtime = AgentRuntime(
         router=ModelRouter({"fake": adapter}, default_model_id="fake"),
@@ -131,7 +131,7 @@ def test_runtime_function_call_and_session_events(tmp_path: Path):
     assert completed.payload["answer"] == "echo 工具调用完成"
 
 
-def test_runtime_repairs_stale_specialist_call_in_general_mode(tmp_path: Path):
+def test_runtime_repairs_stale_specialist_call_in_general_mode(tmp_path: Path, postgres_dsn):
     class StaleSpecialistAdapter:
         provider = "fake"
         model_name = "stale-specialist"
@@ -176,7 +176,7 @@ def test_runtime_repairs_stale_specialist_call_in_general_mode(tmp_path: Path):
             builtin=True,
         )
     )
-    events = SQLiteSessionEventStore(tmp_path / "mode-repair-events.sqlite3")
+    events = PostgresSessionEventStore(postgres_dsn)
     runtime = AgentRuntime(
         router=ModelRouter(
             {"fake": StaleSpecialistAdapter()}, default_model_id="fake"
@@ -206,7 +206,7 @@ def test_runtime_repairs_stale_specialist_call_in_general_mode(tmp_path: Path):
     assert "model.tool_call_rejected" not in event_types
 
 
-def test_runtime_empty_model_content_still_records_final_answer(tmp_path: Path):
+def test_runtime_empty_model_content_still_records_final_answer(tmp_path: Path, postgres_dsn):
     class EmptyAdapter:
         provider = "fake"
         model_name = "fake-empty"
@@ -220,7 +220,7 @@ def test_runtime_empty_model_content_still_records_final_answer(tmp_path: Path):
                 usage={"total_tokens": 1},
             )
 
-    event_store = SQLiteSessionEventStore(tmp_path / "events.sqlite3")
+    event_store = PostgresSessionEventStore(postgres_dsn)
     runtime = AgentRuntime(
         router=ModelRouter({"fake": EmptyAdapter()}, default_model_id="fake"),
         registry=ToolRegistry(),
@@ -684,7 +684,7 @@ def test_model_provider_error_accepts_traceback_assignment():
     assert error.code == "1113"
 
 
-def test_runtime_propagates_balance_error_through_graph(tmp_path: Path):
+def test_runtime_propagates_balance_error_through_graph(tmp_path: Path, postgres_dsn):
     class FailingAdapter:
         provider = "fake"
         model_name = "fake-fail"
@@ -698,7 +698,7 @@ def test_runtime_propagates_balance_error_through_graph(tmp_path: Path):
                 status_code=429,
             )
 
-    event_store = SQLiteSessionEventStore(tmp_path / "events.sqlite3")
+    event_store = PostgresSessionEventStore(postgres_dsn)
     runtime = AgentRuntime(
         router=ModelRouter({"fake": FailingAdapter()}, default_model_id="fake"),
         registry=ToolRegistry(),
@@ -812,7 +812,7 @@ def test_model_router_selects_image_capable_adapter():
     assert route.model == "vision-model"
 
 
-def test_runtime_sends_persisted_image_to_vision_route(tmp_path: Path):
+def test_runtime_sends_persisted_image_to_vision_route(tmp_path: Path, postgres_dsn):
     class VisionAdapter:
         provider = "vision"
         model_name = "vision-model"
@@ -839,7 +839,7 @@ def test_runtime_sends_persisted_image_to_vision_route(tmp_path: Path):
         ),
         tenant_id="tenant-a",
     )
-    events = SQLiteSessionEventStore(tmp_path / "events.sqlite3")
+    events = PostgresSessionEventStore(postgres_dsn)
     runtime = AgentRuntime(
         router=ModelRouter(
             {"vision": VisionAdapter()}, default_model_id="vision"
@@ -912,7 +912,7 @@ def test_mcp_stdio_discovery_and_execution(tmp_path: Path):
         manager.stop()
 
 
-def test_restore_messages_keeps_prior_turns_and_compacts_old_tools(tmp_path: Path):
+def test_restore_messages_keeps_prior_turns_and_compacts_old_tools(tmp_path: Path, postgres_dsn):
     class RecordingAdapter:
         provider = "fake"
         model_name = "fake-context"
@@ -973,7 +973,7 @@ def test_restore_messages_keeps_prior_turns_and_compacts_old_tools(tmp_path: Pat
         router=ModelRouter({"fake": adapter}, default_model_id="fake"),
         registry=registry,
         executor=ToolExecutor(registry),
-        event_store=SQLiteSessionEventStore(tmp_path / "events.sqlite3"),
+        event_store=PostgresSessionEventStore(postgres_dsn),
     )
     first = runtime.run(
         RuntimeAgentRequest(question="帮我分析费用"),
@@ -1050,12 +1050,12 @@ def test_stream_sanitizer_hides_identifier_split_across_tokens():
     assert "领星利润分析数据（分析仓）" in answer
 
 
-def test_prepare_model_messages_nulls_empty_tool_call_content(tmp_path: Path):
+def test_prepare_model_messages_nulls_empty_tool_call_content(tmp_path: Path, postgres_dsn):
     runtime = AgentRuntime(
         router=ModelRouter({"fake": FakeFunctionCallingAdapter()}, default_model_id="fake"),
         registry=ToolRegistry(),
         executor=ToolExecutor(ToolRegistry()),
-        event_store=SQLiteSessionEventStore(tmp_path / "events.sqlite3"),
+        event_store=PostgresSessionEventStore(postgres_dsn),
     )
     prepared = runtime._prepare_model_messages(
         [
@@ -1076,12 +1076,12 @@ def test_prepare_model_messages_nulls_empty_tool_call_content(tmp_path: Path):
     assert prepared[-1]["content"] == "q2"
 
 
-def test_prepare_model_messages_keeps_prior_reasoning(tmp_path: Path):
+def test_prepare_model_messages_keeps_prior_reasoning(tmp_path: Path, postgres_dsn):
     runtime = AgentRuntime(
         router=ModelRouter({"fake": FakeFunctionCallingAdapter()}, default_model_id="fake"),
         registry=ToolRegistry(),
         executor=ToolExecutor(ToolRegistry()),
-        event_store=SQLiteSessionEventStore(tmp_path / "events.sqlite3"),
+        event_store=PostgresSessionEventStore(postgres_dsn),
     )
     prepared = runtime._prepare_model_messages(
         [
@@ -1098,7 +1098,7 @@ def test_prepare_model_messages_keeps_prior_reasoning(tmp_path: Path):
     assert prepared[1]["reasoning_content"] == "secret thinking"
 
 
-def test_prepare_model_messages_sliding_window_drops_old_turns(tmp_path: Path):
+def test_prepare_model_messages_sliding_window_drops_old_turns(tmp_path: Path, postgres_dsn):
     settings = Settings(
         _env_file=None,
         context_window_enabled=True,
@@ -1110,7 +1110,7 @@ def test_prepare_model_messages_sliding_window_drops_old_turns(tmp_path: Path):
         router=ModelRouter({"fake": FakeFunctionCallingAdapter()}, default_model_id="fake"),
         registry=ToolRegistry(),
         executor=ToolExecutor(ToolRegistry()),
-        event_store=SQLiteSessionEventStore(tmp_path / "events.sqlite3"),
+        event_store=PostgresSessionEventStore(postgres_dsn),
         settings=settings,
     )
     prepared = runtime._prepare_model_messages(
@@ -1146,8 +1146,8 @@ def test_prepare_model_messages_sliding_window_drops_old_turns(tmp_path: Path):
     ]
 
 
-def test_session_events_hide_legacy_seller_fields(tmp_path: Path):
-    event_store = SQLiteSessionEventStore(tmp_path / "events.sqlite3")
+def test_session_events_hide_legacy_seller_fields(tmp_path: Path, postgres_dsn):
+    event_store = PostgresSessionEventStore(postgres_dsn)
     event_store.append(
         session_id="legacy-session",
         tenant_id="tenant-a",
@@ -1166,7 +1166,7 @@ def test_session_events_hide_legacy_seller_fields(tmp_path: Path):
     assert payload == {"resource_scope": {}, "role": "admin"}
 
 
-def test_continue_session_resumes_open_turn_without_new_user_message(tmp_path: Path):
+def test_continue_session_resumes_open_turn_without_new_user_message(tmp_path: Path, postgres_dsn):
     class ResumeAdapter:
         provider = "fake"
         model_name = "fake-resume"
@@ -1185,7 +1185,7 @@ def test_continue_session_resumes_open_turn_without_new_user_message(tmp_path: P
     from ops_agent.runtime.agent_loop import turn_is_open
     from ops_agent.runtime.domain import ToolResult
 
-    event_store = SQLiteSessionEventStore(tmp_path / "events.sqlite3")
+    event_store = PostgresSessionEventStore(postgres_dsn)
     session_id = "11111111-1111-1111-1111-111111111111"
     event_store.append(
         session_id=session_id, tenant_id="tenant-a", user_id="user-a",
@@ -1238,7 +1238,7 @@ def test_continue_session_resumes_open_turn_without_new_user_message(tmp_path: P
     assert not turn_is_open(events)
 
 
-def test_resumable_interrupt_keeps_turn_open_and_continues(tmp_path: Path):
+def test_resumable_interrupt_keeps_turn_open_and_continues(tmp_path: Path, postgres_dsn):
     from ops_agent.runtime.agent_loop import turn_is_open
 
     class InterruptResumeAdapter:
@@ -1268,7 +1268,7 @@ def test_resumable_interrupt_keeps_turn_open_and_continues(tmp_path: Path):
             )
 
     adapter = InterruptResumeAdapter()
-    event_store = SQLiteSessionEventStore(tmp_path / "interrupt-events.sqlite3")
+    event_store = PostgresSessionEventStore(postgres_dsn)
     registry = ToolRegistry()
     runtime = AgentRuntime(
         router=ModelRouter({"fake": adapter}, default_model_id="fake"),

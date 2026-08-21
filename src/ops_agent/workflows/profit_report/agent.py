@@ -20,8 +20,8 @@ metric 选择：
 - order：按订单号汇总
 - event_source：按费用类型汇总
 
-仅提取用户明确给出的日期与币种。没有日期表示查询全部已导入数据。
-limit 默认 20，最大 200。
+仅提取用户明确给出的日期与币种。overview 可以不带日期；其余 metric 必须带日期，窗口最长 366 天。
+limit 默认 20，最大 100。
 若用户未给年份，优先使用库内已有数据的年份；不要猜测 2022 等过时年份。
 查询前若不确定范围，可先用 metric=overview 且不带日期查看 first_posted_at / last_posted_at。
 """.strip()
@@ -65,6 +65,7 @@ class ProfitReportAgent:
         request: ProfitReportQueryRequest,
         *,
         allowed_store_names: set[str] | None = None,
+        tenant_id: str,
         query_tool: ProfitReportQueryTool | None = None,
     ) -> ProfitReportQueryResponse:
         plan = self.plan(request)
@@ -75,7 +76,9 @@ class ProfitReportAgent:
                 if len(allowed_store_names) != 1:
                     raise PermissionError("store_name must be specified for tenant")
                 plan = plan.model_copy(update={"store_name": next(iter(allowed_store_names))})
-        rows, total = (query_tool or self.query_tool).execute(plan)
+        rows, total = (query_tool or self.query_tool).execute(
+            plan, tenant_id=tenant_id
+        )
         return ProfitReportQueryResponse(
             question=request.question,
             plan=plan,

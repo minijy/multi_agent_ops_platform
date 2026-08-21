@@ -80,7 +80,7 @@ def test_history_keeps_reasoning_when_tools_are_present():
     assert "reasoning_content" not in dropped[1]
 
 
-def test_deepseek_adapter_streams_thinking_and_keeps_tool_history(monkeypatch):
+def test_deepseek_adapter_streams_thinking_and_keeps_tool_history(monkeypatch, postgres_dsn):
     captured: dict[str, Any] = {}
     tool_delta = SimpleNamespace(
         index=0,
@@ -138,7 +138,7 @@ def test_deepseek_adapter_streams_thinking_and_keeps_tool_history(monkeypatch):
     assert tokens[0] == ("reasoning", "继续上一轮工具调用。")
 
 
-def test_reasoner_forces_thinking_and_plain_chat_drops_cot(monkeypatch):
+def test_reasoner_forces_thinking_and_plain_chat_drops_cot(monkeypatch, postgres_dsn):
     captured: dict[str, Any] = {}
 
     def create(**options):
@@ -191,7 +191,7 @@ def test_deepseek_missing_key_uses_hard_stop():
     assert error.value.code == "model_api_key_missing"
 
 
-def test_deepseek_registry_page_config(tmp_path):
+def test_deepseek_registry_page_config(tmp_path, postgres_dsn):
     settings = _settings(model_definitions_path=tmp_path / "models.json")
     registry = create_model_registry(settings.model_definitions_path, settings)
     created = registry.create(

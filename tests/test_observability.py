@@ -11,19 +11,15 @@ from ops_agent.api.app import create_app
 from ops_agent.config import Settings
 from ops_agent.evals import default_eval_path, load_eval_cases, run_eval_case
 from ops_agent.evals import _offline_runtime
-from ops_agent.runtime.observability import SQLiteMetricsStore, TurnMetric, estimate_cost
+from ops_agent.runtime.observability import PostgresMetricsStore, TurnMetric, estimate_cost
 from ops_agent.runtime.session_events import SessionEvent
 from ops_agent.evals import project_replay
 
 
-def _settings(tmp_path: Path, **overrides) -> Settings:
+def _settings(tmp_path: Path, postgres_dsn: str, **overrides) -> Settings:
     values = dict(
         _env_file=None,
-        platform_db_path=tmp_path / "platform.sqlite3",
-        session_event_path=tmp_path / "session-events.sqlite3",
-        runtime_governance_path=tmp_path / "governance.sqlite3",
-        runtime_metrics_path=tmp_path / "metrics.sqlite3",
-        memory_db_path=tmp_path / "memory.sqlite3",
+        postgres_dsn=postgres_dsn,
         agent_definitions_path=tmp_path / "agents.json",
         model_definitions_path=tmp_path / "models.json",
         connection_definitions_path=tmp_path / "connections.json",
@@ -76,8 +72,8 @@ def test_replay_detects_leaked_protocol():
     assert view.leaked_protocol is True
 
 
-def test_golden_eval_cases_pass(tmp_path: Path):
-    runtime = _offline_runtime(tmp_path / "eval.sqlite3")
+def test_golden_eval_cases_pass(tmp_path: Path, postgres_dsn: str):
+    runtime = _offline_runtime(postgres_dsn, agent_definitions_path=tmp_path / "eval-agents.json")
     results = [
         run_eval_case(runtime, case, tenant_id="eval")
         for case in load_eval_cases(default_eval_path())
@@ -86,10 +82,10 @@ def test_golden_eval_cases_pass(tmp_path: Path):
     assert failed == []
 
 
-def test_metrics_daily_series_fills_fourteen_days(tmp_path: Path):
+def test_metrics_daily_series_fills_fourteen_days(tmp_path: Path, postgres_dsn):
     from datetime import datetime, timedelta, timezone
 
-    store = SQLiteMetricsStore(tmp_path / "metrics.sqlite3")
+    store = PostgresMetricsStore(postgres_dsn)
     now = datetime.now(timezone.utc)
     yesterday = now - timedelta(days=1)
     store.record(
@@ -129,8 +125,8 @@ def test_metrics_daily_series_fills_fourteen_days(tmp_path: Path):
     assert summary.by_model["mock-function-calling"] == 2
 
 
-def test_agent_query_records_runtime_metrics(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path))) as client:
+def test_agent_query_records_runtime_metrics(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         created = client.post(
             "/v1/agent/query",
             json={"question": "你好，请介绍当前 Runtime"},
@@ -146,8 +142,8 @@ def test_agent_query_records_runtime_metrics(tmp_path: Path):
         assert len(dashboard["runtime"]["daily"]) == 14
 
 
-def test_jwt_bearer_token_sets_tenant(tmp_path: Path):
-    settings = _settings(tmp_path, jwt_secret="phase4-secret-phase4-secret-phase4")
+def test_jwt_bearer_token_sets_tenant(tmp_path: Path, postgres_dsn):
+    settings = _settings(tmp_path, postgres_dsn, jwt_secret="phase4-secret-phase4-secret-phase4")
     token = jwt.encode(
         {"sub": "jwt-user", "tenant_id": "tenant-jwt", "role": "admin"},
         "phase4-secret-phase4-secret-phase4",
@@ -172,15 +168,15 @@ def test_jwt_bearer_token_sets_tenant(tmp_path: Path):
         assert other["turn_count"] == 0
 
 
-def test_jwt_required_rejects_header_only_identity(tmp_path: Path):
-    settings = _settings(tmp_path, jwt_secret="phase4-secret-phase4-secret-phase4", jwt_required=True)
+def test_jwt_required_rejects_header_only_identity(tmp_path: Path, postgres_dsn):
+    settings = _settings(tmp_path, postgres_dsn, jwt_secret="phase4-secret-phase4-secret-phase4", jwt_required=True)
     with TestClient(create_app(settings)) as client:
         response = client.get("/v1/agent/metrics")
         assert response.status_code == 401
 
 
-def test_concurrent_agent_queries(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path))) as client:
+def test_concurrent_agent_queries(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         def once(index: int) -> int:
             return client.post(
                 "/v1/agent/query",

@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS lingxing_profit_order_transactions (
     id BIGSERIAL PRIMARY KEY,
     source_file TEXT NOT NULL DEFAULT '',
     source_row INTEGER NOT NULL DEFAULT 0,
+    tenant_id TEXT NOT NULL DEFAULT '',
     store_name TEXT,
     country TEXT,
     currency_code TEXT,
@@ -65,6 +66,9 @@ CREATE TABLE IF NOT EXISTS lingxing_profit_order_transactions (
     imported_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE INDEX IF NOT EXISTS idx_lx_profit_tenant_posted
+    ON lingxing_profit_order_transactions (tenant_id, posted_datetime);
+
 CREATE INDEX IF NOT EXISTS idx_lx_profit_posted_datetime
     ON lingxing_profit_order_transactions (posted_datetime);
 
@@ -79,5 +83,3 @@ CREATE INDEX IF NOT EXISTS idx_lx_profit_order_id
 
 CREATE INDEX IF NOT EXISTS idx_lx_profit_msku
     ON lingxing_profit_order_transactions (msku);
-
-GRANT SELECT ON lingxing_profit_order_transactions TO amazon_finance_reader;

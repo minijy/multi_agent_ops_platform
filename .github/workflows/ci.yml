@@ -7,6 +7,23 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: ops_agent_test
+          POSTGRES_USER: ops_agent
+          POSTGRES_PASSWORD: ops_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ops_agent -d ops_agent_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      POSTGRES_DSN: postgresql://ops_agent:ops_agent@127.0.0.1:5432/ops_agent_test
+      TEST_POSTGRES_DSN: postgresql://ops_agent:ops_agent@127.0.0.1:5432/ops_agent_test
     defaults:
       run:
         working-directory: .

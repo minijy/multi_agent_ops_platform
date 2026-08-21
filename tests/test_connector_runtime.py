@@ -107,7 +107,7 @@ def test_tool_binding_catalog_declares_connector_and_resource_scope():
         "tool_name": "amazon_finance_query",
         "connector_type": "analytics",
         "operation": "query_settlements",
-        "resource_scope": None,
+        "resource_scope": "marketplace_ids",
     }
     assert catalog["kingdee_cloud_query"]["connector_type"] == "kingdee"
 

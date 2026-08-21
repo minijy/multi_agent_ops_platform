@@ -524,7 +524,7 @@ def create_connection_registry(
     *,
     settings: Any | None = None,
 ) -> ConnectionRegistry:
-    if settings is not None and getattr(settings, "control_plane_backend", "") == "postgres":
+    if settings is not None:
         from .connector_control_plane import (
             PostgresConnectionPersistence,
             PostgresSecretStore,

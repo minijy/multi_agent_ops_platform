@@ -10,14 +10,7 @@ def main() -> int:
     from ops_agent.config import Settings
 
     settings = Settings()
-    postgres_backends = {
-        settings.control_plane_backend,
-        settings.session_event_backend,
-        settings.memory_backend,
-    }
-    if "postgres" not in postgres_backends:
-        print("SQLite backends still use CREATE TABLE IF NOT EXISTS; Alembic is for PostgreSQL.")
-        return 0
+    settings.validate_runtime()
     root = Path.cwd()
     if not (root / "alembic.ini").is_file():
         root = Path(__file__).resolve().parents[3]

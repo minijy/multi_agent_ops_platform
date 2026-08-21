@@ -22,7 +22,7 @@ class ProfitReportQueryPlan(BaseModel):
     end_date: date | None = None
     currency_code: str | None = Field(default=None, max_length=8)
     store_name: str | None = Field(default=None, max_length=128)
-    limit: int = Field(default=20, ge=1, le=200)
+    limit: int = Field(default=20, ge=1, le=100)
 
     @model_validator(mode="after")
     def validate_dates(self) -> "ProfitReportQueryPlan":
@@ -45,3 +45,7 @@ class ProfitReportQueryResponse(BaseModel):
     summary: str
     total_rows: int
     data_scope: str = "领星利润分析数据（分析仓）"
+    result_ref: str = ""
+    result_endpoint: str = ""
+    rows_truncated: bool = False
+    returned_rows: int = 0

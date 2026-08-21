@@ -37,7 +37,7 @@ class KingdeeQueryPlan(BaseModel):
     customer_name: str = Field(default="", max_length=120)
     organization_name: str = Field(default="", max_length=120)
     document_status: Literal["", "A", "B", "C", "D", "Z"] = ""
-    limit: int = Field(default=50, ge=1, le=1000)
+    limit: int = Field(default=50, ge=1, le=100)
     start_row: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
@@ -57,3 +57,7 @@ class KingdeeQueryResponse(BaseModel):
     summary: str
     total: int
     data_scope: str = "金蝶云星空 · ExecuteBillQuery"
+    result_ref: str = ""
+    result_endpoint: str = ""
+    rows_truncated: bool = False
+    returned_rows: int = 0

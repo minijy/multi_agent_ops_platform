@@ -4,11 +4,16 @@ import math
 import os
 import platform
 import re
-import resource
 import subprocess
+import sys
 from pathlib import Path
 from typing import Literal
 from urllib.parse import unquote
+
+try:
+    import resource
+except ImportError:  # Windows
+    resource = None
 
 from pydantic import BaseModel, Field
 
@@ -21,6 +26,13 @@ SandboxMode = Literal["read-only", "workspace-write", "danger-full-access"]
 
 class SandboxUnavailableError(RuntimeError):
     pass
+
+
+def platform_true_command() -> list[str]:
+    if sys.platform == "win32":
+        system_root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows"
+        return [str(Path(system_root) / "System32" / "cmd.exe"), "/c", "exit", "0"]
+    return ["/usr/bin/true"]
 
 
 class SandboxCommandArguments(BaseModel):
@@ -41,7 +53,14 @@ class SandboxResult(BaseModel):
 
 
 class SandboxRunner:
-    """Fail-closed local process runner using macOS Seatbelt when restricted."""
+    """Fail-closed local process runner.
+
+    Restricted modes use macOS Seatbelt (`sandbox-exec`) or Windows AppContainer.
+    If neither backend is available, read-only / workspace-write tools are not
+    registered and `run(..., mode=restricted)` raises instead of dropping isolation.
+    """
+
+    POSIX_SAFE_ENV_NAMES = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL")
 
     def __init__(
         self,
@@ -54,6 +73,8 @@ class SandboxRunner:
         self.timeout_seconds = timeout_seconds
         self.max_output_bytes = max_output_bytes
         self.seatbelt = Path("/usr/bin/sandbox-exec")
+        self._windows_backend = None
+        self.restricted_backend: str | None = None
         if platform.system() == "Darwin" and self.seatbelt.is_file():
             probe = subprocess.run(
                 [
@@ -67,9 +88,16 @@ class SandboxRunner:
                 timeout=5,
                 check=False,
             )
-            self.restricted_available = probe.returncode == 0
-        else:
-            self.restricted_available = False
+            if probe.returncode == 0:
+                self.restricted_backend = "seatbelt"
+        elif sys.platform == "win32":
+            from .windows_sandbox import probe_windows_appcontainer
+
+            backend = probe_windows_appcontainer()
+            if backend is not None:
+                self._windows_backend = backend
+                self.restricted_backend = "appcontainer"
+        self.restricted_available = self.restricted_backend is not None
 
     _SKIP_DIRS = frozenset(
         {
@@ -314,12 +342,63 @@ class SandboxRunner:
         return [str(self.seatbelt), "-p", self._profile(mode), "--", *command]
 
     def _limits(self) -> None:
+        if resource is None:
+            return
         cpu = max(1, math.ceil(self.timeout_seconds) + 1)
         resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
         resource.setrlimit(
             resource.RLIMIT_FSIZE,
             (self.max_output_bytes * 4, self.max_output_bytes * 4),
         )
+
+    def _safe_env(self) -> dict[str, str]:
+        if sys.platform == "win32":
+            from .windows_sandbox import windows_safe_env
+
+            return windows_safe_env()
+        return {
+            name: os.environ[name]
+            for name in self.POSIX_SAFE_ENV_NAMES
+            if name in os.environ
+        }
+
+    def _run_restricted(
+        self,
+        command: list[str],
+        *,
+        mode: SandboxMode,
+        cwd: Path,
+        env: dict[str, str],
+    ) -> tuple[bytes, bytes, int, bool]:
+        if self._windows_backend is not None:
+            from .windows_sandbox import WindowsSandboxError, write_roots_for_mode
+
+            try:
+                completed = self._windows_backend.spawn(
+                    command,
+                    mode=mode,
+                    cwd=cwd,
+                    env=env,
+                    timeout_seconds=self.timeout_seconds,
+                    max_output_bytes=self.max_output_bytes,
+                    write_roots=write_roots_for_mode(mode, self.workspace_root),
+                )
+            except WindowsSandboxError as exc:
+                raise SandboxUnavailableError(str(exc)) from exc
+            return completed.stdout, completed.stderr, completed.exit_code, completed.timed_out
+        try:
+            completed = subprocess.run(
+                self._argv(command, mode),
+                cwd=cwd,
+                env=env,
+                capture_output=True,
+                timeout=self.timeout_seconds,
+                check=False,
+                preexec_fn=self._limits if os.name == "posix" else None,
+            )
+            return completed.stdout, completed.stderr, completed.returncode, False
+        except subprocess.TimeoutExpired as exc:
+            return exc.stdout or b"", exc.stderr or b"", -1, True
 
     def run(
         self,
@@ -332,30 +411,31 @@ class SandboxRunner:
             raise ValueError("command must contain non-empty argv strings")
         resolved_cwd = self._cwd(cwd)
         before = self._workspace_snapshot(resolved_cwd) if mode != "read-only" else {}
-        safe_env = {
-            name: os.environ[name]
-            for name in ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL")
-            if name in os.environ
-        }
-        try:
-            completed = subprocess.run(
-                self._argv(command, mode),
-                cwd=resolved_cwd,
-                env=safe_env,
-                capture_output=True,
-                timeout=self.timeout_seconds,
-                check=False,
-                preexec_fn=self._limits if os.name == "posix" else None,
+        safe_env = self._safe_env()
+        if mode == "danger-full-access":
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=resolved_cwd,
+                    env=safe_env,
+                    capture_output=True,
+                    timeout=self.timeout_seconds,
+                    check=False,
+                    preexec_fn=self._limits if os.name == "posix" else None,
+                )
+                stdout = completed.stdout
+                stderr = completed.stderr
+                timed_out = False
+                exit_code = completed.returncode
+            except subprocess.TimeoutExpired as exc:
+                stdout = exc.stdout or b""
+                stderr = exc.stderr or b""
+                timed_out = True
+                exit_code = -1
+        else:
+            stdout, stderr, exit_code, timed_out = self._run_restricted(
+                command, mode=mode, cwd=resolved_cwd, env=safe_env
             )
-            stdout = completed.stdout
-            stderr = completed.stderr
-            timed_out = False
-            exit_code = completed.returncode
-        except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout or b""
-            stderr = exc.stderr or b""
-            timed_out = True
-            exit_code = -1
         combined_size = len(stdout) + len(stderr)
         truncated = combined_size > self.max_output_bytes
         if truncated:

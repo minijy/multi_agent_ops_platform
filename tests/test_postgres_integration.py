@@ -33,11 +33,9 @@ def _cleanup(dsn: str, tenant_id: str, session_ids: list[str]) -> None:
         )
 
 
-def test_postgres_agent_session_persists_across_restart():
+def test_postgres_agent_session_persists_across_restart(postgres_dsn):
     settings = Settings(model_provider="mock")
     settings.validate_runtime()
-    assert settings.control_plane_backend == "postgres"
-    assert settings.session_event_backend == "postgres"
 
     tenant_id = f"pg-test-{uuid.uuid4()}"
     headers = {

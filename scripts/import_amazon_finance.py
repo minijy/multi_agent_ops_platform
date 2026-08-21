@@ -86,7 +86,9 @@ def run_psql(
     subprocess.run(command, input=sql, text=True, check=True)
 
 
-def import_json_file(json_file: Path, database_url: str) -> dict[str, int]:
+def import_json_file(
+    json_file: Path, database_url: str, *, tenant_id: str
+) -> dict[str, int]:
     document = json.loads(json_file.read_text(encoding="utf-8"))
     payload = document.get("payload") or {}
     transactions = [
@@ -294,15 +296,18 @@ CREATE TEMP TABLE stg_amounts (
         sql += psql_copy(identifier_file, "stg_identifiers", identifier_columns)
         sql += psql_copy(item_file, "stg_items", item_columns)
         sql += psql_copy(amount_file, "stg_amounts", amount_columns)
-        sql += """
+        tenant_sql = tenant_id.replace("'", "''")
+        sql += f"""
+UPDATE stg_transactions SET tenant_id = '{tenant_sql}';
 INSERT INTO amazon_finance_transactions (
-    seller_id, transaction_id, marketplace_id, account_type, transaction_status,
+    seller_id, transaction_id, tenant_id, marketplace_id, account_type, transaction_status,
     transaction_type, description, posted_at, currency_code, total_amount
 )
-SELECT seller_id, transaction_id, marketplace_id, account_type, transaction_status,
+SELECT seller_id, transaction_id, tenant_id, marketplace_id, account_type, transaction_status,
        transaction_type, description, posted_at, currency_code, total_amount
 FROM stg_transactions
 ON CONFLICT (seller_id, transaction_id) DO UPDATE SET
+    tenant_id = EXCLUDED.tenant_id,
     marketplace_id = EXCLUDED.marketplace_id,
     account_type = EXCLUDED.account_type,
     transaction_status = EXCLUDED.transaction_status,
@@ -366,11 +371,18 @@ def main() -> int:
         or os.environ.get("POSTGRES_DSN")
         or "",
     )
+    parser.add_argument(
+        "--tenant-id",
+        default=os.environ.get("OPS_TENANT_ID") or "default",
+        help="Tenant that owns the imported rows",
+    )
     args = parser.parse_args()
     if not args.database_url:
         print("Set ANALYTICS_DSN or pass --database-url", file=sys.stderr)
         return 1
-    counts = import_json_file(args.json_file, args.database_url)
+    counts = import_json_file(
+        args.json_file, args.database_url, tenant_id=args.tenant_id
+    )
     print(json.dumps(counts, ensure_ascii=False))
     return 0
 

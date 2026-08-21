@@ -10,9 +10,9 @@ from ops_agent.model_registry import create_model_registry
 from ops_agent.config import Settings
 from ops_agent.runtime.agent_loop import AgentRuntime
 from ops_agent.runtime.domain import ModelTurn
-from ops_agent.runtime.governance import SQLiteRuntimeGovernanceStore
+from ops_agent.runtime.governance import PostgresRuntimeGovernanceStore
 from ops_agent.runtime.model_router import ModelRouter
-from ops_agent.runtime.session_events import SQLiteSessionEventStore
+from ops_agent.runtime.session_events import PostgresSessionEventStore
 from ops_agent.runtime.subagent_worker import SubagentQueueWorker
 from ops_agent.runtime.subagents import SubagentManager, SubagentSubmitRequest
 from ops_agent.runtime.tools import ToolExecutor, ToolRegistry
@@ -48,9 +48,9 @@ class SlowAdapter:
         )
 
 
-def _components(tmp_path: Path, adapter: Any):
-    governance = SQLiteRuntimeGovernanceStore(tmp_path / "governance.sqlite3")
-    events = SQLiteSessionEventStore(tmp_path / "events.sqlite3")
+def _components(tmp_path: Path, adapter: Any, postgres_dsn):
+    governance = PostgresRuntimeGovernanceStore(postgres_dsn)
+    events = PostgresSessionEventStore(postgres_dsn)
     registry = ToolRegistry()
     runtime = AgentRuntime(
         router=ModelRouter({"fake": adapter}, default_model_id="fake"),
@@ -61,6 +61,7 @@ def _components(tmp_path: Path, adapter: Any):
     )
     settings = Settings(
         _env_file=None,
+        postgres_dsn=postgres_dsn,
         agent_definitions_path=tmp_path / "agent_definitions.json",
         subagent_queue_backend="db",
         subagent_worker_count=1,
@@ -96,8 +97,8 @@ def _components(tmp_path: Path, adapter: Any):
     return manager, governance, events, stack, settings
 
 
-def test_db_queue_claim_and_worker_completes(tmp_path: Path):
-    manager, governance, events, stack, settings = _components(tmp_path, AnswerAdapter())
+def test_db_queue_claim_and_worker_completes(tmp_path: Path, postgres_dsn: str):
+    manager, governance, events, stack, settings = _components(tmp_path, AnswerAdapter(), postgres_dsn)
     assert manager.pool is None
     task = manager.submit(
         SubagentSubmitRequest(
@@ -137,9 +138,9 @@ def test_db_queue_claim_and_worker_completes(tmp_path: Path):
         thread.join(timeout=2)
 
 
-def test_db_queue_cancel_propagates_across_worker(tmp_path: Path):
+def test_db_queue_cancel_propagates_across_worker(tmp_path: Path, postgres_dsn: str):
     manager, _governance, events, stack, _settings = _components(
-        tmp_path, SlowAdapter()
+        tmp_path, SlowAdapter(), postgres_dsn
     )
     task = manager.submit(
         SubagentSubmitRequest(
@@ -178,9 +179,9 @@ def test_db_queue_cancel_propagates_across_worker(tmp_path: Path):
         thread.join(timeout=2)
 
 
-def test_requeue_expired_lease_then_retry(tmp_path: Path):
+def test_requeue_expired_lease_then_retry(tmp_path: Path, postgres_dsn: str):
     manager, governance, _events, stack, settings = _components(
-        tmp_path, AnswerAdapter()
+        tmp_path, AnswerAdapter(), postgres_dsn
     )
     task = manager.submit(
         SubagentSubmitRequest(

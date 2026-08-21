@@ -3,6 +3,7 @@ BEGIN;
 CREATE TABLE IF NOT EXISTS amazon_finance_transactions (
     seller_id          text        NOT NULL,
     transaction_id     text        NOT NULL,
+    tenant_id          text        NOT NULL DEFAULT '',
     marketplace_id     text        NOT NULL,
     account_type       text,
     transaction_status text        NOT NULL CHECK (transaction_status = 'RELEASED'),
@@ -16,6 +17,8 @@ CREATE TABLE IF NOT EXISTS amazon_finance_transactions (
     PRIMARY KEY (seller_id, transaction_id)
 );
 
+CREATE INDEX IF NOT EXISTS idx_amazon_finance_transactions_tenant
+    ON amazon_finance_transactions (tenant_id, posted_at);
 CREATE INDEX IF NOT EXISTS idx_amazon_finance_transactions_posted
     ON amazon_finance_transactions (seller_id, posted_at);
 CREATE INDEX IF NOT EXISTS idx_amazon_finance_transactions_type

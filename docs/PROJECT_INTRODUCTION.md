@@ -8,7 +8,8 @@ SellerForge 是一套面向企业数据分析和运营协作场景的 Multi-Agen
 数据查询、统计计算、结果汇总和受控的外部操作。
 
 项目不是单一聊天页面，而是一个具备身份、权限、数据边界、审批、审计、记忆与可观测能力的
-Agent Runtime 控制面。
+Agent Runtime 控制面。源码模块、启动装配和主调用栈的详细拆解见
+[INTERNAL_ARCHITECTURE.md](INTERNAL_ARCHITECTURE.md)。
 
 ## 2. 项目目标
 
@@ -208,7 +209,7 @@ Coordinator 每轮只读取小型相关快照；Analyst 不直接访问记忆库
 | Web 控制台 | HTML、CSS、Vanilla JavaScript |
 | API | FastAPI、Pydantic |
 | Agent Runtime | Function Calling、LangGraph、Provider Adapters |
-| 持久化 | SQLite、PostgreSQL、Alembic |
+| 持久化 | PostgreSQL、Alembic |
 | 数据查询 | psycopg、PyMySQL、SQLAlchemy |
 | 向量检索 | pgvector、Qdrant、Milvus |
 | Embedding | sentence-transformers |
@@ -217,6 +218,8 @@ Coordinator 每轮只读取小型相关快照；Analyst 不直接访问记忆库
 | 测试 | pytest、FastAPI TestClient、Ruff |
 
 ## 14. 主要目录
+
+代码如何接起来、LangGraph 两节点循环、角色虚拟化与存储分层，见 [INTERNAL_ARCHITECTURE.md](INTERNAL_ARCHITECTURE.md)。
 
 ```text
 frontend/                       Web 控制台
@@ -235,7 +238,7 @@ tests/                          单元测试与 API 回归测试
 
 ## 15. 部署与启动
 
-开发环境可以使用 SQLite 快速启动；生产环境会拒绝 SQLite、可伪造身份头和内联任务队列，必须使用 PostgreSQL 保存控制面、Session 事件、记忆和队列状态。当前配置注册表尚未进入共享数据库，所以生产只支持单 API 副本。
+开发环境和生产环境都使用 PostgreSQL 保存控制面、Session 事件、记忆和队列状态。生产环境会拒绝可伪造身份头和内联任务队列。当前配置注册表尚未全部进入共享数据库，所以生产只支持单 API 副本。
 
 ```bash
 python3 -m venv .venv

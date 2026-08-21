@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -14,10 +13,8 @@ def main() -> int:
     settings = Settings(
         _env_file=None,
         model_provider="mock",
-        platform_db_path=Path("data/load-platform.sqlite3"),
-        session_event_path=Path("data/load-events.sqlite3"),
-        runtime_metrics_path=Path("data/load-metrics.sqlite3"),
     )
+    settings.validate_runtime()
     with TestClient(create_app(settings)) as client:
         def once(index: int) -> int:
             response = client.post(

@@ -2,20 +2,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ops_agent.agent_registry import AgentUpdateRequest, create_agent_registry, default_agent_definitions
+from ops_agent.agent_registry import AgentUpdateRequest, create_agent_registry
 from ops_agent.agent_skill_store import (
-    AgentSkillStore,
+    PostgresAgentSkillStore,
     seed_agents_from_defaults,
     seed_skills_from_paths,
 )
 from ops_agent.runtime.skills import SkillRegistry
 
 
-def test_agent_and_skill_store_roundtrip(tmp_path: Path):
-    store = AgentSkillStore(tmp_path / "platform.sqlite3")
+def test_agent_and_skill_store_roundtrip(tmp_path: Path, postgres_dsn):
+    store = PostgresAgentSkillStore(postgres_dsn)
     seeded = seed_agents_from_defaults(store)
-    assert seeded == len(default_agent_definitions())
-    assert store.agent_count() == seeded
+    assert seeded == store.agent_count()
+    assert seeded > 0
 
     registry = create_agent_registry(store=store)
     updated = registry.update(

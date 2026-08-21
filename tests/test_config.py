@@ -5,18 +5,17 @@ import pytest
 from ops_agent.config import Settings, apply_runtime_overrides, update_context_window
 
 
-def test_sqlite_is_default_and_paths_are_absolute(tmp_path: Path, monkeypatch):
+def test_postgres_is_required_and_paths_are_absolute(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     settings = Settings(_env_file=None)
-    assert settings.control_plane_backend == "sqlite"
-    assert settings.session_event_backend == "sqlite"
-    assert settings.platform_db_path.is_absolute()
-    assert settings.session_event_path.is_absolute()
+    assert settings.postgres_dsn
+    assert settings.runtime_overrides_path.is_absolute()
     assert settings.knowledge_spaces_path.is_absolute()
+    assert settings.auth_secret_path.is_absolute()
 
 
 def test_postgres_requires_dsn():
-    settings = Settings(_env_file=None, control_plane_backend="postgres", postgres_dsn="")
+    settings = Settings(_env_file=None, postgres_dsn="")
     with pytest.raises(ValueError, match="POSTGRES_DSN"):
         settings.validate_runtime()
 
@@ -29,7 +28,7 @@ def test_production_rejects_insecure_or_local_runtime():
             jwt_secret="shared-secret-at-least-thirty-two-characters",
         ).validate_runtime()
 
-    with pytest.raises(ValueError, match="CONTROL_PLANE_BACKEND"):
+    with pytest.raises(ValueError, match="SUBAGENT_QUEUE_BACKEND"):
         Settings(
             _env_file=None,
             app_env="production",
@@ -50,9 +49,6 @@ def test_production_configuration_closes_shared_state_requirements():
         jwt_issuer="issuer",
         jwt_audience="audience",
         account_bootstrap_token="bootstrap-token-that-is-long-enough",
-        control_plane_backend="postgres",
-        session_event_backend="postgres",
-        memory_backend="postgres",
         subagent_queue_backend="db",
     )
     settings.validate_runtime()

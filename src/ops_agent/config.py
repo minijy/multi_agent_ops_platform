@@ -36,14 +36,8 @@ class Settings(BaseSettings):
     app_api_key: str = ""
     app_replica_count: int = Field(default=1, ge=1, le=256)
 
-    control_plane_backend: Literal["sqlite", "postgres"] = "sqlite"
-    session_event_backend: Literal["sqlite", "postgres"] = "sqlite"
-    platform_db_path: Path = Path("data/platform.sqlite3")
-    session_event_path: Path = Path("data/session_events.sqlite3")
-    runtime_governance_path: Path = Path("data/runtime_governance.sqlite3")
-    runtime_metrics_path: Path = Path("data/runtime_metrics.sqlite3")
-    memory_db_path: Path = Path("data/memory.sqlite3")
     runtime_overrides_path: Path = Path("data/runtime_overrides.json")
+    auth_secret_path: Path = Path("data/platform.auth-secret")
     agent_definitions_path: Path = Path("data/agent_definitions.json")
     connection_definitions_path: Path = Path("data/connections.json")
     connection_secrets_path: Path = Path("data/connection_secrets.json")
@@ -107,7 +101,6 @@ class Settings(BaseSettings):
     analyst_mode: Literal["general", "specialized_parallel"] = "general"
     analyst_parallel_limit: int = Field(default=3, ge=1, le=3)
     memory_enabled: bool = True
-    memory_backend: Literal["sqlite", "postgres"] = "sqlite"
     memory_semantic_backend: Literal["local", "pgvector", "qdrant"] = "local"
     memory_embedding_provider: Literal["hash", "sentence_transformers"] = "hash"
     memory_embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
@@ -143,12 +136,8 @@ class Settings(BaseSettings):
     otel_exporter_otlp_endpoint: str = ""
 
     @field_validator(
-        "platform_db_path",
-        "session_event_path",
-        "runtime_governance_path",
-        "runtime_metrics_path",
-        "memory_db_path",
         "runtime_overrides_path",
+        "auth_secret_path",
         "agent_definitions_path",
         "connection_definitions_path",
         "connection_secrets_path",
@@ -160,10 +149,12 @@ class Settings(BaseSettings):
         "sandbox_workspace_root",
     )
     @classmethod
-    def make_sqlite_path_absolute(cls, value: Path) -> Path:
+    def make_path_absolute(cls, value: Path) -> Path:
         return value.expanduser().resolve()
 
     def validate_runtime(self) -> None:
+        if not self.postgres_dsn.strip():
+            raise ValueError("POSTGRES_DSN is required")
         if self.app_env == "production":
             if len(self.jwt_secret) < 32:
                 raise ValueError("JWT_SECRET with at least 32 characters is required in production")
@@ -171,12 +162,6 @@ class Settings(BaseSettings):
                 raise ValueError("JWT_REQUIRED=true is required in production")
             if not self.jwt_issuer or not self.jwt_audience:
                 raise ValueError("JWT_ISSUER and JWT_AUDIENCE are required in production")
-            if self.control_plane_backend != "postgres":
-                raise ValueError("CONTROL_PLANE_BACKEND=postgres is required in production")
-            if self.session_event_backend != "postgres":
-                raise ValueError("SESSION_EVENT_BACKEND=postgres is required in production")
-            if self.memory_enabled and self.memory_backend != "postgres":
-                raise ValueError("MEMORY_BACKEND=postgres is required in production")
             if self.subagent_queue_backend != "db":
                 raise ValueError("SUBAGENT_QUEUE_BACKEND=db is required in production")
             if self.app_replica_count != 1:
@@ -186,16 +171,6 @@ class Settings(BaseSettings):
                 )
         if self.jwt_required and not self.jwt_secret:
             raise ValueError("JWT_SECRET is required when JWT_REQUIRED=true")
-        postgres_backends = (
-            self.control_plane_backend,
-            self.session_event_backend,
-        )
-        if "postgres" in postgres_backends and not self.postgres_dsn:
-            raise ValueError("POSTGRES_DSN is required for postgres persistence")
-        if self.memory_backend == "postgres" and not self.postgres_dsn:
-            raise ValueError("POSTGRES_DSN is required for postgres memory persistence")
-        if self.memory_semantic_backend == "pgvector" and self.memory_backend != "postgres":
-            raise ValueError("MEMORY_BACKEND=postgres is required for pgvector memory search")
         # Qdrant is normally configured per tenant from the connector page.
         # Legacy environment fields remain an optional fallback for upgrades.
         if self.model_provider == "openai" and not self.openai_api_key:

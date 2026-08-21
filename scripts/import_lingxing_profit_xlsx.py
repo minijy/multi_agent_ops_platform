@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 import zipfile
@@ -207,11 +208,13 @@ def normalize_record(
     *,
     source_file: str,
     source_row: int,
+    tenant_id: str,
 ) -> dict[str, object | None]:
     index_by_header = {name: idx for idx, name in enumerate(header)}
     record: dict[str, object | None] = {
         "source_file": source_file,
         "source_row": source_row,
+        "tenant_id": tenant_id,
     }
     for field, label in COLUMN_MAP:
         idx = index_by_header.get(label)
@@ -235,6 +238,7 @@ def import_file(
     connection_dsn: str,
     xlsx_path: Path,
     *,
+    tenant_id: str,
     truncate: bool,
     batch_size: int,
 ) -> int:
@@ -245,11 +249,12 @@ def import_file(
             row,
             source_file=xlsx_path.name,
             source_row=index + 2,
+            tenant_id=tenant_id,
         )
         for index, row in enumerate(rows)
         if any(cell not in (None, "") for cell in row)
     ]
-    columns = ["source_file", "source_row", *[field for field, _ in COLUMN_MAP]]
+    columns = ["source_file", "source_row", "tenant_id", *[field for field, _ in COLUMN_MAP]]
     placeholders = ", ".join(f"%({column})s" for column in columns)
     statement = (
         "INSERT INTO lingxing_profit_order_transactions ("
@@ -286,9 +291,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--truncate", action="store_true", help="导入前清空表")
     parser.add_argument("--skip-ddl", action="store_true", help="跳过建表")
     parser.add_argument("--batch-size", type=int, default=500)
+    parser.add_argument(
+        "--tenant-id",
+        default=os.environ.get("OPS_TENANT_ID") or "default",
+        help="Tenant that owns the imported rows",
+    )
     args = parser.parse_args(argv)
-
-    import os
 
     dsn = args.dsn or os.environ.get("ANALYTICS_DSN") or os.environ.get("POSTGRES_DSN")
     if not dsn:
@@ -300,7 +308,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.skip_ddl:
         ensure_table(dsn, args.ddl)
-    count = import_file(dsn, args.xlsx, truncate=args.truncate, batch_size=args.batch_size)
+    count = import_file(
+        dsn,
+        args.xlsx,
+        tenant_id=args.tenant_id,
+        truncate=args.truncate,
+        batch_size=args.batch_size,
+    )
     print(f"imported {count} rows from {args.xlsx.name}")
     return 0
 

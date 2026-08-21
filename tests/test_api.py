@@ -16,15 +16,11 @@ from ops_agent.runtime.domain import ToolResult
 from ops_agent.workflows.amazon_finance.domain import AmazonFinanceQueryPlan
 
 
-def _settings(tmp_path: Path, **overrides) -> Settings:
+def _settings(tmp_path: Path, postgres_dsn: str, **overrides) -> Settings:
     configured_model = overrides.pop("configured_model", True)
     values = dict(
         _env_file=None,
-        platform_db_path=tmp_path / "platform.sqlite3",
-        session_event_path=tmp_path / "session-events.sqlite3",
-        runtime_governance_path=tmp_path / "runtime-governance.sqlite3",
-        runtime_metrics_path=tmp_path / "runtime-metrics.sqlite3",
-        memory_db_path=tmp_path / "memory.sqlite3",
+        postgres_dsn=postgres_dsn,
         agent_definitions_path=tmp_path / "agent-definitions.json",
         model_definitions_path=tmp_path / "model-definitions.json",
         connection_definitions_path=tmp_path / "connections.json",
@@ -82,11 +78,11 @@ def _create_qdrant_connection(client: TestClient) -> dict:
     return response.json()
 
 
-def test_health_and_dashboard(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path))) as client:
+def test_health_and_dashboard(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         health = client.get("/health").json()
         assert health["status"] == "ok"
-        assert health["session_events"] == "sqlite"
+        assert health["session_events"] == "postgres"
         assert health["agent_runtime"] == "ready"
         assert client.get("/health/live").json() == {"status": "ok"}
         readiness = client.get("/health/ready")
@@ -94,16 +90,16 @@ def test_health_and_dashboard(tmp_path: Path):
         assert readiness.json()["status"] == "ready"
 
 
-def test_stream_capacity_is_bounded(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path))) as client:
+def test_stream_capacity_is_bounded(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         client.app.state.stream_slots = threading.BoundedSemaphore(0)
         response = client.post("/v1/agent/query/stream", json={"question": "容量保护测试"})
         assert response.status_code == 429
         assert response.json()["detail"]["code"] == "stream_capacity_exceeded"
 
 
-def test_fresh_install_requires_model_configuration(tmp_path: Path):
-    settings = _settings(tmp_path, configured_model=False)
+def test_fresh_install_requires_model_configuration(tmp_path: Path, postgres_dsn):
+    settings = _settings(tmp_path, postgres_dsn, configured_model=False)
     with TestClient(create_app(settings)) as client:
         health = client.get("/health").json()
         assert health["model_provider"] == "unconfigured"
@@ -134,8 +130,8 @@ def test_fresh_install_requires_model_configuration(tmp_path: Path):
         assert "runtime" in dashboard
 
 
-def test_analytics_env_dsn_does_not_create_a_runtime_connection(tmp_path: Path):
-    settings = _settings(tmp_path, analytics_dsn="postgresql://legacy-env-value")
+def test_analytics_env_dsn_does_not_create_a_runtime_connection(tmp_path: Path, postgres_dsn):
+    settings = _settings(tmp_path, postgres_dsn, analytics_dsn="postgresql://legacy-env-value")
     with TestClient(create_app(settings)) as client:
         assert client.get("/v1/connections").json()["count"] == 0
         assert client.get("/health").json()["amazon_finance"] == "disabled"
@@ -147,8 +143,8 @@ def test_analytics_env_dsn_does_not_create_a_runtime_connection(tmp_path: Path):
         assert response.json()["detail"]["code"] == "connector_not_configured"
 
 
-def test_knowledge_space_uses_tenant_vector_connection(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path))) as client:
+def test_knowledge_space_uses_tenant_vector_connection(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         connection = _create_qdrant_connection(client)
         created = client.post(
             "/v1/knowledge/spaces",
@@ -207,8 +203,8 @@ def test_knowledge_space_uses_tenant_vector_connection(tmp_path: Path):
         assert client.delete(f"/v1/connections/{connection['id']}").status_code == 204
 
 
-def test_knowledge_space_rejects_non_vector_connection(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path))) as client:
+def test_knowledge_space_rejects_non_vector_connection(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         connection = _create_analytics_connection(client)
         response = client.post(
             "/v1/knowledge/spaces",
@@ -223,8 +219,8 @@ def test_knowledge_space_rejects_non_vector_connection(tmp_path: Path):
         assert "Qdrant" in response.json()["detail"]
 
 
-def test_api_rejects_invalid_key(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path, app_api_key="test-key"))) as client:
+def test_api_rejects_invalid_key(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn, app_api_key="test-key"))) as client:
         response = client.post(
             "/v1/agent/query",
             json={"question": "你好"},
@@ -232,13 +228,13 @@ def test_api_rejects_invalid_key(tmp_path: Path):
         assert response.status_code == 401
 
 
-def test_agent_session_tenant_isolation(tmp_path: Path):
+def test_agent_session_tenant_isolation(tmp_path: Path, postgres_dsn):
     tenant_headers = {
         "X-Tenant-ID": "tenant-a",
         "X-User-ID": "operator-a",
         "X-User-Role": "operator",
     }
-    with TestClient(create_app(_settings(tmp_path))) as client:
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         created = client.post(
             "/v1/agent/query",
             headers=tenant_headers,
@@ -255,7 +251,7 @@ def test_agent_session_tenant_isolation(tmp_path: Path):
         assert missing.status_code == 404
 
 
-def test_agent_session_user_isolation_within_tenant(tmp_path: Path):
+def test_agent_session_user_isolation_within_tenant(tmp_path: Path, postgres_dsn):
     owner = {
         "X-Tenant-ID": "tenant-a",
         "X-User-ID": "operator-a",
@@ -266,7 +262,7 @@ def test_agent_session_user_isolation_within_tenant(tmp_path: Path):
         "X-User-ID": "operator-b",
         "X-User-Role": "operator",
     }
-    with TestClient(create_app(_settings(tmp_path))) as client:
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         created = client.post(
             "/v1/agent/query",
             headers=owner,
@@ -336,8 +332,8 @@ def test_agent_session_user_isolation_within_tenant(tmp_path: Path):
         )
 
 
-def test_catalog_configuration_and_frontend_are_available(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path))) as client:
+def test_catalog_configuration_and_frontend_are_available(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         home = client.get("/")
         assert home.status_code == 200
         assert "SellerForge" in home.text
@@ -354,7 +350,7 @@ def test_catalog_configuration_and_frontend_are_available(tmp_path: Path):
 
         catalog = client.get("/v1/catalog").json()
         assert catalog["workflows"][0]["id"] == "function-calling-runtime-v1"
-        assert len(catalog["agents"]) == 9
+        assert len(catalog["agents"]) == 5
         assert catalog["agents"][0]["status"] in {"active", "disabled"}
         assert catalog["tools"]
         assert catalog["tool_bindings"]
@@ -364,7 +360,7 @@ def test_catalog_configuration_and_frontend_are_available(tmp_path: Path):
         assert connector_health.json() == {"items": [], "count": 0}
 
         agents = client.get("/v1/agents").json()
-        assert agents["count"] == 9
+        assert agents["count"] == 5
         detail = client.get("/v1/agents/function-calling-runtime").json()
         assert "system_prompt" in detail
         assert "delegate_subagent" in detail["role_tools"]
@@ -381,10 +377,10 @@ def test_catalog_configuration_and_frontend_are_available(tmp_path: Path):
         assert configuration["context_window"]["keep_recent_user_turns"] >= 1
 
 
-def test_non_admin_management_pages_are_api_restricted(tmp_path: Path):
+def test_non_admin_management_pages_are_api_restricted(tmp_path: Path, postgres_dsn):
     operator = {"X-User-ID": "operator-a", "X-User-Role": "operator"}
     approver = {"X-User-ID": "approver-a", "X-User-Role": "approver"}
-    with TestClient(create_app(_settings(tmp_path))) as client:
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         for path in (
             "/v1/dashboard/summary",
             "/v1/connections",
@@ -400,8 +396,8 @@ def test_non_admin_management_pages_are_api_restricted(tmp_path: Path):
         assert client.get("/v1/dashboard/summary", headers=approver).status_code == 403
 
 
-def test_direct_workflow_query_uses_shared_tool_executor(tmp_path: Path):
-    settings = _settings(tmp_path)
+def test_direct_workflow_query_uses_shared_tool_executor(tmp_path: Path, postgres_dsn):
+    settings = _settings(tmp_path, postgres_dsn)
     with TestClient(create_app(settings)) as client:
         _create_analytics_connection(client)
         captured = {}
@@ -436,10 +432,12 @@ def test_direct_workflow_query_uses_shared_tool_executor(tmp_path: Path):
         assert captured["context"].allowed_tool_names == frozenset({"amazon_finance_query"})
         assert captured["context"].connection_ids
         assert "seller_id" not in response.json()
+        assert response.json()["result_ref"].startswith("result-")
+        assert response.json()["result_endpoint"].startswith("/v1/agent/results/")
 
 
-def test_direct_query_skips_model_when_plan_provided(tmp_path: Path):
-    settings = _settings(tmp_path)
+def test_direct_query_skips_model_when_plan_provided(tmp_path: Path, postgres_dsn):
+    settings = _settings(tmp_path, postgres_dsn)
     with TestClient(create_app(settings)) as client:
         _create_analytics_connection(client)
 
@@ -485,8 +483,8 @@ def test_direct_query_skips_model_when_plan_provided(tmp_path: Path):
         assert profit.json()["plan"]["metric"] == "daily"
 
 
-def test_function_calling_runtime_and_event_api(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path))) as client:
+def test_function_calling_runtime_and_event_api(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         response = client.post(
             "/v1/agent/query",
             json={"question": "你好，请介绍当前 Runtime"},
@@ -514,8 +512,8 @@ def test_function_calling_runtime_and_event_api(tmp_path: Path):
         assert missing.status_code == 404
 
 
-def test_coordinator_delegates_amazon_question_to_analyst(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path))) as client:
+def test_coordinator_delegates_amazon_question_to_analyst(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         response = client.post(
             "/v1/agent/query",
             json={"question": "分析 2026年7月 Top 5 Amazon 费用"},
@@ -526,9 +524,10 @@ def test_coordinator_delegates_amazon_question_to_analyst(tmp_path: Path):
         assert "amazon_finance_query" not in tools
 
 
-def test_agent_query_stream_emits_tokens_and_done(tmp_path: Path):
+def test_agent_query_stream_emits_tokens_and_done(tmp_path: Path, postgres_dsn):
     settings = _settings(
         tmp_path,
+        postgres_dsn,
         app_api_key="",
         attachment_path=tmp_path / "attachments",
         skills_paths=str(tmp_path / "missing-skills"),
@@ -548,9 +547,10 @@ def test_agent_query_stream_emits_tokens_and_done(tmp_path: Path):
         assert "Function Calling" in body
 
 
-def test_agent_query_resume_replays_completed_session(tmp_path: Path):
+def test_agent_query_resume_replays_completed_session(tmp_path: Path, postgres_dsn):
     settings = _settings(
         tmp_path,
+        postgres_dsn,
         app_api_key="",
         attachment_path=tmp_path / "attachments",
         skills_paths=str(tmp_path / "missing-skills"),
@@ -586,8 +586,8 @@ def test_agent_query_resume_replays_completed_session(tmp_path: Path):
         assert len(users) == 1
 
 
-def test_agent_session_interrupt_signals_live_execution(tmp_path: Path):
-    settings = _settings(tmp_path)
+def test_agent_session_interrupt_signals_live_execution(tmp_path: Path, postgres_dsn):
+    settings = _settings(tmp_path, postgres_dsn)
     app = create_app(settings)
     session_id = "33333333-3333-3333-3333-333333333333"
     with TestClient(app) as client:
@@ -629,7 +629,7 @@ def test_agent_session_interrupt_signals_live_execution(tmp_path: Path):
         assert stopped.status_code == 409
 
 
-def test_attachment_and_skill_api(tmp_path: Path):
+def test_attachment_and_skill_api(tmp_path: Path, postgres_dsn):
     skill_dir = tmp_path / "skills" / "test-skill"
     skill_dir.mkdir(parents=True)
     skill_dir.joinpath("SKILL.md").write_text(
@@ -638,6 +638,7 @@ def test_attachment_and_skill_api(tmp_path: Path):
     )
     settings = _settings(
         tmp_path,
+        postgres_dsn,
         app_api_key="",
         attachment_path=tmp_path / "attachments",
         skills_paths=str(tmp_path / "skills"),
@@ -663,8 +664,8 @@ def test_attachment_and_skill_api(tmp_path: Path):
         assert skills.json()["items"][0]["name"] == "test-skill"
 
 
-def test_materialized_result_api_is_paginated_and_tenant_scoped(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path))) as client:
+def test_materialized_result_api_is_paginated_and_tenant_scoped(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         client.app.state.result_store.put(
             StoredResult(
                 result_ref="result-api-test",
@@ -701,9 +702,10 @@ def test_materialized_result_api_is_paginated_and_tenant_scoped(tmp_path: Path):
         assert hidden.status_code == 404
 
 
-def test_agent_api_returns_friendly_rate_limit_error(tmp_path: Path):
+def test_agent_api_returns_friendly_rate_limit_error(tmp_path: Path, postgres_dsn):
     settings = _settings(
         tmp_path,
+        postgres_dsn,
         app_api_key="",
         attachment_path=tmp_path / "attachments",
         skills_paths=str(tmp_path / "missing-skills"),
@@ -736,12 +738,11 @@ def test_agent_api_returns_friendly_rate_limit_error(tmp_path: Path):
         }
 
 
-def test_stage_three_subagent_and_governance_api(tmp_path: Path):
+def test_stage_three_subagent_and_governance_api(tmp_path: Path, postgres_dsn):
     settings = _settings(
         tmp_path,
+        postgres_dsn,
         app_api_key="",
-        session_event_path=tmp_path / "events.sqlite3",
-        runtime_governance_path=tmp_path / "governance.sqlite3",
         attachment_path=tmp_path / "attachments",
         sandbox_workspace_root=tmp_path,
         subagent_default_timeout_seconds=10,
@@ -801,7 +802,7 @@ def test_stage_three_subagent_and_governance_api(tmp_path: Path):
         assert configuration["agent_runtime"]["governance"]["subagent_max_depth"] == 3
 
 
-def test_workspace_file_download_stays_inside_sandbox(tmp_path: Path):
+def test_workspace_file_download_stays_inside_sandbox(tmp_path: Path, postgres_dsn):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     target = workspace / "file.txt"
@@ -810,6 +811,7 @@ def test_workspace_file_download_stays_inside_sandbox(tmp_path: Path):
     outside.write_text("nope", encoding="utf-8")
     settings = _settings(
         tmp_path,
+        postgres_dsn,
         app_api_key="",
         attachment_path=tmp_path / "attachments",
         sandbox_workspace_root=workspace,
@@ -842,9 +844,10 @@ def test_workspace_file_download_stays_inside_sandbox(tmp_path: Path):
         assert missing.status_code == 404
 
 
-def test_context_window_configuration_roundtrip(tmp_path: Path):
+def test_context_window_configuration_roundtrip(tmp_path: Path, postgres_dsn):
     settings = _settings(
         tmp_path,
+        postgres_dsn,
         app_api_key="",
         attachment_path=tmp_path / "attachments",
         runtime_overrides_path=tmp_path / "overrides.json",
@@ -874,9 +877,10 @@ def test_context_window_configuration_roundtrip(tmp_path: Path):
         assert denied.status_code == 403
 
 
-def test_analyst_runtime_mode_configuration_roundtrip(tmp_path: Path):
+def test_analyst_runtime_mode_configuration_roundtrip(tmp_path: Path, postgres_dsn):
     settings = _settings(
         tmp_path,
+        postgres_dsn,
         runtime_overrides_path=tmp_path / "overrides.json",
     )
     with TestClient(create_app(settings)) as client:
@@ -904,9 +908,10 @@ def test_analyst_runtime_mode_configuration_roundtrip(tmp_path: Path):
         assert denied.status_code == 403
 
 
-def test_agent_configuration_can_be_updated_by_admin(tmp_path: Path):
+def test_agent_configuration_can_be_updated_by_admin(tmp_path: Path, postgres_dsn):
     settings = _settings(
         tmp_path,
+        postgres_dsn,
         agent_definitions_path=tmp_path / "agent_definitions.json",
     )
     with TestClient(create_app(settings)) as client:
@@ -948,9 +953,10 @@ def test_agent_configuration_can_be_updated_by_admin(tmp_path: Path):
         assert bad_tool.status_code == 400
 
 
-def test_lingxing_connection_must_be_configured_on_connector_page(tmp_path: Path):
+def test_lingxing_connection_must_be_configured_on_connector_page(tmp_path: Path, postgres_dsn):
     settings = _settings(
         tmp_path,
+        postgres_dsn,
         agent_definitions_path=tmp_path / "agent_definitions.json",
     )
     with TestClient(create_app(settings)) as client:
@@ -964,8 +970,7 @@ def test_lingxing_connection_must_be_configured_on_connector_page(tmp_path: Path
                 }
             },
         )
-        assert patched.status_code == 400
-        assert patched.json()["detail"]["code"] == "connector_page_required"
+        assert patched.status_code == 404
 
         created = client.post(
             "/v1/connections",
@@ -983,9 +988,10 @@ def test_lingxing_connection_must_be_configured_on_connector_page(tmp_path: Path
         assert created.json()["app_secret"] == "********"
 
 
-def test_model_configuration_can_be_managed_by_admin(tmp_path: Path):
+def test_model_configuration_can_be_managed_by_admin(tmp_path: Path, postgres_dsn):
     settings = _settings(
         tmp_path,
+        postgres_dsn,
         model_definitions_path=tmp_path / "model_definitions.json",
         model_provider="mock",
     )
@@ -1118,9 +1124,10 @@ def test_model_configuration_can_be_managed_by_admin(tmp_path: Path):
         assert zhipu_body["reasoning_effort"] == "max"
 
 
-def test_remote_model_without_key_cannot_be_enabled_or_selected(tmp_path: Path):
+def test_remote_model_without_key_cannot_be_enabled_or_selected(tmp_path: Path, postgres_dsn):
     settings = _settings(
         tmp_path,
+        postgres_dsn,
         model_definitions_path=tmp_path / "model_definitions.json",
         model_provider="mock",
     )
@@ -1169,9 +1176,10 @@ def test_remote_model_without_key_cannot_be_enabled_or_selected(tmp_path: Path):
         assert "zhipu-disabled" in {item["id"] for item in client.get("/v1/models").json()["items"]}
 
 
-def test_kingdee_connection_must_be_configured_on_connector_page(tmp_path: Path):
+def test_kingdee_connection_must_be_configured_on_connector_page(tmp_path: Path, postgres_dsn):
     settings = _settings(
         tmp_path,
+        postgres_dsn,
         agent_definitions_path=tmp_path / "agent_definitions.json",
     )
     with TestClient(create_app(settings)) as client:
@@ -1189,8 +1197,7 @@ def test_kingdee_connection_must_be_configured_on_connector_page(tmp_path: Path)
                 },
             },
         )
-        assert patched.status_code == 400
-        assert patched.json()["detail"]["code"] == "connector_page_required"
+        assert patched.status_code == 404
 
         created = client.post(
             "/v1/connections",
@@ -1211,8 +1218,8 @@ def test_kingdee_connection_must_be_configured_on_connector_page(tmp_path: Path)
         assert created.json()["app_secret"] == "********"
 
 
-def test_connection_api_is_tenant_scoped_and_masks_credentials(tmp_path: Path):
-    settings = _settings(tmp_path)
+def test_connection_api_is_tenant_scoped_and_masks_credentials(tmp_path: Path, postgres_dsn):
+    settings = _settings(tmp_path, postgres_dsn)
     with TestClient(create_app(settings)) as client:
         created = client.put(
             "/v1/connections/analytics",
@@ -1227,8 +1234,8 @@ def test_connection_api_is_tenant_scoped_and_masks_credentials(tmp_path: Path):
         assert created.json()["dsn"] == "********"
         assert "seller_ids" not in created.json()["resource_scopes"]
         catalog = client.get("/v1/catalog").json()
-        amazon = next(item for item in catalog["agents"] if item["id"] == "amazon-finance-query")
-        assert amazon["status"] == "active"
+        tool_ids = {item["id"] for item in catalog["tools"]}
+        assert "amazon_finance_query" in tool_ids
 
         foreign = client.get("/v1/connections", headers={"X-Tenant-ID": "tenant-b"})
         assert foreign.status_code == 200
@@ -1242,8 +1249,8 @@ def test_connection_api_is_tenant_scoped_and_masks_credentials(tmp_path: Path):
         assert denied.status_code == 403
 
 
-def test_mysql_connection_can_be_configured_from_api(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path))) as client:
+def test_mysql_connection_can_be_configured_from_api(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         created = client.post(
             "/v1/connections",
             json={
@@ -1271,8 +1278,8 @@ def test_mysql_connection_can_be_configured_from_api(tmp_path: Path):
         assert "mysql://" in invalid.json()["detail"]
 
 
-def test_dingtalk_connection_and_tool_bindings_are_exposed_by_api(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path))) as client:
+def test_dingtalk_connection_and_tool_bindings_are_exposed_by_api(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         created = client.post(
             "/v1/connections",
             json={
@@ -1322,8 +1329,8 @@ def test_dingtalk_connection_and_tool_bindings_are_exposed_by_api(tmp_path: Path
             assert tools[tool_name]["risk"] == "medium"
 
 
-def test_tavily_connection_and_web_search_binding_are_exposed_by_api(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path))) as client:
+def test_tavily_connection_and_web_search_binding_are_exposed_by_api(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         created = client.post(
             "/v1/connections",
             json={
@@ -1352,8 +1359,8 @@ def test_tavily_connection_and_web_search_binding_are_exposed_by_api(tmp_path: P
         assert catalog["web_search"]["risk"] == "low"
 
 
-def test_multiple_connections_can_be_bound_to_individual_tools(tmp_path: Path):
-    settings = _settings(tmp_path)
+def test_multiple_connections_can_be_bound_to_individual_tools(tmp_path: Path, postgres_dsn):
+    settings = _settings(tmp_path, postgres_dsn)
     with TestClient(create_app(settings)) as client:
         first = client.post(
             "/v1/connections",
@@ -1400,8 +1407,8 @@ def test_multiple_connections_can_be_bound_to_individual_tools(tmp_path: Path):
         assert foreign_bind.status_code == 400
 
 
-def test_access_control_api_and_tool_binding_data_scope(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path))) as client:
+def test_access_control_api_and_tool_binding_data_scope(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         connection = client.post(
             "/v1/connections",
             json={
@@ -1523,7 +1530,7 @@ def test_access_control_api_and_tool_binding_data_scope(tmp_path: Path):
             "/v1/catalog",
             headers={"X-User-ID": "alice", "X-User-Role": "operator"},
         ).json()
-        expected = SYSTEM_DEFAULT_TOOL_NAMES - {"sandbox_read_only", "sandbox_workspace_write"} | {
+        expected = SYSTEM_DEFAULT_TOOL_NAMES | {
             "profit_report_query",
             "amazon_finance_query",
         }
@@ -1565,8 +1572,8 @@ def test_access_control_api_and_tool_binding_data_scope(tmp_path: Path):
         assert "delegate_subagent" in {tool["id"] for tool in admin_catalog["tools"]}
 
 
-def test_permission_denial_response_contains_actionable_hint(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path))) as client:
+def test_permission_denial_response_contains_actionable_hint(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         _create_analytics_connection(client)
         client.put(
             "/v1/access-control/users/alice",
@@ -1583,8 +1590,8 @@ def test_permission_denial_response_contains_actionable_hint(tmp_path: Path):
         assert "管理员" in detail["hint"]
 
 
-def test_memory_management_api_lifecycle(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path))) as client:
+def test_memory_management_api_lifecycle(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         created = client.post(
             "/v1/memories",
             json={
@@ -1626,8 +1633,8 @@ def test_memory_management_api_lifecycle(tmp_path: Path):
         assert all(item["content"] == "[deleted]" for item in remaining["items"])
 
 
-def test_memory_user_controls_and_temporary_session_mode(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path))) as client:
+def test_memory_user_controls_and_temporary_session_mode(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         headers = {"X-User-ID": "alice", "X-User-Role": "operator"}
         preferences = client.put(
             "/v1/memory/preferences",
@@ -1652,8 +1659,8 @@ def test_memory_user_controls_and_temporary_session_mode(tmp_path: Path):
         assert client.get("/v1/memory/items", headers=headers).json()["count"] == 0
 
 
-def test_memory_sources_policy_and_user_clear(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path))) as client:
+def test_memory_sources_policy_and_user_clear(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         headers = {"X-User-ID": "alice", "X-User-Role": "operator"}
         created = client.post(
             "/v1/memories",

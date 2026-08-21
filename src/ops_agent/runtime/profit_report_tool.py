@@ -7,6 +7,7 @@ from ..workflows.profit_report.domain import ProfitReportQueryPlan
 from ..workflows.profit_report.query_tool import ProfitReportQueryTool
 from .tools import ToolDefinition, ToolExecutionContext, ToolRegistry
 from .connectors import ConnectorRuntime
+from ..query_policy import enforce_query_plan
 from ..source_privacy import PROFIT_WAREHOUSE_SOURCE
 
 
@@ -38,7 +39,11 @@ def register_profit_report_tool(
         plan: ProfitReportQueryPlan,
         context: ToolExecutionContext,
     ) -> dict[str, Any]:
+        plan = enforce_query_plan("profit_report_query", plan, context.role)
+
         def query(client, connection):
+            if connection.tenant_id != context.tenant_id:
+                raise PermissionError("connector tenant does not match principal")
             store_name = connectors.resolve_tool_resource(
                 connection,
                 "profit_report_query",
@@ -56,7 +61,9 @@ def register_profit_report_tool(
                 statement_timeout_ms=settings.analytics_statement_timeout_ms,
                 engine=client.get("engine", "postgresql"),
             )
-            rows, total = query_tool.execute(resolved_plan)
+            rows, total = query_tool.execute(
+                resolved_plan, tenant_id=context.tenant_id
+            )
             return resolved_plan, rows, total
 
         resolved_plan, rows, total = connectors.execute_tool(

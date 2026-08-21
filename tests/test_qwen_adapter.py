@@ -79,7 +79,7 @@ def test_history_without_reasoning_keeps_answers():
     assert "reasoning_content" not in prepared[1]
 
 
-def test_qwen_adapter_streams_thinking_and_strips_history(monkeypatch):
+def test_qwen_adapter_streams_thinking_and_strips_history(monkeypatch, postgres_dsn):
     captured: dict[str, Any] = {}
 
     def create(**options):
@@ -144,7 +144,7 @@ def test_qwen_adapter_streams_thinking_and_strips_history(monkeypatch):
     assert tokens == [("reasoning", "先看历史再回答。"), ("content", "第二答")]
 
 
-def test_thinking_only_model_forces_thinking_and_collects_tool_calls(monkeypatch):
+def test_thinking_only_model_forces_thinking_and_collects_tool_calls(monkeypatch, postgres_dsn):
     captured: dict[str, Any] = {}
     tool_delta = SimpleNamespace(
         index=0,
@@ -198,7 +198,7 @@ def test_qwen_missing_key_uses_hard_stop():
     assert error.value.code == "model_api_key_missing"
 
 
-def test_qwen_registry_page_config_defaults_base_url(tmp_path):
+def test_qwen_registry_page_config_defaults_base_url(tmp_path, postgres_dsn):
     settings = _settings(model_definitions_path=tmp_path / "models.json")
     registry = create_model_registry(settings.model_definitions_path, settings)
     created = registry.create(
@@ -239,7 +239,7 @@ def test_assistant_message_does_not_echo_reasoning():
     assert message["reasoning_content"] == "内部思考"
 
 
-def test_qwen_native_vision_route(monkeypatch):
+def test_qwen_native_vision_route(monkeypatch, postgres_dsn):
     class FakeClient:
         def __init__(self, **_kwargs):
             self.chat = SimpleNamespace(completions=SimpleNamespace(create=lambda **_o: []))
@@ -261,7 +261,7 @@ def test_qwen_native_vision_route(monkeypatch):
     assert route.adapter_key == "qwen-vl"
 
 
-def test_qwen_image_route_requires_explicit_capability(monkeypatch):
+def test_qwen_image_route_requires_explicit_capability(monkeypatch, postgres_dsn):
     class FakeClient:
         def __init__(self, **_kwargs):
             self.chat = SimpleNamespace(

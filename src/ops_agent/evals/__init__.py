@@ -109,20 +109,21 @@ def default_eval_path() -> Path:
     return Path(__file__).resolve().parents[3] / "evals" / "golden.json"
 
 
-def _offline_runtime(event_path: Path) -> AgentRuntime:
+def _offline_runtime(postgres_dsn: str, *, agent_definitions_path: Path | None = None) -> AgentRuntime:
     from ..agent_registry import create_agent_registry
     from ..config import Settings
-    from ..runtime.governance import SQLiteRuntimeGovernanceStore
+    from ..runtime.governance import PostgresRuntimeGovernanceStore
     from ..runtime.model_router import create_model_router
-    from ..runtime.session_events import SQLiteSessionEventStore
+    from ..runtime.session_events import PostgresSessionEventStore
     from ..runtime.subagents import SubagentManager, register_subagent_tool
     from ..runtime.tools import ToolDefinition, ToolExecutor, ToolRegistry
     from ..workflows.amazon_finance.domain import AmazonFinanceQueryPlan
 
     settings = Settings(
         _env_file=None,
+        postgres_dsn=postgres_dsn,
         model_provider="mock",
-        agent_definitions_path=event_path.with_name("eval-agents.json"),
+        agent_definitions_path=agent_definitions_path or Path("data/eval-agents.json"),
     )
     registry = ToolRegistry()
     registry.register(
@@ -137,10 +138,8 @@ def _offline_runtime(event_path: Path) -> AgentRuntime:
             },
         )
     )
-    events = SQLiteSessionEventStore(event_path)
-    governance = SQLiteRuntimeGovernanceStore(
-        event_path.with_name("eval-governance.sqlite3")
-    )
+    events = PostgresSessionEventStore(postgres_dsn)
+    governance = PostgresRuntimeGovernanceStore(postgres_dsn)
     agent_registry = create_agent_registry(settings.agent_definitions_path)
     runtime = AgentRuntime(
         router=create_model_router(settings),
@@ -162,9 +161,25 @@ def _offline_runtime(event_path: Path) -> AgentRuntime:
     return runtime
 
 
+def _eval_postgres_dsn() -> str:
+    import os
+
+    for key in ("TEST_POSTGRES_DSN", "POSTGRES_DSN"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    env_path = Path.cwd() / ".env"
+    if env_path.is_file():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("POSTGRES_DSN="):
+                return stripped.split("=", 1)[1].strip().strip('"').strip("'")
+    return "postgresql://ops_agent:ops_agent@127.0.0.1:5432/ops_agent"
+
+
 def main() -> int:
     cases = load_eval_cases(default_eval_path())
-    runtime = _offline_runtime(Path("data/eval-events.sqlite3"))
+    runtime = _offline_runtime(_eval_postgres_dsn())
     failed = 0
     for case in cases:
         result = run_eval_case(runtime, case, tenant_id="eval")

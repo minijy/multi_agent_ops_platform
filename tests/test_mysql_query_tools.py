@@ -16,13 +16,15 @@ def test_amazon_finance_mysql_daily_statement_uses_mysql_date_function():
             start_date=date(2026, 1, 1),
             end_date=date(2026, 1, 31),
             limit=25,
-        )
+        ),
+        "tenant-a",
     )
 
     assert "DATE(t.posted_at)" in statement
     assert "AT TIME ZONE" not in statement
     assert "::date" not in statement
-    assert parameters == [date(2026, 1, 1), date(2026, 2, 1), 25]
+    assert "amazon_finance_released_transactions" in statement
+    assert parameters == ["tenant-a", date(2026, 1, 1), date(2026, 2, 1), 25]
 
 
 def test_profit_report_mysql_statement_keeps_filters_parameterized():
@@ -35,13 +37,16 @@ def test_profit_report_mysql_statement_keeps_filters_parameterized():
             store_name="Canada",
             currency_code="cad",
             limit=10,
-        )
+        ),
+        "tenant-a",
     )
 
-    assert "FROM lingxing_profit_order_transactions" in statement
+    assert "FROM lingxing_profit_report_query" in statement
+    assert "tenant_id = %s" in statement
     assert "currency_code = %s" in statement
     assert "store_name = %s" in statement
     assert parameters == [
+        "tenant-a",
         date(2026, 2, 1),
         date(2026, 3, 1),
         "CAD",

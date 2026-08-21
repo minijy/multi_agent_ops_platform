@@ -60,7 +60,6 @@ COORDINATOR_TOOLS = (
 
 ANALYST_TOOLS = (
     "load_skill",
-    "sandbox_read_only",
     "amazon_finance_query",
     "lingxing_profit_query",
     "profit_report_query",
@@ -105,8 +104,7 @@ ANALYST_SYSTEM_PROMPT = """
 - 当多个工具能完成同一业务目标时，直接选择当前可用的工具；不要让用户选择工具、数据库或技术数据源。
 - 首选工具不可用或调用失败时，如果当前工具列表中有等价工具，应自动改用等价工具；只有无任何可用工具时才说明权限或配置问题。
 - 禁止输出物理表名、Schema、DSN 或 SQL；最终结论末尾用“数据来源：<工具返回的业务来源名称>”标明来源。
-- 用户要下载表格时，生成 UTF-8 的 .csv；第一行中文表头，逗号分隔；不要给整段正文再套一层引号。
-- 生成文件后给出工作区内的 Markdown 链接，例如 [下载 report.csv](report.csv)。
+- 数字只引用工具返回的 summary / statistics / preview；完整行通过 result_ref 交给前端下载，不要在沙箱里重算或生成 CSV。
 - 不要委派，不要调用 delegate_subagent。
 """.strip()
 
@@ -119,8 +117,8 @@ AMAZON_FINANCE_ANALYST_PROMPT = """
 
 PROFIT_ANALYST_PROMPT = """
 你是 Profit Analyst。只处理订单利润、收入、成本、平台费、毛利和毛利率分析。
-只以系统当前列出的工具为准。实时数据可使用 lingxing_profit_query，分析仓数据可使用 profit_report_query；不要调用 Amazon 结算或 ERP 工具。
-用户未指定来源时，直接选择当前可用的利润工具；两者均可用时优先实时数据。首选调用失败且另一工具可用时，自动切换，不要让用户选择工具、数据库或技术数据源。
+只以系统当前列出的工具为准。未指定来源时优先 profit_report_query（分析仓聚合）；仅当用户明确要求实时接口时才用 lingxing_profit_query。不要调用 Amazon 结算或 ERP 工具。
+用户未指定来源时，直接选择当前可用的利润工具；不要让用户选择工具、数据库或技术数据源。首选调用失败且另一工具可用时，自动切换。
 禁止输出物理表名、Schema、DSN 或 SQL。回答末尾必须使用工具返回的业务名称标注“数据来源：…”。
 明确时间范围、币种和利润口径，发现数据源不一致时给出警告，不要编造数字或手写 SQL。
 不要继续委派，不要调用 delegate_subagent。

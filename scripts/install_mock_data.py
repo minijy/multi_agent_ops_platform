@@ -45,7 +45,7 @@ def reset_tables(dsn: str) -> None:
                 pass
 
 
-def import_amazon_pages(dsn: str) -> int:
+def import_amazon_pages(dsn: str, *, tenant_id: str) -> int:
     api_dir = FIXTURES / "api_pages"
     if not api_dir.is_dir():
         raise SystemExit(f"Missing fixture directory: {api_dir}")
@@ -60,13 +60,15 @@ def import_amazon_pages(dsn: str) -> int:
                 str(page),
                 "--database-url",
                 dsn,
+                "--tenant-id",
+                tenant_id,
             ],
             check=True,
         )
     return len(pages)
 
 
-def import_lingxing_xlsx(dsn: str, *, truncate: bool) -> int:
+def import_lingxing_xlsx(dsn: str, *, tenant_id: str, truncate: bool) -> int:
     xlsx_dir = FIXTURES / "xlsx"
     if not xlsx_dir.is_dir():
         raise SystemExit(f"Missing fixture directory: {xlsx_dir}")
@@ -82,6 +84,8 @@ def import_lingxing_xlsx(dsn: str, *, truncate: bool) -> int:
             dsn,
             "--ddl",
             str(LINGXING_DDL),
+            "--tenant-id",
+            tenant_id,
         ]
         if truncate and index == 0:
             command.append("--truncate")
@@ -118,6 +122,11 @@ def main() -> int:
         action="store_true",
         help="Run generate_mock_profit_data.py before import",
     )
+    parser.add_argument(
+        "--tenant-id",
+        default=os.environ.get("OPS_TENANT_ID") or "default",
+        help="Tenant stamped onto imported analytics rows",
+    )
     args = parser.parse_args()
 
     dsn = resolve_dsn(args.database_url or None)
@@ -140,16 +149,25 @@ def main() -> int:
     if not args.skip_amazon:
         if not AMAZON_SCHEMA.is_file():
             raise SystemExit(f"Missing schema file: {AMAZON_SCHEMA}")
-        page_count = import_amazon_pages(dsn)
+        page_count = import_amazon_pages(dsn, tenant_id=args.tenant_id)
         print(f"Imported {page_count} Amazon finance JSON pages")
     else:
         page_count = 0
 
     if not args.skip_lingxing:
-        xlsx_count = import_lingxing_xlsx(dsn, truncate=args.reset)
+        xlsx_count = import_lingxing_xlsx(
+            dsn, tenant_id=args.tenant_id, truncate=args.reset
+        )
         print(f"Imported {xlsx_count} LingXing profit XLSX files")
     else:
         xlsx_count = 0
+
+    views_sql = ROOT / "scripts" / "sql" / "analytics_query_views_rls.sql"
+    if views_sql.is_file():
+        subprocess.run(
+            ["psql", dsn, "-v", "ON_ERROR_STOP=1", "-f", str(views_sql)],
+            check=True,
+        )
 
     print(
         "Mock analytics install complete:",

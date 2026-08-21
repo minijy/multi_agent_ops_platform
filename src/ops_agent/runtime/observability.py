@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import sqlite3
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
@@ -195,126 +193,6 @@ def usage_from_events(events: list[Any]) -> dict[str, Any]:
         "estimated_cost_usd": estimate_cost(provider, model, prompt, completion),
     }
 
-
-class SQLiteMetricsStore:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS agent_runtime_metrics(
-                    metric_id TEXT PRIMARY KEY,
-                    session_id TEXT NOT NULL,
-                    tenant_id TEXT NOT NULL,
-                    user_id TEXT NOT NULL,
-                    provider TEXT NOT NULL,
-                    model TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    prompt_tokens INTEGER NOT NULL DEFAULT 0,
-                    completion_tokens INTEGER NOT NULL DEFAULT 0,
-                    total_tokens INTEGER NOT NULL DEFAULT 0,
-                    estimated_cost_usd REAL NOT NULL DEFAULT 0,
-                    latency_ms REAL NOT NULL DEFAULT 0,
-                    tool_calls INTEGER NOT NULL DEFAULT 0,
-                    tool_errors INTEGER NOT NULL DEFAULT 0,
-                    error_code TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_agent_runtime_metrics_tenant
-                    ON agent_runtime_metrics(tenant_id, created_at);
-                """
-            )
-
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30)
-        connection.row_factory = sqlite3.Row
-        return connection
-
-    def record(self, metric: TurnMetric) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO agent_runtime_metrics(
-                    metric_id, session_id, tenant_id, user_id, provider, model,
-                    status, prompt_tokens, completion_tokens, total_tokens,
-                    estimated_cost_usd, latency_ms, tool_calls, tool_errors,
-                    error_code, created_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    metric.metric_id,
-                    metric.session_id,
-                    metric.tenant_id,
-                    metric.user_id,
-                    metric.provider,
-                    metric.model,
-                    metric.status,
-                    metric.prompt_tokens,
-                    metric.completion_tokens,
-                    metric.total_tokens,
-                    metric.estimated_cost_usd,
-                    metric.latency_ms,
-                    metric.tool_calls,
-                    metric.tool_errors,
-                    metric.error_code,
-                    metric.created_at,
-                ),
-            )
-
-    def summarize(self, tenant_id: str) -> RuntimeMetricsSummary:
-        since = daily_window_start().isoformat()
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT status, COUNT(*) AS amount FROM agent_runtime_metrics
-                WHERE tenant_id=? GROUP BY status
-                """,
-                (tenant_id,),
-            ).fetchall()
-            models = connection.execute(
-                """
-                SELECT model, COUNT(*) AS amount FROM agent_runtime_metrics
-                WHERE tenant_id=? AND model != '' GROUP BY model
-                """,
-                (tenant_id,),
-            ).fetchall()
-            totals = connection.execute(
-                """
-                SELECT
-                    COUNT(*) AS turn_count,
-                    COALESCE(SUM(total_tokens), 0) AS total_tokens,
-                    COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost_usd,
-                    COALESCE(AVG(latency_ms), 0) AS avg_latency_ms,
-                    COALESCE(SUM(tool_calls), 0) AS tool_calls,
-                    COALESCE(SUM(tool_errors), 0) AS tool_errors
-                FROM agent_runtime_metrics WHERE tenant_id=?
-                """,
-                (tenant_id,),
-            ).fetchone()
-            daily_rows = connection.execute(
-                """
-                SELECT
-                    substr(created_at, 1, 10) AS day,
-                    COUNT(*) AS turns,
-                    COALESCE(SUM(CASE WHEN status IN ('failed','timed_out','cancelled','budget_exceeded') THEN 1 ELSE 0 END), 0) AS failed,
-                    COALESCE(SUM(total_tokens), 0) AS tokens,
-                    COALESCE(AVG(latency_ms), 0) AS avg_latency_ms
-                FROM agent_runtime_metrics
-                WHERE tenant_id=? AND substr(created_at, 1, 10) >= ?
-                GROUP BY substr(created_at, 1, 10)
-                ORDER BY 1
-                """,
-                (tenant_id, since),
-            ).fetchall()
-        return runtime_summary_from_aggregates(
-            by_status={row["status"]: int(row["amount"]) for row in rows},
-            by_model={row["model"]: int(row["amount"]) for row in models},
-            totals=totals,
-            daily_rows=daily_rows,
-        )
-
-
 class PostgresMetricsStore:
     def __init__(self, dsn: str) -> None:
         self.dsn = dsn
@@ -441,6 +319,4 @@ class PostgresMetricsStore:
 
 
 def create_metrics_store(settings: Settings) -> MetricsStore:
-    if settings.session_event_backend == "postgres":
-        return PostgresMetricsStore(settings.postgres_dsn)
-    return SQLiteMetricsStore(settings.runtime_metrics_path)
+    return PostgresMetricsStore(settings.postgres_dsn)

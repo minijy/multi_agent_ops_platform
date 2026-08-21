@@ -81,7 +81,7 @@ from ..runtime.auth import principal_from_bearer
 from ..runtime.model_errors import ModelProviderError
 from ..runtime.model_router import create_model_router_from_registry
 from ..runtime.memory import MemoryCreate, MemoryFeedback
-from ..runtime.result_store import result_page
+from ..runtime.result_store import materialize_tool_output, result_page
 from ..runtime.session_events import SessionEvent
 from ..runtime.connectors import ToolConnectionBindingRequest
 from ..runtime.stack import open_runtime_stack
@@ -715,8 +715,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "access denied",
                 "outside delegated scope",
                 "no authorized resources",
+                "cannot query",
+                "query window",
+                "unknown metric",
             )
-            if any(marker in reason.lower() for marker in permission_markers):
+            if any(marker in reason.lower() for marker in permission_markers) or reason.startswith(
+                "role "
+            ):
                 raise HTTPException(
                     status_code=403,
                     detail={
@@ -730,7 +735,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=reason)
         if not isinstance(result.output, dict):
             raise HTTPException(status_code=500, detail="tool returned an invalid response")
-        return result.output
+        return materialize_tool_output(
+            request.app.state.result_store,
+            result.output,
+            tenant_id=principal.tenant_id,
+            user_id=principal.user_id,
+            session_id=context.session_id,
+            tool_name=tool_name,
+            preview_rows=request.app.state.settings.context_tool_max_rows,
+        )
 
     def account_failure(error: AccountError) -> HTTPException:
         return HTTPException(status_code=error.status_code, detail=error.detail())
@@ -882,8 +895,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "status": "ok",
             "environment": settings.app_env,
-            "control_plane": settings.control_plane_backend,
-            "session_events": settings.session_event_backend,
+            "control_plane": "postgres",
+            "session_events": "postgres",
             "model_provider": (default_model.provider if default_model else "unconfigured"),
             "knowledge_backend": (
                 "configured"
@@ -928,7 +941,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "agent_runtime": "ready",
             "subagents": settings.subagent_queue_backend,
             "sandbox": (
-                "seatbelt"
+                request.app.state.sandbox_runner.restricted_backend
                 if request.app.state.sandbox_runner.restricted_available
                 else ("full-access" if settings.sandbox_full_access_enabled else "unavailable")
             ),
@@ -1828,6 +1841,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             rows=output.get("rows", []),
             summary=output.get("summary", ""),
             data_scope=output.get("data_scope", "RELEASED only"),
+            result_ref=output.get("result_ref") or "",
+            result_endpoint=output.get("result_endpoint") or "",
+            rows_truncated=bool(output.get("rows_truncated")),
+            returned_rows=int(output.get("returned_rows") or len(output.get("rows") or [])),
         )
         request.app.state.store.audit(
             tenant_id=principal.tenant_id,
@@ -1890,6 +1907,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             summary=output.get("summary", ""),
             total=output.get("total", 0),
             data_scope=output.get("data_scope", "金蝶云星空 · ExecuteBillQuery"),
+            result_ref=output.get("result_ref") or "",
+            result_endpoint=output.get("result_endpoint") or "",
+            rows_truncated=bool(output.get("rows_truncated")),
+            returned_rows=int(output.get("returned_rows") or len(output.get("rows") or [])),
         )
         request.app.state.store.audit(
             tenant_id=principal.tenant_id,
@@ -1950,6 +1971,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             summary=output.get("summary", ""),
             total=output.get("total", 0),
             data_scope=output.get("data_scope", "领星利润报表 · 订单维度 transaction 视图"),
+            result_ref=output.get("result_ref") or "",
+            result_endpoint=output.get("result_endpoint") or "",
+            rows_truncated=bool(output.get("rows_truncated")),
+            returned_rows=int(output.get("returned_rows") or len(output.get("rows") or [])),
         )
         request.app.state.store.audit(
             tenant_id=principal.tenant_id,
@@ -2016,6 +2041,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             summary=output.get("summary", ""),
             total_rows=output.get("total_rows", 0),
             data_scope=output.get("data_scope", "领星利润分析数据（分析仓）"),
+            result_ref=output.get("result_ref") or "",
+            result_endpoint=output.get("result_endpoint") or "",
+            rows_truncated=bool(output.get("rows_truncated")),
+            returned_rows=int(output.get("returned_rows") or len(output.get("rows") or [])),
         )
         request.app.state.store.audit(
             tenant_id=principal.tenant_id,
@@ -3941,8 +3970,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "environment": settings.app_env,
             "persistence": {
-                "control_plane": settings.control_plane_backend,
-                "session_events": settings.session_event_backend,
+                "control_plane": "postgres",
+                "session_events": "postgres",
             },
             "model": {
                 "configured": default_model is not None,
@@ -4044,6 +4073,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "subagent_max_attempts": settings.subagent_max_attempts,
                     "sandbox_restricted_available": (
                         request.app.state.sandbox_runner.restricted_available
+                    ),
+                    "sandbox_restricted_backend": (
+                        request.app.state.sandbox_runner.restricted_backend
                     ),
                     "sandbox_workspace_root": str(settings.sandbox_workspace_root),
                     "per_call_approval": True,

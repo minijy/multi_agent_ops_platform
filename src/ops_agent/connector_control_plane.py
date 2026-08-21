@@ -20,7 +20,7 @@ HYBRID_AGENT_TO_TOOL = {
 TOOL_TO_HYBRID = {tool_name: agent_id for agent_id, tool_name in HYBRID_AGENT_TO_TOOL.items()}
 
 DEFAULT_TOOL_BINDINGS = (
-    ToolBinding("amazon_finance_query", "analytics", "query_settlements"),
+    ToolBinding("amazon_finance_query", "analytics", "query_settlements", "marketplace_ids"),
     ToolBinding("profit_report_query", "analytics", "query_profit", "store_names"),
     ToolBinding("lingxing_profit_query", "lingxing", "profit_report", "sids"),
     ToolBinding("kingdee_cloud_query", "kingdee", "execute_bill_query"),

@@ -39,7 +39,7 @@ class SubagentQueueWorker:
         logger.info(
             "subagent worker started id=%s backend=%s",
             self.worker_id,
-            self.settings.session_event_backend,
+            "postgres",
         )
         while not self.stop_event.is_set():
             try:

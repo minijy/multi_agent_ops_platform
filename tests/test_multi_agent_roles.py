@@ -18,9 +18,9 @@ import pytest
 from ops_agent.runtime.agent_loop import AgentRuntime
 from ops_agent.runtime.domain import ModelTurn
 from ops_agent.runtime.domain import ToolCall
-from ops_agent.runtime.governance import SQLiteRuntimeGovernanceStore
+from ops_agent.runtime.governance import PostgresRuntimeGovernanceStore
 from ops_agent.runtime.model_router import ModelRouter
-from ops_agent.runtime.session_events import SQLiteSessionEventStore
+from ops_agent.runtime.session_events import PostgresSessionEventStore
 from ops_agent.runtime.subagents import (
     DelegateSpecialistsArguments,
     SubagentManager,
@@ -107,6 +107,7 @@ def test_coordinator_and_analyst_use_different_tool_allowlists(tmp_path):
     assert "amazon_finance_query" not in coordinator
     assert "delegate_subagent" not in analyst
     assert "amazon_finance_query" in analyst
+    assert "sandbox_read_only" not in analyst
     assert "profit_report_query" in analyst
 
 
@@ -220,7 +221,7 @@ def test_specialist_analysts_have_distinct_tool_allowlists(tmp_path):
     assert erp == {"load_skill"}
 
 
-def test_specialized_mode_rejects_general_and_limits_parallel_tasks(tmp_path):
+def test_specialized_mode_rejects_general_and_limits_parallel_tasks(tmp_path, postgres_dsn):
     settings = Settings(
         _env_file=None,
         analyst_mode="specialized_parallel",
@@ -231,7 +232,7 @@ def test_specialized_mode_rejects_general_and_limits_parallel_tasks(tmp_path):
     connections = _analytics_connections(tmp_path)
     tools = ToolRegistry()
     _register(tools, "load_skill")
-    events = SQLiteSessionEventStore(tmp_path / "events.sqlite3")
+    events = PostgresSessionEventStore(postgres_dsn)
     runtime = AgentRuntime(
         router=ModelRouter({"fake": AnswerAdapter()}, default_model_id="fake"),
         registry=tools,
@@ -245,7 +246,7 @@ def test_specialized_mode_rejects_general_and_limits_parallel_tasks(tmp_path):
         runtime=runtime,
         registry=tools,
         event_store=events,
-        governance_store=SQLiteRuntimeGovernanceStore(tmp_path / "gov.sqlite3"),
+        governance_store=PostgresRuntimeGovernanceStore(postgres_dsn),
         settings=settings,
     )
     try:
@@ -292,7 +293,7 @@ def test_specialized_mode_rejects_general_and_limits_parallel_tasks(tmp_path):
         manager.shutdown()
 
 
-def test_delegate_specialists_returns_all_parallel_results(tmp_path):
+def test_delegate_specialists_returns_all_parallel_results(tmp_path, postgres_dsn):
     settings = Settings(
         _env_file=None,
         analyst_mode="specialized_parallel",
@@ -302,7 +303,7 @@ def test_delegate_specialists_returns_all_parallel_results(tmp_path):
     agent_registry = create_agent_registry(settings.agent_definitions_path)
     tools = ToolRegistry()
     _register(tools, "load_skill")
-    events = SQLiteSessionEventStore(tmp_path / "events.sqlite3")
+    events = PostgresSessionEventStore(postgres_dsn)
     runtime = AgentRuntime(
         router=ModelRouter({"fake": AnswerAdapter()}, default_model_id="fake"),
         registry=tools,
@@ -315,7 +316,7 @@ def test_delegate_specialists_returns_all_parallel_results(tmp_path):
         runtime=runtime,
         registry=tools,
         event_store=events,
-        governance_store=SQLiteRuntimeGovernanceStore(tmp_path / "gov.sqlite3"),
+        governance_store=PostgresRuntimeGovernanceStore(postgres_dsn),
         settings=settings,
     )
     register_subagent_tool(tools, manager)
@@ -354,7 +355,7 @@ def test_delegate_specialists_returns_all_parallel_results(tmp_path):
         manager.shutdown()
 
 
-def test_delegate_specialists_allows_parallel_same_role(tmp_path):
+def test_delegate_specialists_allows_parallel_same_role(tmp_path, postgres_dsn):
     settings = Settings(
         _env_file=None,
         analyst_mode="specialized_parallel",
@@ -364,7 +365,7 @@ def test_delegate_specialists_allows_parallel_same_role(tmp_path):
     agent_registry = create_agent_registry(settings.agent_definitions_path)
     tools = ToolRegistry()
     _register(tools, "load_skill")
-    events = SQLiteSessionEventStore(tmp_path / "events.sqlite3")
+    events = PostgresSessionEventStore(postgres_dsn)
     runtime = AgentRuntime(
         router=ModelRouter({"fake": AnswerAdapter()}, default_model_id="fake"),
         registry=tools,
@@ -377,7 +378,7 @@ def test_delegate_specialists_allows_parallel_same_role(tmp_path):
         runtime=runtime,
         registry=tools,
         event_store=events,
-        governance_store=SQLiteRuntimeGovernanceStore(tmp_path / "gov.sqlite3"),
+        governance_store=PostgresRuntimeGovernanceStore(postgres_dsn),
         settings=settings,
     )
     register_subagent_tool(tools, manager)
@@ -410,7 +411,7 @@ def test_delegate_specialists_allows_parallel_same_role(tmp_path):
         manager.shutdown()
 
 
-def test_delegate_subagent_requires_analyst_role(tmp_path):
+def test_delegate_subagent_requires_analyst_role(tmp_path, postgres_dsn):
     settings = Settings(
         _env_file=None,
         agent_definitions_path=tmp_path / "agents.json",
@@ -427,7 +428,7 @@ def test_delegate_subagent_requires_analyst_role(tmp_path):
         "profit_report_query",
     ):
         _register(tools, name)
-    events = SQLiteSessionEventStore(tmp_path / "events.sqlite3")
+    events = PostgresSessionEventStore(postgres_dsn)
     runtime = AgentRuntime(
         router=ModelRouter({"fake": AnswerAdapter()}, default_model_id="fake"),
         registry=tools,
@@ -441,7 +442,7 @@ def test_delegate_subagent_requires_analyst_role(tmp_path):
         runtime=runtime,
         registry=tools,
         event_store=events,
-        governance_store=SQLiteRuntimeGovernanceStore(tmp_path / "gov.sqlite3"),
+        governance_store=PostgresRuntimeGovernanceStore(postgres_dsn),
         settings=settings,
     )
     try:
@@ -496,7 +497,7 @@ def test_delegate_subagent_requires_analyst_role(tmp_path):
         manager.shutdown()
 
 
-def test_coordinator_prompt_does_not_list_query_tools(tmp_path):
+def test_coordinator_prompt_does_not_list_query_tools(tmp_path, postgres_dsn):
     settings = Settings(
         _env_file=None,
         agent_definitions_path=tmp_path / "agents.json",
@@ -505,7 +506,7 @@ def test_coordinator_prompt_does_not_list_query_tools(tmp_path):
     tools = ToolRegistry()
     _register(tools, "delegate_subagent")
     _register(tools, "delegate_specialists")
-    events = SQLiteSessionEventStore(tmp_path / "events.sqlite3")
+    events = PostgresSessionEventStore(postgres_dsn)
     runtime = AgentRuntime(
         router=ModelRouter({"fake": AnswerAdapter()}, default_model_id="fake"),
         registry=tools,
@@ -545,7 +546,7 @@ def test_coordinator_prompt_does_not_list_query_tools(tmp_path):
     assert "不要按月份" in specialist_prompt
 
 
-def test_runtime_normalizes_legacy_delegations_into_bounded_batches(tmp_path):
+def test_runtime_normalizes_legacy_delegations_into_bounded_batches(tmp_path, postgres_dsn):
     settings = Settings(
         _env_file=None,
         analyst_mode="specialized_parallel",
@@ -557,7 +558,7 @@ def test_runtime_normalizes_legacy_delegations_into_bounded_batches(tmp_path):
         router=ModelRouter({"fake": AnswerAdapter()}, default_model_id="fake"),
         registry=tools,
         executor=ToolExecutor(tools),
-        event_store=SQLiteSessionEventStore(tmp_path / "events.sqlite3"),
+        event_store=PostgresSessionEventStore(postgres_dsn),
         settings=settings,
         agent_registry=create_agent_registry(settings.agent_definitions_path),
     )
@@ -600,7 +601,7 @@ def test_runtime_normalizes_legacy_delegations_into_bounded_batches(tmp_path):
     )
 
 
-def test_runtime_normalizes_rich_objectives_and_merges_same_specialist(tmp_path):
+def test_runtime_normalizes_rich_objectives_and_merges_same_specialist(tmp_path, postgres_dsn):
     settings = Settings(
         _env_file=None,
         analyst_mode="specialized_parallel",
@@ -611,7 +612,7 @@ def test_runtime_normalizes_rich_objectives_and_merges_same_specialist(tmp_path)
         router=ModelRouter({"fake": AnswerAdapter()}, default_model_id="fake"),
         registry=tools,
         executor=ToolExecutor(tools),
-        event_store=SQLiteSessionEventStore(tmp_path / "events.sqlite3"),
+        event_store=PostgresSessionEventStore(postgres_dsn),
         settings=settings,
         agent_registry=create_agent_registry(settings.agent_definitions_path),
     )
@@ -710,7 +711,7 @@ def test_general_mode_repairs_stale_specialist_delegation_call():
     assert "5 月结算费用" in repaired[0].arguments["objective"]
 
 
-def test_subagent_rejects_foreign_connection_and_widened_resource_scope(tmp_path):
+def test_subagent_rejects_foreign_connection_and_widened_resource_scope(tmp_path, postgres_dsn):
     settings = Settings(
         _env_file=None,
         agent_definitions_path=tmp_path / "agents.json",
@@ -734,7 +735,7 @@ def test_subagent_rejects_foreign_connection_and_widened_resource_scope(tmp_path
     )
     tools = ToolRegistry()
     _register(tools, "amazon_finance_query")
-    events = SQLiteSessionEventStore(tmp_path / "events.sqlite3")
+    events = PostgresSessionEventStore(postgres_dsn)
     runtime = AgentRuntime(
         router=ModelRouter({"fake": AnswerAdapter()}, default_model_id="fake"),
         registry=tools,
@@ -748,7 +749,7 @@ def test_subagent_rejects_foreign_connection_and_widened_resource_scope(tmp_path
         runtime=runtime,
         registry=tools,
         event_store=events,
-        governance_store=SQLiteRuntimeGovernanceStore(tmp_path / "gov.sqlite3"),
+        governance_store=PostgresRuntimeGovernanceStore(postgres_dsn),
         settings=settings,
     )
     try:

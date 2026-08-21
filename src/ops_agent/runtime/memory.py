@@ -5,11 +5,9 @@ import json
 import logging
 import math
 import re
-import sqlite3
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field, model_validator
@@ -219,24 +217,16 @@ class MemoryControlStore:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.postgres = settings.memory_backend == "postgres"
-        self.path = settings.memory_db_path
         self.dsn = settings.postgres_dsn
         self._initialize()
 
     def _connect(self):
-        if self.postgres:
-            import psycopg
-            from psycopg.rows import dict_row
+        import psycopg
+        from psycopg.rows import dict_row
 
-            return psycopg.connect(self.dsn, row_factory=dict_row)
-        connection = sqlite3.connect(self.path, timeout=30)
-        connection.row_factory = sqlite3.Row
-        return connection
+        return psycopg.connect(self.dsn, row_factory=dict_row)
 
     def _initialize(self) -> None:
-        if not self.postgres:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
         statements = (
             """CREATE TABLE IF NOT EXISTS memory_user_preferences(
             tenant_id TEXT NOT NULL,user_id TEXT NOT NULL,payload_json TEXT NOT NULL,
@@ -268,12 +258,11 @@ class MemoryControlStore:
         )
         with self._connect() as connection:
             for statement in statements:
-                if self.postgres:
-                    statement = statement.replace("payload_json TEXT", "payload_json JSONB").replace(
-                        "result_ids_json TEXT", "result_ids_json JSONB"
-                    ).replace("score_json TEXT", "score_json JSONB").replace(
-                        "metadata_json TEXT", "metadata_json JSONB"
-                    )
+                statement = statement.replace("payload_json TEXT", "payload_json JSONB").replace(
+                    "result_ids_json TEXT", "result_ids_json JSONB"
+                ).replace("score_json TEXT", "score_json JSONB").replace(
+                    "metadata_json TEXT", "metadata_json JSONB"
+                )
                 connection.execute(statement)
 
     @staticmethod
@@ -287,7 +276,7 @@ class MemoryControlStore:
         return value
 
     def preferences(self, tenant_id: str, user_id: str) -> UserMemoryPreferences:
-        marker = "%s" if self.postgres else "?"
+        marker = "%s"
         with self._connect() as connection:
             row = connection.execute(
                 f"SELECT payload_json FROM memory_user_preferences WHERE tenant_id={marker} AND user_id={marker}",
@@ -301,24 +290,18 @@ class MemoryControlStore:
         value = value.model_copy(update={"updated_at": _now()})
         payload = value.model_dump(mode="json")
         with self._connect() as connection:
-            if self.postgres:
-                from psycopg.types.json import Jsonb
+            from psycopg.types.json import Jsonb
 
-                connection.execute(
-                    """INSERT INTO memory_user_preferences(tenant_id,user_id,payload_json,updated_at)
-                    VALUES(%s,%s,%s,%s) ON CONFLICT(tenant_id,user_id) DO UPDATE SET
-                    payload_json=EXCLUDED.payload_json,updated_at=EXCLUDED.updated_at""",
-                    (value.tenant_id, value.user_id, Jsonb(payload), value.updated_at),
-                )
-            else:
-                connection.execute(
-                    "INSERT OR REPLACE INTO memory_user_preferences VALUES(?,?,?,?)",
-                    (value.tenant_id, value.user_id, self._json(payload), value.updated_at),
-                )
+            connection.execute(
+                """INSERT INTO memory_user_preferences(tenant_id,user_id,payload_json,updated_at)
+                VALUES(%s,%s,%s,%s) ON CONFLICT(tenant_id,user_id) DO UPDATE SET
+                payload_json=EXCLUDED.payload_json,updated_at=EXCLUDED.updated_at""",
+                (value.tenant_id, value.user_id, Jsonb(payload), value.updated_at),
+            )
         return value
 
     def policy(self, tenant_id: str) -> TenantMemoryPolicy:
-        marker = "%s" if self.postgres else "?"
+        marker = "%s"
         with self._connect() as connection:
             row = connection.execute(
                 f"SELECT payload_json FROM memory_tenant_policies WHERE tenant_id={marker}",
@@ -340,20 +323,14 @@ class MemoryControlStore:
         value = value.model_copy(update={"updated_at": _now()})
         payload = value.model_dump(mode="json")
         with self._connect() as connection:
-            if self.postgres:
-                from psycopg.types.json import Jsonb
+            from psycopg.types.json import Jsonb
 
-                connection.execute(
-                    """INSERT INTO memory_tenant_policies(tenant_id,payload_json,updated_at)
-                    VALUES(%s,%s,%s) ON CONFLICT(tenant_id) DO UPDATE SET
-                    payload_json=EXCLUDED.payload_json,updated_at=EXCLUDED.updated_at""",
-                    (value.tenant_id, Jsonb(payload), value.updated_at),
-                )
-            else:
-                connection.execute(
-                    "INSERT OR REPLACE INTO memory_tenant_policies VALUES(?,?,?)",
-                    (value.tenant_id, self._json(payload), value.updated_at),
-                )
+            connection.execute(
+                """INSERT INTO memory_tenant_policies(tenant_id,payload_json,updated_at)
+                VALUES(%s,%s,%s) ON CONFLICT(tenant_id) DO UPDATE SET
+                payload_json=EXCLUDED.payload_json,updated_at=EXCLUDED.updated_at""",
+                (value.tenant_id, Jsonb(payload), value.updated_at),
+            )
         return value
 
     def event(
@@ -365,19 +342,12 @@ class MemoryControlStore:
             payload or {}, _now(),
         )
         with self._connect() as connection:
-            if self.postgres:
-                from psycopg.types.json import Jsonb
+            from psycopg.types.json import Jsonb
 
-                connection.execute(
-                    "INSERT INTO memory_events VALUES(%s,%s,%s,%s,%s,%s,%s)",
-                    (*values[:5], Jsonb(values[5]), values[6]),
-                )
-            else:
-                connection.execute(
-                    "INSERT INTO memory_events VALUES(?,?,?,?,?,?,?)",
-                    (*values[:5], self._json(values[5]), values[6]),
-                )
-
+            connection.execute(
+                "INSERT INTO memory_events VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                (*values[:5], Jsonb(values[5]), values[6]),
+            )
     def provenance(
         self, item: MemoryItem, source_excerpt: str, metadata: dict[str, Any] | None = None
     ) -> None:
@@ -387,25 +357,16 @@ class MemoryControlStore:
             item.source_session_id, source_excerpt[:1000], metadata or {}, _now(),
         )
         with self._connect() as connection:
-            if self.postgres:
-                from psycopg.types.json import Jsonb
+            from psycopg.types.json import Jsonb
 
-                connection.execute(
-                    """INSERT INTO memory_sources(
-                    id,tenant_id,memory_id,source_type,source_id,source_excerpt,metadata_json,created_at)
-                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
-                    (*values[:6], Jsonb(values[6]), values[7]),
-                )
-            else:
-                connection.execute(
-                    """INSERT INTO memory_sources(
-                    id,tenant_id,memory_id,source_type,source_id,source_excerpt,metadata_json,created_at)
-                    VALUES(?,?,?,?,?,?,?,?)""",
-                    (*values[:6], self._json(values[6]), values[7]),
-                )
-
+            connection.execute(
+                """INSERT INTO memory_sources(
+                id,tenant_id,memory_id,source_type,source_id,source_excerpt,metadata_json,created_at)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (*values[:6], Jsonb(values[6]), values[7]),
+            )
     def sources(self, tenant_id: str, memory_id: str) -> list[dict[str, Any]]:
-        marker = "%s" if self.postgres else "?"
+        marker = "%s"
         with self._connect() as connection:
             rows = connection.execute(
                 f"""SELECT id,source_type,source_id,source_excerpt,metadata_json,created_at
@@ -441,30 +402,20 @@ class MemoryControlStore:
                     f"mrel-{uuid.uuid4().hex}", item.tenant_id, item.id,
                     "mentions", "entity", entity, item.confidence, {}, _now(),
                 )
-                if self.postgres:
-                    from psycopg.types.json import Jsonb
+                from psycopg.types.json import Jsonb
 
-                    connection.execute(
-                        """INSERT INTO memory_relations(
-                        id,tenant_id,source_memory_id,relation_type,target_type,target_id,
-                        confidence,metadata_json,created_at)
-                        VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                        (*values[:7], Jsonb(values[7]), values[8]),
-                    )
-                else:
-                    connection.execute(
-                        """INSERT INTO memory_relations(
-                        id,tenant_id,source_memory_id,relation_type,target_type,target_id,
-                        confidence,metadata_json,created_at)
-                        VALUES(?,?,?,?,?,?,?,?,?)""",
-                        (*values[:7], self._json(values[7]), values[8]),
-                    )
-
+                connection.execute(
+                    """INSERT INTO memory_relations(
+                    id,tenant_id,source_memory_id,relation_type,target_type,target_id,
+                    confidence,metadata_json,created_at)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (*values[:7], Jsonb(values[7]), values[8]),
+                )
     def entity_matches(self, tenant_id: str, query: str) -> set[str]:
         entities = sorted(self._entities(query))
         if not entities:
             return set()
-        marker = "%s" if self.postgres else "?"
+        marker = "%s"
         placeholders = ",".join(marker for _ in entities)
         with self._connect() as connection:
             rows = connection.execute(
@@ -484,25 +435,18 @@ class MemoryControlStore:
             hashlib.sha256(query.encode("utf-8")).hexdigest(), ids, scores, _now(),
         )
         with self._connect() as connection:
-            if self.postgres:
-                from psycopg.types.json import Jsonb
+            from psycopg.types.json import Jsonb
 
-                connection.execute(
-                    "INSERT INTO memory_retrieval_logs VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
-                    (*values[:5], Jsonb(ids), Jsonb(scores), values[7]),
-                )
-            else:
-                connection.execute(
-                    "INSERT INTO memory_retrieval_logs VALUES(?,?,?,?,?,?,?,?)",
-                    (*values[:5], self._json(ids), self._json(scores), values[7]),
-                )
-
+            connection.execute(
+                "INSERT INTO memory_retrieval_logs VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+                (*values[:5], Jsonb(ids), Jsonb(scores), values[7]),
+            )
     def add_feedback(
         self, tenant_id: str, user_id: str, value: MemoryFeedback
     ) -> dict[str, Any]:
         identifier = f"mfb-{uuid.uuid4().hex}"
         now = _now()
-        markers = "%s,%s,%s,%s,%s,%s,%s" if self.postgres else "?,?,?,?,?,?,?"
+        markers = "%s,%s,%s,%s,%s,%s,%s"
         with self._connect() as connection:
             connection.execute(
                 f"INSERT INTO memory_feedback VALUES({markers})",
@@ -513,7 +457,7 @@ class MemoryControlStore:
     def outbox(self, tenant_id: str, memory_id: str, operation: str) -> str:
         identifier = f"mout-{uuid.uuid4().hex}"
         now = _now()
-        markers = "%s,%s,%s,%s,%s,%s,%s,%s,%s" if self.postgres else "?,?,?,?,?,?,?,?,?"
+        markers = "%s,%s,%s,%s,%s,%s,%s,%s,%s"
         with self._connect() as connection:
             connection.execute(
                 f"INSERT INTO memory_outbox VALUES({markers})",
@@ -522,7 +466,7 @@ class MemoryControlStore:
         return identifier
 
     def finish_outbox(self, identifier: str, error: str | None = None) -> None:
-        marker = "%s" if self.postgres else "?"
+        marker = "%s"
         with self._connect() as connection:
             connection.execute(
                 f"UPDATE memory_outbox SET status={marker},attempts=attempts+1,last_error={marker},updated_at={marker} WHERE id={marker}",
@@ -530,8 +474,8 @@ class MemoryControlStore:
             )
 
     def failed_outbox(self, tenant_id: str, limit: int = 100) -> list[dict[str, Any]]:
-        marker = "%s" if self.postgres else "?"
-        limit_marker = "%s" if self.postgres else "?"
+        marker = "%s"
+        limit_marker = "%s"
         with self._connect() as connection:
             rows = connection.execute(
                 f"""SELECT * FROM memory_outbox WHERE tenant_id={marker}
@@ -541,7 +485,7 @@ class MemoryControlStore:
         return [dict(row) for row in rows]
 
     def metrics(self, tenant_id: str) -> dict[str, int]:
-        marker = "%s" if self.postgres else "?"
+        marker = "%s"
         with self._connect() as connection:
             events = connection.execute(
                 f"SELECT COUNT(*) AS count FROM memory_events WHERE tenant_id={marker}", (tenant_id,)
@@ -562,7 +506,7 @@ class MemoryControlStore:
         return [str(row["tenant_id"]) for row in rows]
 
     def scrub_auxiliary(self, tenant_id: str, memory_id: str) -> None:
-        marker = "%s" if self.postgres else "?"
+        marker = "%s"
         with self._connect() as connection:
             connection.execute(
                 f"DELETE FROM memory_sources WHERE tenant_id={marker} AND memory_id={marker}",
@@ -596,157 +540,6 @@ def _quality_score(content: str, confidence: float, source: str) -> float:
     length_score = min(1.0, len(content.strip()) / 80)
     source_score = 1.0 if source in {"explicit", "corrected", "admin"} else 0.65
     return round(min(1.0, 0.45 * confidence + 0.3 * length_score + 0.25 * source_score), 4)
-
-
-class SQLiteMemoryStore:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS memory_items(
-                    id TEXT PRIMARY KEY,
-                    tenant_id TEXT NOT NULL,
-                    user_id TEXT,
-                    agent_id TEXT,
-                    scope TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    key TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    importance REAL NOT NULL,
-                    confidence REAL NOT NULL,
-                    quality_score REAL NOT NULL,
-                    source TEXT NOT NULL,
-                    source_session_id TEXT,
-                    conflict_group_id TEXT,
-                    supersedes_id TEXT,
-                    correction_of TEXT,
-                    version INTEGER NOT NULL,
-                    expires_at TEXT,
-                    metadata_json TEXT NOT NULL,
-                    embedding_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    deleted_at TEXT
-                );
-                CREATE INDEX IF NOT EXISTS idx_memory_items_access
-                    ON memory_items(tenant_id,status,scope,user_id,agent_id,updated_at);
-                CREATE INDEX IF NOT EXISTS idx_memory_items_key
-                    ON memory_items(tenant_id,key,status);
-                """
-            )
-
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30)
-        connection.row_factory = sqlite3.Row
-        return connection
-
-    @staticmethod
-    def _from_row(row: sqlite3.Row) -> MemoryItem:
-        payload = dict(row)
-        payload["metadata"] = json.loads(payload.pop("metadata_json") or "{}")
-        payload["embedding"] = json.loads(payload.pop("embedding_json") or "[]")
-        return MemoryItem.model_validate(payload)
-
-    def put(self, item: MemoryItem) -> MemoryItem:
-        payload = item.model_dump()
-        payload["embedding"] = item.embedding
-        columns = [
-            "id", "tenant_id", "user_id", "agent_id", "scope", "kind", "key",
-            "content", "status", "importance", "confidence", "quality_score",
-            "source", "source_session_id", "conflict_group_id", "supersedes_id",
-            "correction_of", "version", "expires_at", "metadata_json",
-            "embedding_json", "created_at", "updated_at", "deleted_at",
-        ]
-        values = [
-            payload.get(name)
-            if name not in {"metadata_json", "embedding_json"}
-            else json.dumps(
-                payload["metadata"] if name == "metadata_json" else item.embedding,
-                ensure_ascii=False,
-            )
-            for name in columns
-        ]
-        with self._connect() as connection:
-            connection.execute(
-                f"INSERT OR REPLACE INTO memory_items({','.join(columns)}) VALUES({','.join('?' for _ in columns)})",
-                values,
-            )
-        return self.get(item.tenant_id, item.id) or item
-
-    def get(self, tenant_id: str, memory_id: str) -> MemoryItem | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM memory_items WHERE tenant_id=? AND id=?",
-                (tenant_id, memory_id),
-            ).fetchone()
-        return self._from_row(row) if row else None
-
-    def list_items(self, tenant_id: str) -> list[MemoryItem]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM memory_items WHERE tenant_id=? ORDER BY updated_at DESC",
-                (tenant_id,),
-            ).fetchall()
-        return [self._from_row(row) for row in rows]
-
-    def searchable_items(
-        self, tenant_id: str, user_id: str, agent_id: str | None, scopes: set[str]
-    ) -> list[MemoryItem]:
-        clauses: list[str] = []
-        values: list[Any] = [tenant_id, _now()]
-        if {"user", "profile"} & scopes:
-            selected = [scope for scope in ("user", "profile") if scope in scopes]
-            clauses.append(f"(scope IN ({','.join('?' for _ in selected)}) AND user_id=?)")
-            values.extend(selected)
-            values.append(user_id)
-        if "tenant" in scopes:
-            clauses.append("scope='tenant'")
-        if "agent" in scopes and agent_id:
-            clauses.append("(scope='agent' AND agent_id=?)")
-            values.append(agent_id)
-        if not clauses:
-            return []
-        sql = (
-            "SELECT * FROM memory_items WHERE tenant_id=? AND status='active' "
-            "AND (expires_at IS NULL OR expires_at>?) AND ("
-            + " OR ".join(clauses)
-            + ") ORDER BY updated_at DESC LIMIT 5000"
-        )
-        with self._connect() as connection:
-            rows = connection.execute(sql, values).fetchall()
-        return [self._from_row(row) for row in rows]
-
-    def scrub(self, tenant_id: str, memory_id: str, reason: str) -> bool:
-        now = _now()
-        with self._connect() as connection:
-            changed = connection.execute(
-                """UPDATE memory_items SET content='[deleted]',status='deleted',
-                embedding_json='[]',metadata_json=?,deleted_at=?,updated_at=?
-                WHERE tenant_id=? AND id=?""",
-                (json.dumps({"deletion_reason": reason}, ensure_ascii=False), now, now, tenant_id, memory_id),
-            ).rowcount
-        return changed > 0
-
-    def hard_delete_user(self, tenant_id: str, user_id: str) -> int:
-        with self._connect() as connection:
-            return connection.execute(
-                "DELETE FROM memory_items WHERE tenant_id=? AND user_id=?",
-                (tenant_id, user_id),
-            ).rowcount
-
-    def semantic_scores(
-        self, tenant_id: str, memory_ids: list[str], vector: list[float]
-    ) -> dict[str, float]:
-        wanted = set(memory_ids)
-        return {
-            item.id: _cosine(vector, item.embedding)
-            for item in self.list_items(tenant_id)
-            if item.id in wanted
-        }
-
 
 class PostgresMemoryStore:
     def __init__(self, dsn: str, *, enable_pgvector: bool = False) -> None:
@@ -1841,13 +1634,10 @@ def register_memory_tools(registry: ToolRegistry, service: MemoryService) -> Non
 
 
 def create_memory_service(settings: Settings, connection_registry: Any = None) -> MemoryService:
-    if settings.memory_backend == "postgres":
-        store: MemoryStore = PostgresMemoryStore(
-            settings.postgres_dsn,
-            enable_pgvector=settings.memory_semantic_backend == "pgvector",
-        )
-    else:
-        store = SQLiteMemoryStore(settings.memory_db_path)
+    store: MemoryStore = PostgresMemoryStore(
+        settings.postgres_dsn,
+        enable_pgvector=settings.memory_semantic_backend == "pgvector",
+    )
     return MemoryService(store, settings, connection_registry)
 
 

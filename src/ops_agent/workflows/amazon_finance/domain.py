@@ -41,3 +41,7 @@ class AmazonFinanceQueryResponse(BaseModel):
     rows: list[dict[str, Any]]
     summary: str
     data_scope: str = "RELEASED only"
+    result_ref: str = ""
+    result_endpoint: str = ""
+    rows_truncated: bool = False
+    returned_rows: int = 0

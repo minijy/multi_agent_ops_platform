@@ -30,12 +30,26 @@ def test_mock_model_defaults_to_overview_without_dates():
     assert plan.end_date is None
 
 
-def test_query_plan_covers_all_connection_data_without_seller_parameter():
+def test_query_plan_injects_tenant_and_skips_seller_parameter():
     statement, parameters = AmazonFinanceQueryTool("postgresql://unused")._statement(
-        AmazonFinanceQueryPlan(metric="overview")
+        AmazonFinanceQueryPlan(metric="overview"),
+        "tenant-a",
     )
     sql_text = statement.as_string(None)
 
+    assert "tenant_id = %s" in sql_text
+    assert "amazon_finance_released_transactions" in sql_text
     assert "WHERE t.seller_id" not in sql_text
-    assert "GROUP BY t.currency_code" in sql_text
-    assert parameters == []
+    assert parameters == ["tenant-a"]
+
+
+def test_query_plan_injects_binding_marketplace_ids():
+    statement, parameters = AmazonFinanceQueryTool("postgresql://unused")._statement(
+        AmazonFinanceQueryPlan(metric="overview"),
+        "tenant-a",
+        ("ATVPDKIKX0DER",),
+    )
+    sql_text = statement.as_string(None)
+
+    assert "marketplace_id = ANY(%s)" in sql_text
+    assert parameters == ["tenant-a", ["ATVPDKIKX0DER"]]

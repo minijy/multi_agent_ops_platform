@@ -51,7 +51,7 @@ class LingXingProfitQueryPlan(BaseModel):
     end_date: date
     currency_code: CurrencyCode = ""
     offset: int = Field(default=0, ge=0)
-    length: int = Field(default=20, ge=1, le=1000)
+    length: int = Field(default=20, ge=1, le=100)
     sids: list[int] = Field(default_factory=list)
     search_date_field: SearchDateField = "posted_date_locale"
     order_status: str = "Disbursed"
@@ -71,3 +71,7 @@ class LingXingProfitQueryResponse(BaseModel):
     summary: str
     total: int
     data_scope: str = "领星利润报表 · 订单维度 transaction 视图"
+    result_ref: str = ""
+    result_endpoint: str = ""
+    rows_truncated: bool = False
+    returned_rows: int = 0

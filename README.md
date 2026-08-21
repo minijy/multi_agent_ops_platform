@@ -2,10 +2,12 @@
 
 > 完整的项目定位、总体架构、模块说明、部署流程与能力边界请参阅
 > [SellerForge 项目介绍](docs/PROJECT_INTRODUCTION.md)。
+> 代码级模块地图、启动装配、LangGraph 调用栈与存储分层见
+> [内部代码结构与流转分析](docs/INTERNAL_ARCHITECTURE.md)。
 
 面向生产化演进的 **Agent Runtime 平台**：通用 Function Calling 对话、工具审批、Subagent 外部队列、沙箱执行、可观测性，跨境电商 BI 查询 Agent（Amazon 结算、领星利润、金蝶云星空），以及 Coordinator 的知识库检索与公开网页搜索（Tavily）。项目提供商用控制台形态的 Dashboard、审批中心、Agent 对话、知识库、审计和设置页面。
 
-项目支持两种运行形态：`.env.example` 使用 SQLite + mock 模型，完全离线即可运行；`APP_ENV=production` 会强制控制面、Session、长期记忆和任务队列使用 PostgreSQL，并强制 JWT 认证。分析类 Agent 可连接 PostgreSQL 或 MySQL 分析库；虚构样本数据由脚本生成后导入，不随仓库分发。
+开发环境需要 PostgreSQL（可用 `docker compose -f docker-compose.postgres.yml up -d`）和页面配置的模型；`APP_ENV=production` 会强制 JWT 认证，并把子任务队列切到数据库。分析类 Agent 可连接 PostgreSQL 或 MySQL 分析库；虚构样本数据由脚本生成后导入，不随仓库分发。
 
 ## 系统架构
 
@@ -40,8 +42,7 @@ Connector Tool 返回表格数据时，Runtime 会把完整结果写入独立的
 - 模型只接收已计算指标、计算引擎与分组口径，不读取全量明细重新计算。
 - 控制台可通过 `result_ref` 分页查看完整明细；单页最多 200 行。
 
-Result Store 与 Session Event Store 使用相同后端：本地为 SQLite，生产为
-PostgreSQL。删除 Session 时会同步删除父、子 Session 对应的物化结果。
+Result Store 与 Session Event Store 都写入 PostgreSQL。删除 Session 时会同步删除父、子 Session 对应的物化结果。
 
 ## 内置 Agent
 
@@ -55,16 +56,18 @@ PostgreSQL。删除 Session 时会同步删除父、子 Session 对应的物化�
 
 查询能力由 Tool 目录管理，不再作为独立 Agent：`amazon_finance_query`、`lingxing_profit_query`、`profit_report_query`、`kingdee_cloud_query`（金蝶默认停用）。在「连接器」配置凭证，在「工具」页启用并绑定连接。
 
-## 快速开始（SQLite + mock 模型）
+## 快速开始（PostgreSQL + mock 模型）
 
-需要 Python 3.11 或更高版本。
+需要 Python 3.11 或更高版本，以及本机 PostgreSQL。
 
 ```bash
 cd multi_agent_ops_platform
+docker compose -f docker-compose.postgres.yml up -d
 python -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'
 cp .env.example .env
+ops-agent-migrate
 pytest -q
 ops-agent-api
 ```
@@ -74,7 +77,7 @@ ops-agent-api
 - 管理控制台：`http://127.0.0.1:8100/`
 - 交互式 API 文档：`http://127.0.0.1:8100/docs`
 
-SQLite 文件会创建在 `data/`，该目录已被 Git 忽略。
+模型注册表、知识空间和附件仍写在 `data/`，该目录已被 Git 忽略。
 
 发起一次 Agent 对话：
 
@@ -222,18 +225,16 @@ python scripts/import_lingxing_profit_xlsx.py fixtures/mock_data/xlsx/mock-利�
 
 ## PostgreSQL 控制面
 
-将 `.env.postgres.example` 复制为 `.env`，修改 `POSTGRES_DSN` 并切换持久化后端：
+将 `.env.postgres.example` 复制为 `.env`，并修改 `POSTGRES_DSN`：
 
 ```dotenv
-CONTROL_PLANE_BACKEND=postgres
-SESSION_EVENT_BACKEND=postgres
 POSTGRES_DSN=postgresql://user:password@127.0.0.1:5432/ops_agent
 ```
 
 ```bash
 python scripts/check_postgres.py
 ops-agent-migrate
-RUN_POSTGRES_TESTS=1 pytest -q tests/test_postgres_integration.py
+pytest -q tests/test_postgres_integration.py
 ```
 
 也可使用项目自带的 Docker Compose：
@@ -271,11 +272,11 @@ POSTGRES_PASSWORD='replace-me' docker compose -f docker-compose.production.yml u
 
 ## Connector 与租户资源范围
 
-外部账号按 tenant 保存为 Connection。PostgreSQL 控制面写入
-`ops_connections` / `ops_connection_secrets`；SQLite 开发模式仍使用
+外部账号按 tenant 保存为 Connection。控制面写入
+`ops_connections` / `ops_connection_secrets`。未传入 Settings 的隔离测试仍可使用
 `data/connections.json`，凭证仅通过 `secret_ref` 从独立的
 `data/connection_secrets.json` 读取。本地 Secret 文件会设置为 `0600`；
-模型与连接凭证不会写入公开定义文件。生产环境仍建议将 `LocalSecretStore` 替换为 Vault/KMS 实现。工具与连接的绑定保存在 `ops_tool_bindings`（或本地 `data/tool_bindings.json`）。
+模型与连接凭证不会写入公开定义文件。生产环境仍建议将 `LocalSecretStore` 替换为 Vault/KMS 实现。工具与连接的绑定保存在 `ops_tool_bindings`。
 
 ### 钉钉连接与推送
 
@@ -399,7 +400,7 @@ Agent，任务并发执行并在同一调用中返回精简结论。Runtime 还�
 这两个结果在任务创建时固化，后续配置变更不会放大运行中任务的权限。
 为了兼容旧环境，tenant 中尚未创建任何用户时使用开放兼容模式；
 一旦创建首个用户，未登记、已停用或没有规则的用户默认无 Tool 权限。
-本地 SQLite 和 PostgreSQL 控制面均有对应关系表实现。
+控制面关系表由 PostgreSQL 保存。
 
 ## 知识库与向量数据库
 

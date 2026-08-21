@@ -1,5 +1,4 @@
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 
@@ -11,7 +10,6 @@ from ops_agent.runtime.memory import (
     MemoryFeedback,
     MemoryService,
     PostgresMemoryStore,
-    SQLiteMemoryStore,
     explicit_forget_requested,
     explicit_remember_requested,
     memory_prompt,
@@ -28,13 +26,13 @@ from ops_agent.evals.memory_eval import (
 from ops_agent.runtime.domain import ModelTurn, ToolCall
 
 
-def _service(tmp_path: Path, **overrides) -> MemoryService:
+def _service(postgres_dsn: str, **overrides) -> MemoryService:
     settings = Settings(
         _env_file=None,
-        memory_db_path=tmp_path / "memory.sqlite3",
+        postgres_dsn=postgres_dsn,
         **overrides,
     )
-    return MemoryService(SQLiteMemoryStore(settings.memory_db_path), settings)
+    return MemoryService(PostgresMemoryStore(postgres_dsn), settings)
 
 
 def _context(**overrides) -> ToolExecutionContext:
@@ -111,8 +109,8 @@ def test_postgres_row_conversion_keeps_json_embedding_when_vector_column_exists(
     assert item.embedding == [0.25, -0.5]
 
 
-def test_remember_tool_requires_explicit_consent(tmp_path: Path):
-    service = _service(tmp_path)
+def test_remember_tool_requires_explicit_consent(postgres_dsn: str):
+    service = _service(postgres_dsn)
     registry = ToolRegistry()
     register_memory_tools(registry, service)
     definition = registry.get("remember_fact")
@@ -128,9 +126,9 @@ def test_remember_tool_requires_explicit_consent(tmp_path: Path):
     assert result["memory"]["status"] == "active"
 
 
-def test_scope_isolation_search_and_delegation_snapshot(tmp_path: Path):
+def test_scope_isolation_search_and_delegation_snapshot(postgres_dsn: str):
     # Disable relevance pruning here so this test isolates authorization semantics.
-    service = _service(tmp_path, memory_relevance_threshold=0)
+    service = _service(postgres_dsn, memory_relevance_threshold=0)
     service.create(
         MemoryCreate(content="我的报表币种是 CAD", key="currency"),
         tenant_id="tenant-a", user_id="user-a", source="explicit",
@@ -153,8 +151,8 @@ def test_scope_isolation_search_and_delegation_snapshot(tmp_path: Path):
     assert {item["key"] for item in other} == {"fiscal-year"}
 
 
-def test_candidate_conflict_confirmation_correction_and_profile(tmp_path: Path):
-    service = _service(tmp_path)
+def test_candidate_conflict_confirmation_correction_and_profile(postgres_dsn: str):
+    service = _service(postgres_dsn)
     original = service.create(
         MemoryCreate(content="我的默认币种是 CAD", key="currency", scope="profile", kind="profile"),
         tenant_id="tenant-a", user_id="user-a", source="explicit",
@@ -174,8 +172,8 @@ def test_candidate_conflict_confirmation_correction_and_profile(tmp_path: Path):
     assert corrected.quality_score >= confirmed.quality_score
 
 
-def test_auto_candidates_expiry_and_compliance_erasure(tmp_path: Path):
-    service = _service(tmp_path, memory_default_expiry_days=30)
+def test_auto_candidates_expiry_and_compliance_erasure(postgres_dsn: str):
+    service = _service(postgres_dsn, memory_default_expiry_days=30)
     candidates = service.extract_candidates(
         "我喜欢按月查看利润报表。我的时区是 Asia/Shanghai。",
         tenant_id="tenant-a", user_id="user-a", source_session_id="session-a",
@@ -189,8 +187,8 @@ def test_auto_candidates_expiry_and_compliance_erasure(tmp_path: Path):
     assert all(item.status == "deleted" and item.content == "[deleted]" for item in stored)
 
 
-def test_user_controls_sensitive_data_feedback_and_export(tmp_path: Path):
-    service = _service(tmp_path)
+def test_user_controls_sensitive_data_feedback_and_export(postgres_dsn: str):
+    service = _service(postgres_dsn)
     with pytest.raises(ValueError, match="sensitive"):
         service.create(
             MemoryCreate(content="请保存 api_key: abcdefghijklmnop", key="secret"),
@@ -216,8 +214,8 @@ def test_user_controls_sensitive_data_feedback_and_export(tmp_path: Path):
     ) == []
 
 
-def test_user_retention_and_sensitive_review_never_auto_activate(tmp_path: Path):
-    service = _service(tmp_path)
+def test_user_retention_and_sensitive_review_never_auto_activate(postgres_dsn: str):
+    service = _service(postgres_dsn)
     service.save_preferences(
         "tenant-a", "user-a", {"retention_days": 7, "allow_sensitive": True}
     )
@@ -234,8 +232,8 @@ def test_user_retention_and_sensitive_review_never_auto_activate(tmp_path: Path)
     assert 6 <= remaining.days <= 7
 
 
-def test_non_admin_cannot_write_shared_agent_memory(tmp_path: Path):
-    service = _service(tmp_path)
+def test_non_admin_cannot_write_shared_agent_memory(postgres_dsn: str):
+    service = _service(postgres_dsn)
     registry = ToolRegistry()
     register_memory_tools(registry, service)
     definition = registry.get("remember_fact")
@@ -252,8 +250,8 @@ def test_non_admin_cannot_write_shared_agent_memory(tmp_path: Path):
         )
 
 
-def test_memory_evaluation_reports_recall_and_scope_leakage(tmp_path: Path):
-    service = _service(tmp_path, memory_relevance_threshold=0)
+def test_memory_evaluation_reports_recall_and_scope_leakage(postgres_dsn: str):
+    service = _service(postgres_dsn, memory_relevance_threshold=0)
     service.create(
         MemoryCreate(content="Alice 默认使用 CAD", key="currency"),
         tenant_id="tenant-a", user_id="alice", source="explicit",
@@ -272,8 +270,8 @@ def test_memory_evaluation_reports_recall_and_scope_leakage(tmp_path: Path):
     assert result["cross_scope_leakage_count"] == 0
 
 
-def test_self_contained_memory_eval_seeding(tmp_path: Path):
-    service = _service(tmp_path, memory_relevance_threshold=0)
+def test_self_contained_memory_eval_seeding(postgres_dsn: str):
+    service = _service(postgres_dsn, memory_relevance_threshold=0)
     seeded = seed_memory_dataset(service, [
         MemoryEvalSeed(
             tenant_id="tenant-a", user_id="alice", key="currency",

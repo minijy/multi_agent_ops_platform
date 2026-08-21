@@ -6,12 +6,12 @@ from ops_agent.runtime.agent_loop import AgentRuntime
 from ops_agent.runtime.domain import ModelTurn, RuntimeAgentRequest, ToolCall
 from ops_agent.runtime.model_router import ModelRouter
 from ops_agent.runtime.result_store import (
-    SQLiteResultStore,
+    PostgresResultStore,
     StoredResult,
     materialize_tool_output,
     result_page,
 )
-from ops_agent.runtime.session_events import SQLiteSessionEventStore
+from ops_agent.runtime.session_events import PostgresSessionEventStore
 from ops_agent.runtime.tools import ToolDefinition, ToolExecutor, ToolRegistry
 
 
@@ -43,8 +43,8 @@ class RecordingAdapter:
         return ModelTurn(provider="fake", model="fake", content="统计完成")
 
 
-def test_materialized_result_keeps_full_rows_and_returns_compact_projection(tmp_path):
-    store = SQLiteResultStore(tmp_path / "events.sqlite3")
+def test_materialized_result_keeps_full_rows_and_returns_compact_projection(tmp_path, postgres_dsn):
+    store = PostgresResultStore(postgres_dsn)
     output = {
         "columns": ["name", "amount"],
         "rows": [{"name": f"item-{index}", "amount": index} for index in range(30)],
@@ -74,7 +74,7 @@ def test_materialized_result_keeps_full_rows_and_returns_compact_projection(tmp_
     assert page["has_more"] is True
 
 
-def test_runtime_never_sends_full_current_tool_rows_to_model(tmp_path):
+def test_runtime_never_sends_full_current_tool_rows_to_model(tmp_path, postgres_dsn):
     registry = ToolRegistry()
     registry.register(
         ToolDefinition(
@@ -90,12 +90,12 @@ def test_runtime_never_sends_full_current_tool_rows_to_model(tmp_path):
         )
     )
     adapter = RecordingAdapter()
-    store = SQLiteResultStore(tmp_path / "events.sqlite3")
+    store = PostgresResultStore(postgres_dsn)
     runtime = AgentRuntime(
         router=ModelRouter({"fake": adapter}, default_model_id="fake"),
         registry=registry,
         executor=ToolExecutor(registry),
-        event_store=SQLiteSessionEventStore(tmp_path / "events.sqlite3"),
+        event_store=PostgresSessionEventStore(postgres_dsn),
         result_store=store,
     )
     response = runtime.run(
@@ -116,8 +116,8 @@ def test_runtime_never_sends_full_current_tool_rows_to_model(tmp_path):
     assert response.tool_results[0].output["rows_truncated"] is True
 
 
-def test_result_store_deletes_results_with_session(tmp_path):
-    store = SQLiteResultStore(tmp_path / "events.sqlite3")
+def test_result_store_deletes_results_with_session(tmp_path, postgres_dsn):
+    store = PostgresResultStore(postgres_dsn)
     record = StoredResult(
         result_ref="result-delete",
         tenant_id="tenant-a",

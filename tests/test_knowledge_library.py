@@ -6,8 +6,8 @@ from ops_agent.api.app import create_app
 from tests.test_api import _settings
 
 
-def test_knowledge_library_reports_unconfigured(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path))) as client:
+def test_knowledge_library_reports_unconfigured(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         status = client.get("/v1/knowledge/library/status")
         assert status.status_code == 200
         assert status.json()["configured"] is False
@@ -16,9 +16,10 @@ def test_knowledge_library_reports_unconfigured(tmp_path: Path):
         assert listed.json()["detail"]["code"] == "knowledge_api_not_configured"
 
 
-def test_knowledge_library_proxies_wenshu_search(tmp_path: Path):
+def test_knowledge_library_proxies_wenshu_search(tmp_path: Path, postgres_dsn):
     settings = _settings(
         tmp_path,
+        postgres_dsn,
         knowledge_api_url="http://127.0.0.1:8000",
         knowledge_api_token="test-service-token",
     )

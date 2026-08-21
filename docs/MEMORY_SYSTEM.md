@@ -23,7 +23,7 @@
 
 ## 存储与索引
 
-- 主数据：SQLite 用于本地开发，PostgreSQL 用于生产。
+- 主数据：PostgreSQL。
 - 向量：本地向量/pgvector，或从「连接器」页面配置的 Qdrant / Milvus。
 - Embedding：租户策略可选离线 hash 兼容模式或 Sentence Transformers。
 - 一致性：主数据库为真实源，向量写入失败进入 outbox，后台维护任务重试。

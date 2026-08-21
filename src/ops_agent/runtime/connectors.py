@@ -729,7 +729,9 @@ def create_tool_bindings(
 ) -> ToolBindingRegistry:
     registry = ToolBindingRegistry(path, persistence=persistence)
     for binding in (
-        ToolBinding("amazon_finance_query", "analytics", "query_settlements"),
+        ToolBinding(
+            "amazon_finance_query", "analytics", "query_settlements", "marketplace_ids"
+        ),
         ToolBinding(
             "profit_report_query", "analytics", "query_profit", "store_names"
         ),

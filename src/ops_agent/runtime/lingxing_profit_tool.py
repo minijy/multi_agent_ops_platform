@@ -6,6 +6,7 @@ from ..workflows.lingxing_profit.domain import LingXingProfitQueryPlan
 from ..workflows.lingxing_profit.query_tool import LingXingProfitQueryTool
 from .tools import ToolDefinition, ToolExecutionContext, ToolRegistry
 from .connectors import ConnectorRuntime
+from ..query_policy import enforce_query_plan
 from ..source_privacy import LINGXING_LIVE_SOURCE
 
 
@@ -36,7 +37,11 @@ def register_lingxing_profit_tool(
         plan: LingXingProfitQueryPlan,
         context: ToolExecutionContext,
     ) -> dict[str, Any]:
+        plan = enforce_query_plan("lingxing_profit_query", plan, context.role)
+
         def query(client, connection):
+            if connection.tenant_id != context.tenant_id:
+                raise PermissionError("connector tenant does not match principal")
             resolved_plan = plan
             allowed_sids = connectors.scoped_tool_resources(
                 connection,

@@ -7,10 +7,14 @@ from pydantic import BaseModel
 from ops_agent.config import Settings
 from ops_agent.runtime.agent_loop import AgentRuntime
 from ops_agent.runtime.domain import ModelTurn, RuntimeAgentRequest, ToolCall
-from ops_agent.runtime.governance import SQLiteRuntimeGovernanceStore
+from ops_agent.runtime.governance import PostgresRuntimeGovernanceStore
 from ops_agent.runtime.model_router import ModelRouter
-from ops_agent.runtime.sandbox import SandboxRunner, SandboxUnavailableError
-from ops_agent.runtime.session_events import SQLiteSessionEventStore
+from ops_agent.runtime.sandbox import (
+    SandboxRunner,
+    SandboxUnavailableError,
+    platform_true_command,
+)
+from ops_agent.runtime.session_events import PostgresSessionEventStore
 from ops_agent.runtime.subagents import SubagentManager, SubagentSubmitRequest
 from ops_agent.runtime.tools import (
     ToolDefinition,
@@ -72,9 +76,10 @@ def _runtime(
     tmp_path: Path,
     adapter,
     registry: ToolRegistry,
-    governance: SQLiteRuntimeGovernanceStore,
-) -> tuple[AgentRuntime, SQLiteSessionEventStore]:
-    events = SQLiteSessionEventStore(tmp_path / "events.sqlite3")
+    governance: PostgresRuntimeGovernanceStore,
+    postgres_dsn: str,
+) -> tuple[AgentRuntime, PostgresSessionEventStore]:
+    events = PostgresSessionEventStore(postgres_dsn)
     return (
         AgentRuntime(
             router=ModelRouter({"fake": adapter}, default_model_id="fake"),
@@ -87,7 +92,7 @@ def _runtime(
     )
 
 
-def test_high_risk_tool_waits_for_single_call_approval(tmp_path: Path):
+def test_high_risk_tool_waits_for_single_call_approval(tmp_path: Path, postgres_dsn: str):
     executions = []
     registry = ToolRegistry()
     registry.register(
@@ -101,9 +106,9 @@ def test_high_risk_tool_waits_for_single_call_approval(tmp_path: Path):
             allowed_roles=frozenset({"admin"}),
         )
     )
-    governance = SQLiteRuntimeGovernanceStore(tmp_path / "governance.sqlite3")
+    governance = PostgresRuntimeGovernanceStore(postgres_dsn)
     runtime, events = _runtime(
-        tmp_path, ApprovalAdapter(), registry, governance
+        tmp_path, ApprovalAdapter(), registry, governance, postgres_dsn
     )
 
     waiting = runtime.run(
@@ -135,10 +140,10 @@ def test_high_risk_tool_waits_for_single_call_approval(tmp_path: Path):
     assert {"approval.requested", "approval.decided", "tool.completed"} <= event_types
 
 
-def test_subagent_runs_in_background_with_parent_child_events(tmp_path: Path):
-    governance = SQLiteRuntimeGovernanceStore(tmp_path / "governance.sqlite3")
+def test_subagent_runs_in_background_with_parent_child_events(tmp_path: Path, postgres_dsn):
+    governance = PostgresRuntimeGovernanceStore(postgres_dsn)
     registry = ToolRegistry()
-    runtime, events = _runtime(tmp_path, AnswerAdapter(), registry, governance)
+    runtime, events = _runtime(tmp_path, AnswerAdapter(), registry, governance, postgres_dsn)
     settings = Settings(
         _env_file=None,
         subagent_worker_count=2,
@@ -180,10 +185,10 @@ def test_subagent_runs_in_background_with_parent_child_events(tmp_path: Path):
         manager.shutdown()
 
 
-def test_subagent_token_budget_stops_additional_work(tmp_path: Path):
-    governance = SQLiteRuntimeGovernanceStore(tmp_path / "governance.sqlite3")
+def test_subagent_token_budget_stops_additional_work(tmp_path: Path, postgres_dsn):
+    governance = PostgresRuntimeGovernanceStore(postgres_dsn)
     registry = ToolRegistry()
-    runtime, _events = _runtime(tmp_path, AnswerAdapter(), registry, governance)
+    runtime, _events = _runtime(tmp_path, AnswerAdapter(), registry, governance, postgres_dsn)
     response = runtime.run(
         RuntimeAgentRequest(question="预算测试"),
         tenant_id="tenant-a",
@@ -196,7 +201,7 @@ def test_subagent_token_budget_stops_additional_work(tmp_path: Path):
 
 def test_macos_sandbox_read_only_denies_write(tmp_path: Path):
     runner = SandboxRunner(tmp_path, timeout_seconds=5)
-    if not runner.restricted_available:
+    if runner.restricted_backend != "seatbelt":
         pytest.skip("macOS Seatbelt sandbox-exec is unavailable")
     readable = runner.run(
         ["/bin/sh", "-c", "printf ok"],
@@ -274,7 +279,7 @@ def test_unwrap_keeps_legitimate_csv_quoted_header():
     assert SandboxRunner.unwrap_echo_payload(text) == text
 
 
-def test_subagent_cancel_stops_running_task(tmp_path: Path):
+def test_subagent_cancel_stops_running_task(tmp_path: Path, postgres_dsn):
     class SlowAdapter:
         provider = "fake"
         model_name = "fake-slow"
@@ -291,9 +296,9 @@ def test_subagent_cancel_stops_running_task(tmp_path: Path):
                 usage={"total_tokens": 5},
             )
 
-    governance = SQLiteRuntimeGovernanceStore(tmp_path / "governance.sqlite3")
+    governance = PostgresRuntimeGovernanceStore(postgres_dsn)
     registry = ToolRegistry()
-    runtime, events = _runtime(tmp_path, SlowAdapter(), registry, governance)
+    runtime, events = _runtime(tmp_path, SlowAdapter(), registry, governance, postgres_dsn)
     settings = Settings(
         _env_file=None,
         subagent_worker_count=1,
@@ -332,7 +337,7 @@ def test_subagent_cancel_stops_running_task(tmp_path: Path):
         manager.shutdown()
 
 
-def test_subagent_cannot_inherit_approval_required_tools(tmp_path: Path):
+def test_subagent_cannot_inherit_approval_required_tools(tmp_path: Path, postgres_dsn):
     registry = ToolRegistry()
     registry.register(
         ToolDefinition(
@@ -345,8 +350,8 @@ def test_subagent_cannot_inherit_approval_required_tools(tmp_path: Path):
             allowed_roles=frozenset({"admin"}),
         )
     )
-    governance = SQLiteRuntimeGovernanceStore(tmp_path / "governance.sqlite3")
-    runtime, events = _runtime(tmp_path, AnswerAdapter(), registry, governance)
+    governance = PostgresRuntimeGovernanceStore(postgres_dsn)
+    runtime, events = _runtime(tmp_path, AnswerAdapter(), registry, governance, postgres_dsn)
     manager = SubagentManager(
         runtime=runtime,
         registry=registry,
@@ -380,7 +385,7 @@ def test_subagent_cannot_inherit_approval_required_tools(tmp_path: Path):
         manager.shutdown()
 
 
-def test_runtime_timeout_returns_timed_out(tmp_path: Path):
+def test_runtime_timeout_returns_timed_out(tmp_path: Path, postgres_dsn):
     class SlowAdapter:
         provider = "fake"
         model_name = "fake-timeout"
@@ -397,8 +402,8 @@ def test_runtime_timeout_returns_timed_out(tmp_path: Path):
                 usage={"total_tokens": 5},
             )
 
-    governance = SQLiteRuntimeGovernanceStore(tmp_path / "governance.sqlite3")
-    runtime, _events = _runtime(tmp_path, SlowAdapter(), ToolRegistry(), governance)
+    governance = PostgresRuntimeGovernanceStore(postgres_dsn)
+    runtime, _events = _runtime(tmp_path, SlowAdapter(), ToolRegistry(), governance, postgres_dsn)
     response = runtime.run(
         RuntimeAgentRequest(question="超时测试"),
         tenant_id="tenant-a",
@@ -414,5 +419,5 @@ def test_sandbox_restricted_modes_fail_closed_without_backend(tmp_path: Path):
     runner.restricted_available = False
     with pytest.raises(SandboxUnavailableError, match="unavailable"):
         runner.run(["/bin/echo", "no"], mode="read-only")
-    unrestricted = runner.run(["/usr/bin/true"], mode="danger-full-access")
+    unrestricted = runner.run(platform_true_command(), mode="danger-full-access")
     assert unrestricted.exit_code == 0

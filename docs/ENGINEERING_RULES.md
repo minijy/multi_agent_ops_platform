@@ -119,7 +119,7 @@
 ## 11. API 和数据库兼容规则
 
 1. 前端新增 API 调用时，同一改动必须增加后端路由和 API 测试，不得留下持续 404 的页面轮询。
-2. SQLite 和 PostgreSQL 实现不得假设连接对象 API 相同。例如 psycopg 3 的 `Connection` 不应直接调用 `executemany`，应使用 Cursor 或显式批处理。
+2. PostgreSQL 存储实现不得假设连接对象 API 与其它驱动相同。例如 psycopg 3 的 `Connection` 不应直接调用 `executemany`，应使用 Cursor 或显式批处理。
 3. 每个存储实现必须通过同一套契约测试，包括事务提交、回滚、空值、JSON、时区、批量写入和唯一约束。
 4. 迁移脚本、Runtime 自建表和 ORM/SQL 字段必须同源审查，不得出现迁移有字段但 Runtime 不写，或 Runtime 写字段但迁移未创建的情况。
 

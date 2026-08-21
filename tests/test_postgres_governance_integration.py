@@ -51,7 +51,7 @@ class ApprovalAdapter:
         )
 
 
-def test_postgres_runtime_approval_persists_and_resumes():
+def test_postgres_runtime_approval_persists_and_resumes(postgres_dsn):
     settings = Settings()
     settings.validate_runtime()
     tenant_id = f"governance-{uuid.uuid4()}"

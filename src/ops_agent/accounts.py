@@ -4,9 +4,7 @@ import hashlib
 import hmac
 import os
 import secrets
-import sqlite3
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import jwt
@@ -58,186 +56,7 @@ def _verify_password(password: str, encoded: str) -> bool:
     except (ValueError, TypeError):
         return False
 
-
-class AccountStore:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS accounts(
-                    tenant_id TEXT NOT NULL,user_id TEXT NOT NULL,display_name TEXT NOT NULL,
-                    role TEXT NOT NULL,password_hash TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,
-                    must_change_password INTEGER NOT NULL DEFAULT 0,failed_attempts INTEGER NOT NULL DEFAULT 0,
-                    locked_until TEXT,last_login_at TEXT,password_changed_at TEXT,
-                    created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
-                    PRIMARY KEY(tenant_id,user_id)
-                );
-                CREATE TABLE IF NOT EXISTS account_sessions(
-                    session_id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,user_id TEXT NOT NULL,
-                    token_hash TEXT NOT NULL UNIQUE,expires_at TEXT NOT NULL,revoked_at TEXT,
-                    created_at TEXT NOT NULL,last_used_at TEXT NOT NULL,
-                    FOREIGN KEY(tenant_id,user_id) REFERENCES accounts(tenant_id,user_id) ON DELETE CASCADE
-                );
-                CREATE INDEX IF NOT EXISTS ix_account_sessions_owner
-                    ON account_sessions(tenant_id,user_id);
-                """
-            )
-
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        return connection
-
-    @staticmethod
-    def _public(row: Any) -> dict[str, Any]:
-        return {
-            "tenant_id": row["tenant_id"], "user_id": row["user_id"],
-            "display_name": row["display_name"], "role": row["role"],
-            "enabled": bool(row["enabled"]),
-            "must_change_password": bool(row["must_change_password"]),
-            "locked_until": row["locked_until"], "last_login_at": row["last_login_at"],
-            "password_changed_at": row["password_changed_at"],
-            "created_at": row["created_at"], "updated_at": row["updated_at"],
-        }
-
-    def count(self, tenant_id: str) -> int:
-        with self._connect() as connection:
-            return int(connection.execute(
-                "SELECT COUNT(*) FROM accounts WHERE tenant_id=?", (tenant_id,)
-            ).fetchone()[0])
-
-    def get(self, tenant_id: str, user_id: str, *, private: bool = False) -> dict[str, Any] | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM accounts WHERE tenant_id=? AND user_id=?", (tenant_id, user_id)
-            ).fetchone()
-        if not row:
-            return None
-        result = self._public(row)
-        if private:
-            result.update(password_hash=row["password_hash"], failed_attempts=row["failed_attempts"])
-        return result
-
-    def list(self, tenant_id: str) -> list[dict[str, Any]]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM accounts WHERE tenant_id=? ORDER BY display_name,user_id", (tenant_id,)
-            ).fetchall()
-        return [self._public(row) for row in rows]
-
-    def put(self, tenant_id: str, user_id: str, display_name: str, role: str, password: str,
-            enabled: bool, must_change_password: bool) -> dict[str, Any]:
-        now = datetime.now(UTC).isoformat()
-        encoded = _hash_password(password)
-        with self._connect() as connection:
-            connection.execute(
-                """INSERT INTO accounts(tenant_id,user_id,display_name,role,password_hash,enabled,
-                   must_change_password,created_at,updated_at,password_changed_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?)
-                   ON CONFLICT(tenant_id,user_id) DO UPDATE SET
-                   display_name=excluded.display_name,role=excluded.role,password_hash=excluded.password_hash,
-                   enabled=excluded.enabled,must_change_password=excluded.must_change_password,
-                   failed_attempts=0,locked_until=NULL,updated_at=excluded.updated_at,
-                   password_changed_at=excluded.password_changed_at""",
-                (tenant_id, user_id, display_name, role, encoded, int(enabled),
-                 int(must_change_password), now, now, now),
-            )
-        return self.get(tenant_id, user_id) or {}
-
-    def update_profile(self, tenant_id: str, user_id: str, display_name: str, role: str,
-                       enabled: bool) -> dict[str, Any] | None:
-        with self._connect() as connection:
-            changed = connection.execute(
-                """UPDATE accounts SET display_name=?,role=?,enabled=?,updated_at=?
-                   WHERE tenant_id=? AND user_id=?""",
-                (display_name, role, int(enabled), datetime.now(UTC).isoformat(), tenant_id, user_id),
-            ).rowcount
-        return self.get(tenant_id, user_id) if changed else None
-
-    def record_login_failure(self, tenant_id: str, user_id: str, max_attempts: int,
-                             lock_minutes: int) -> None:
-        account = self.get(tenant_id, user_id, private=True)
-        if not account:
-            return
-        attempts = int(account["failed_attempts"]) + 1
-        locked_until = (
-            (datetime.now(UTC) + timedelta(minutes=lock_minutes)).isoformat()
-            if attempts >= max_attempts else None
-        )
-        with self._connect() as connection:
-            connection.execute(
-                "UPDATE accounts SET failed_attempts=?,locked_until=?,updated_at=? WHERE tenant_id=? AND user_id=?",
-                (attempts, locked_until, datetime.now(UTC).isoformat(), tenant_id, user_id),
-            )
-
-    def record_login_success(self, tenant_id: str, user_id: str) -> None:
-        now = datetime.now(UTC).isoformat()
-        with self._connect() as connection:
-            connection.execute(
-                """UPDATE accounts SET failed_attempts=0,locked_until=NULL,last_login_at=?,updated_at=?
-                   WHERE tenant_id=? AND user_id=?""", (now, now, tenant_id, user_id)
-            )
-
-    def change_password(self, tenant_id: str, user_id: str, password: str) -> None:
-        now = datetime.now(UTC).isoformat()
-        with self._connect() as connection:
-            connection.execute(
-                """UPDATE accounts SET password_hash=?,must_change_password=0,failed_attempts=0,
-                   locked_until=NULL,password_changed_at=?,updated_at=? WHERE tenant_id=? AND user_id=?""",
-                (_hash_password(password), now, now, tenant_id, user_id),
-            )
-
-    def delete(self, tenant_id: str, user_id: str) -> bool:
-        with self._connect() as connection:
-            return connection.execute(
-                "DELETE FROM accounts WHERE tenant_id=? AND user_id=?", (tenant_id, user_id)
-            ).rowcount > 0
-
-    def create_session(self, tenant_id: str, user_id: str, token_hash: str,
-                       expires_at: str) -> str:
-        session_id = secrets.token_hex(16)
-        now = datetime.now(UTC).isoformat()
-        with self._connect() as connection:
-            connection.execute(
-                """INSERT INTO account_sessions(session_id,tenant_id,user_id,token_hash,expires_at,
-                   created_at,last_used_at) VALUES(?,?,?,?,?,?,?)""",
-                (session_id, tenant_id, user_id, token_hash, expires_at, now, now),
-            )
-        return session_id
-
-    def consume_session(self, token_hash: str) -> dict[str, Any] | None:
-        now = datetime.now(UTC)
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM account_sessions WHERE token_hash=?", (token_hash,)
-            ).fetchone()
-            if not row or row["revoked_at"] or datetime.fromisoformat(row["expires_at"]) <= now:
-                return None
-            connection.execute(
-                "UPDATE account_sessions SET revoked_at=?,last_used_at=? WHERE session_id=?",
-                (now.isoformat(), now.isoformat(), row["session_id"]),
-            )
-        return dict(row)
-
-    def revoke_session(self, token_hash: str) -> bool:
-        with self._connect() as connection:
-            return connection.execute(
-                "UPDATE account_sessions SET revoked_at=? WHERE token_hash=? AND revoked_at IS NULL",
-                (datetime.now(UTC).isoformat(), token_hash),
-            ).rowcount > 0
-
-    def revoke_user_sessions(self, tenant_id: str, user_id: str) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                "UPDATE account_sessions SET revoked_at=? WHERE tenant_id=? AND user_id=? AND revoked_at IS NULL",
-                (datetime.now(UTC).isoformat(), tenant_id, user_id),
-            )
-
-
-class PostgresAccountStore(AccountStore):
+class PostgresAccountStore:
     def __init__(self, dsn: str) -> None:
         self.dsn = dsn
         statements = (
@@ -419,18 +238,14 @@ class PostgresAccountStore(AccountStore):
 class AccountService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.store = (
-            PostgresAccountStore(settings.postgres_dsn)
-            if settings.control_plane_backend == "postgres"
-            else AccountStore(settings.platform_db_path)
-        )
+        self.store = PostgresAccountStore(settings.postgres_dsn)
         self.secret = self._load_secret(settings)
 
     @staticmethod
     def _load_secret(settings: Settings) -> str:
         if settings.jwt_secret:
             return settings.jwt_secret
-        path = settings.platform_db_path.with_suffix(".auth-secret")
+        path = settings.auth_secret_path
         if path.is_file():
             return path.read_text(encoding="utf-8").strip()
         secret = secrets.token_urlsafe(48)

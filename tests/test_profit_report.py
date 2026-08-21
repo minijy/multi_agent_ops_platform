@@ -90,10 +90,12 @@ def test_profit_report_query_tool_builds_filters(monkeypatch):
         end_date=date(2024, 9, 3),
         currency_code="USD",
     )
-    rows, total = tool.execute(plan)
+    rows, total = tool.execute(plan, tenant_id="tenant-a")
     assert total == 2
     assert rows[0]["row_count"] == 2
     assert "currency_code = %s" in captured["statement"]
+    assert "tenant_id = %s" in captured["statement"]
+    assert captured["parameters"][0] == "tenant-a"
 
 
 def test_profit_report_query_tool_reports_date_range_when_empty(monkeypatch):
@@ -158,7 +160,7 @@ def test_profit_report_query_tool_reports_date_range_when_empty(monkeypatch):
         end_date=date(2022, 12, 31),
     )
     try:
-        tool.execute(plan)
+        tool.execute(plan, tenant_id="tenant-a")
     except ProfitReportQueryError as exc:
         message = str(exc)
         assert "指定日期" in message

@@ -216,6 +216,9 @@ def resolve_agent_tool_allowlist(
                 "forget_memory",
                 "search_knowledge",
                 "web_search",
+                "sandbox_read_only",
+                "sandbox_workspace_write",
+                "sandbox_full_access",
             }
         return requested & visible
     allowlist = runtime_tool_allowlist(

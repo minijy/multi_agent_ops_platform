@@ -23,8 +23,8 @@ metric 选择：
 - sku：按 SKU 汇总数量和净额
 - settlement：按 SETTLEMENT_ID 汇总
 
-仅提取用户明确给出的日期。没有日期就留空，表示查询当前已导入的全部数据。
-limit 默认 20，最大 100。
+仅提取用户明确给出的日期。overview 可以不带日期；daily / transaction_type / fee / sku / settlement 必须带日期，窗口最长 366 天。
+limit 默认 20，最大 100。不要填写 seller_id、tenant_id 或 marketplace_id，范围由系统注入。
 """.strip()
 
 
@@ -70,10 +70,13 @@ class AmazonFinanceAgent:
         self,
         request: AmazonFinanceQueryRequest,
         *,
+        tenant_id: str,
         query_tool: AmazonFinanceQueryTool | None = None,
     ) -> AmazonFinanceQueryResponse:
         plan = self.plan(request)
-        rows = (query_tool or self.query_tool).execute(plan)
+        rows = (query_tool or self.query_tool).execute(
+            plan, tenant_id=tenant_id
+        )
         return AmazonFinanceQueryResponse(
             question=request.question,
             plan=plan,

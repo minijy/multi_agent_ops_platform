@@ -14,7 +14,12 @@ KINGDEE_SOURCE = "金蝶云星空业务数据"
 
 _PRIVATE_IDENTIFIERS: dict[str, str] = {
     "lingxing_profit_order_transactions": PROFIT_WAREHOUSE_SOURCE,
+    "lingxing_profit_report_query": PROFIT_WAREHOUSE_SOURCE,
     "amazon_finance_transactions": AMAZON_FINANCE_SOURCE,
+    "amazon_finance_released_transactions": AMAZON_FINANCE_SOURCE,
+    "amazon_finance_released_items": AMAZON_FINANCE_SOURCE,
+    "amazon_finance_released_amount_lines": AMAZON_FINANCE_SOURCE,
+    "amazon_finance_released_identifiers": AMAZON_FINANCE_SOURCE,
     "amazon_finance_amount_lines": AMAZON_FINANCE_SOURCE,
     "amazon_finance_items": AMAZON_FINANCE_SOURCE,
     "amazon_finance_transaction_identifiers": AMAZON_FINANCE_SOURCE,

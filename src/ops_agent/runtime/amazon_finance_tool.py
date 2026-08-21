@@ -7,6 +7,7 @@ from ..workflows.amazon_finance.domain import AmazonFinanceQueryPlan
 from ..workflows.amazon_finance.query_tool import AmazonFinanceQueryTool
 from .tools import ToolDefinition, ToolExecutionContext, ToolRegistry
 from .connectors import ConnectorRuntime
+from ..query_policy import enforce_query_plan
 from ..source_privacy import AMAZON_FINANCE_SOURCE
 
 
@@ -43,22 +44,36 @@ def register_amazon_finance_tool(
         plan: AmazonFinanceQueryPlan,
         context: ToolExecutionContext,
     ) -> dict[str, Any]:
-        def query(client, _connection):
+        resolved = enforce_query_plan("amazon_finance_query", plan, context.role)
+
+        def query(client, connection):
+            if connection.tenant_id != context.tenant_id:
+                raise PermissionError("connector tenant does not match principal")
+            marketplaces = connectors.scoped_tool_resources(
+                connection,
+                "amazon_finance_query",
+                "marketplace_ids",
+                context.resource_scope,
+            )
             query_tool = AmazonFinanceQueryTool(
                 client["dsn"],
                 statement_timeout_ms=settings.analytics_statement_timeout_ms,
                 engine=client.get("engine", "postgresql"),
             )
-            return query_tool.execute(plan)
+            return query_tool.execute(
+                resolved,
+                tenant_id=context.tenant_id,
+                marketplace_ids=tuple(marketplaces),
+            )
 
         rows = connectors.execute_tool(
             context.tenant_id, "amazon_finance_query", query
         )
         return {
-            "plan": plan.model_dump(mode="json"),
+            "plan": resolved.model_dump(mode="json"),
             "columns": list(rows[0].keys()) if rows else [],
             "rows": rows,
-            "summary": _summary(plan, rows),
+            "summary": _summary(resolved, rows),
             "data_scope": AMAZON_FINANCE_SOURCE,
             "data_source": AMAZON_FINANCE_SOURCE,
             "calculation": {
@@ -66,8 +81,8 @@ def register_amazon_finance_tool(
                     context.tenant_id, "amazon_finance_query"
                 ).config.get("database_type", "postgresql"),
                 "operation": "parameterized aggregate query",
-                "metric": plan.metric,
-                "grouped_by": [] if plan.metric == "overview" else [plan.metric],
+                "metric": resolved.metric,
+                "grouped_by": [] if resolved.metric == "overview" else [resolved.metric],
             },
         }
 
@@ -76,8 +91,8 @@ def register_amazon_finance_tool(
             name="amazon_finance_query",
             description=(
                 "查询 Amazon RELEASED 结算数据。可查询总体概览、每日趋势、"
-                "交易类型、费用、SKU 或结算批次。日期为空时查询全部已导入数据。"
-                "若会话里已有同类查询结果，优先复用，不要为改列名或改展示再查一次。"
+                "交易类型、费用、SKU 或结算批次。租户与站点范围由系统注入，不能由模型指定。"
+                "明细指标必须带日期；窗口最长 366 天。若会话里已有同类查询结果，优先复用。"
             ),
             arguments_model=AmazonFinanceQueryPlan,
             handler=execute,

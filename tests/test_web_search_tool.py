@@ -124,7 +124,7 @@ def test_tavily_client_maps_auth_errors(monkeypatch):
         TavilyClient("tvly-test").search("vat")
 
 
-def test_top_level_session_picks_up_tavily_added_after_session_start(tmp_path):
+def test_top_level_session_picks_up_tavily_added_after_session_start(tmp_path, postgres_dsn):
     from typing import Any
 
     from ops_agent.connections import create_connection_registry
@@ -132,7 +132,7 @@ def test_top_level_session_picks_up_tavily_added_after_session_start(tmp_path):
     from ops_agent.runtime.connectors import create_tool_bindings
     from ops_agent.runtime.domain import ModelTurn, RuntimeAgentRequest, ToolCall
     from ops_agent.runtime.model_router import ModelRouter
-    from ops_agent.runtime.session_events import SQLiteSessionEventStore
+    from ops_agent.runtime.session_events import PostgresSessionEventStore
     from ops_agent.runtime.tools import ConnectorAccessGuard, ToolExecutor
 
     connections = create_connection_registry(
@@ -177,7 +177,7 @@ def test_top_level_session_picks_up_tavily_added_after_session_start(tmp_path):
         router=ModelRouter({"fake": _Adapter()}, default_model_id="fake"),
         registry=tools,
         executor=ToolExecutor(tools, guards=[ConnectorAccessGuard(bindings, connections)]),
-        event_store=SQLiteSessionEventStore(tmp_path / "events.sqlite3"),
+        event_store=PostgresSessionEventStore(postgres_dsn),
         connection_registry=connections,
         tool_bindings=bindings,
     )
@@ -215,7 +215,7 @@ def test_top_level_session_picks_up_tavily_added_after_session_start(tmp_path):
     assert second.tool_results[0].output["items"][0]["url"] == "https://www.gov.uk/vat"
 
 
-def test_delegated_session_does_not_gain_tavily_from_live_scope(tmp_path):
+def test_delegated_session_does_not_gain_tavily_from_live_scope(tmp_path, postgres_dsn):
     from typing import Any
 
     from ops_agent.connections import create_connection_registry
@@ -223,7 +223,7 @@ def test_delegated_session_does_not_gain_tavily_from_live_scope(tmp_path):
     from ops_agent.runtime.connectors import create_tool_bindings
     from ops_agent.runtime.domain import ModelTurn, RuntimeAgentRequest, ToolCall
     from ops_agent.runtime.model_router import ModelRouter
-    from ops_agent.runtime.session_events import SQLiteSessionEventStore
+    from ops_agent.runtime.session_events import PostgresSessionEventStore
     from ops_agent.runtime.tools import ConnectorAccessGuard, ToolExecutor
 
     connections = create_connection_registry(
@@ -268,7 +268,7 @@ def test_delegated_session_does_not_gain_tavily_from_live_scope(tmp_path):
         router=ModelRouter({"fake": _Adapter()}, default_model_id="fake"),
         registry=tools,
         executor=ToolExecutor(tools, guards=[ConnectorAccessGuard(bindings, connections)]),
-        event_store=SQLiteSessionEventStore(tmp_path / "events.sqlite3"),
+        event_store=PostgresSessionEventStore(postgres_dsn),
         connection_registry=connections,
         tool_bindings=bindings,
     )

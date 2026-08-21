@@ -17,7 +17,7 @@ class ProfitReportQueryError(RuntimeError):
 
 
 class ProfitReportQueryTool:
-    TABLE = "lingxing_profit_order_transactions"
+    TABLE = "lingxing_profit_report_query"
 
     def __init__(
         self,
@@ -39,10 +39,12 @@ class ProfitReportQueryTool:
         return value
 
     def _filters(
-        self, plan: ProfitReportQueryPlan
+        self, plan: ProfitReportQueryPlan, tenant_id: str
     ) -> tuple[sql.SQL, list[Any]]:
-        clauses: list[sql.SQL] = [sql.SQL("TRUE")]
-        parameters: list[Any] = []
+        if not tenant_id.strip():
+            raise ProfitReportQueryError("tenant_id is required")
+        clauses: list[sql.SQL] = [sql.SQL("tenant_id = %s")]
+        parameters: list[Any] = [tenant_id]
         if plan.start_date:
             clauses.append(sql.SQL("posted_datetime >= %s"))
             parameters.append(plan.start_date)
@@ -58,9 +60,9 @@ class ProfitReportQueryTool:
         return sql.SQL(" AND ").join(clauses), parameters
 
     def _statement(
-        self, plan: ProfitReportQueryPlan
+        self, plan: ProfitReportQueryPlan, tenant_id: str
     ) -> tuple[sql.Composed, list[Any]]:
-        filters, parameters = self._filters(plan)
+        filters, parameters = self._filters(plan, tenant_id)
         table = sql.Identifier(self.TABLE)
 
         if plan.metric == "overview":
@@ -161,10 +163,13 @@ class ProfitReportQueryTool:
         ).format(table=table, filters=filters)
         return statement, [*parameters, plan.limit]
 
-    @staticmethod
-    def _mysql_filters(plan: ProfitReportQueryPlan) -> tuple[str, list[Any]]:
-        clauses = ["TRUE"]
-        parameters: list[Any] = []
+    def _mysql_filters(
+        self, plan: ProfitReportQueryPlan, tenant_id: str
+    ) -> tuple[str, list[Any]]:
+        if not tenant_id.strip():
+            raise ProfitReportQueryError("tenant_id is required")
+        clauses = ["tenant_id = %s"]
+        parameters: list[Any] = [tenant_id]
         if plan.start_date:
             clauses.append("posted_datetime >= %s")
             parameters.append(plan.start_date)
@@ -180,9 +185,9 @@ class ProfitReportQueryTool:
         return " AND ".join(clauses), parameters
 
     def _mysql_statement(
-        self, plan: ProfitReportQueryPlan
+        self, plan: ProfitReportQueryPlan, tenant_id: str
     ) -> tuple[str, list[Any]]:
-        filters, parameters = self._mysql_filters(plan)
+        filters, parameters = self._mysql_filters(plan, tenant_id)
         if plan.metric == "overview":
             return f"""
                 SELECT count(*) AS row_count,
@@ -245,7 +250,7 @@ class ProfitReportQueryTool:
         return statement, [*parameters, plan.limit]
 
     def _execute_mysql(
-        self, plan: ProfitReportQueryPlan
+        self, plan: ProfitReportQueryPlan, tenant_id: str
     ) -> tuple[list[dict[str, Any]], int]:
         with mysql_read_only_connection(
             self.dsn, timeout_ms=self.statement_timeout_ms
@@ -257,7 +262,9 @@ class ProfitReportQueryTool:
                            min(posted_datetime) AS first_posted_at,
                            max(posted_datetime) AS last_posted_at
                     FROM {self.TABLE}
-                    """
+                    WHERE tenant_id = %s
+                    """,
+                    (tenant_id,),
                 )
                 table_stats = cursor.fetchone()
             table_total = int(table_stats["total"])
@@ -265,14 +272,14 @@ class ProfitReportQueryTool:
                 raise ProfitReportQueryError(
                     "利润报表数据库表为空，请先导入数据"
                 )
-            statement, parameters = self._mysql_statement(plan)
+            statement, parameters = self._mysql_statement(plan, tenant_id)
             with connection.cursor() as cursor:
                 cursor.execute(statement, parameters)
                 rows = [
                     {key: self._json_value(value) for key, value in row.items()}
                     for row in cursor.fetchall()
                 ]
-            filters, filter_params = self._mysql_filters(plan)
+            filters, filter_params = self._mysql_filters(plan, tenant_id)
             with connection.cursor() as cursor:
                 cursor.execute(
                     f"SELECT count(*) AS total FROM {self.TABLE} WHERE {filters}",
@@ -308,11 +315,15 @@ class ProfitReportQueryTool:
             + " 请调整 start_date / end_date 后重试。"
         )
 
-    def execute(self, plan: ProfitReportQueryPlan) -> tuple[list[dict[str, Any]], int]:
+    def execute(
+        self, plan: ProfitReportQueryPlan, *, tenant_id: str
+    ) -> tuple[list[dict[str, Any]], int]:
         if not self.dsn:
             raise ProfitReportQueryError("未配置数据库连接")
+        if not tenant_id.strip():
+            raise ProfitReportQueryError("tenant_id is required")
         if self.engine == "mysql":
-            return self._execute_mysql(plan)
+            return self._execute_mysql(plan, tenant_id)
         with connect(self.dsn, row_factory=dict_row) as connection:
             with connection.transaction():
                 with connection.cursor() as cursor:
@@ -321,6 +332,10 @@ class ProfitReportQueryTool:
                         sql.SQL("SET LOCAL statement_timeout = {}").format(
                             sql.Literal(f"{self.statement_timeout_ms}ms")
                         )
+                    )
+                    cursor.execute(
+                        "SELECT set_config('app.tenant_id', %s, true)",
+                        (tenant_id,),
                     )
                 table = sql.Identifier(self.TABLE)
                 with connection.cursor() as cursor:
@@ -331,8 +346,10 @@ class ProfitReportQueryTool:
                                    min(posted_datetime) AS first_posted_at,
                                    max(posted_datetime) AS last_posted_at
                             FROM {table}
+                            WHERE tenant_id = %s
                             """
-                        ).format(table=table)
+                        ).format(table=table),
+                        (tenant_id,),
                     )
                     table_stats = cursor.fetchone()
                 table_total = int(table_stats["total"])
@@ -340,7 +357,7 @@ class ProfitReportQueryTool:
                     raise ProfitReportQueryError(
                         "利润报表本地表为空，请先导入 XLSX 数据"
                     )
-                statement, parameters = self._statement(plan)
+                statement, parameters = self._statement(plan, tenant_id)
                 with connection.cursor() as cursor:
                     cursor.execute(statement, parameters)
                     rows = [
@@ -348,7 +365,7 @@ class ProfitReportQueryTool:
                         for row in cursor.fetchall()
                     ]
                 with connection.cursor() as cursor:
-                    filters, filter_params = self._filters(plan)
+                    filters, filter_params = self._filters(plan, tenant_id)
                     count_statement = sql.SQL(
                         "SELECT count(*) AS total FROM {table} WHERE {filters}"
                     ).format(

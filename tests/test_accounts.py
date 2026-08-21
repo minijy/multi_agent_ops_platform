@@ -6,14 +6,10 @@ from ops_agent.api.app import create_app
 from ops_agent.config import Settings
 
 
-def _settings(tmp_path: Path, **overrides) -> Settings:
+def _settings(tmp_path: Path, postgres_dsn: str, **overrides) -> Settings:
     return Settings(
         _env_file=None,
-        platform_db_path=tmp_path / "platform.sqlite3",
-        session_event_path=tmp_path / "events.sqlite3",
-        runtime_governance_path=tmp_path / "governance.sqlite3",
-        runtime_metrics_path=tmp_path / "metrics.sqlite3",
-        memory_db_path=tmp_path / "memory.sqlite3",
+        postgres_dsn=postgres_dsn,
         agent_definitions_path=tmp_path / "agents.json",
         model_definitions_path=tmp_path / "models.json",
         connection_definitions_path=tmp_path / "connections.json",
@@ -30,8 +26,8 @@ def _bearer(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def test_registration_login_refresh_and_header_bypass_protection(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path))) as client:
+def test_registration_login_refresh_and_header_bypass_protection(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         registered = client.post(
             "/v1/auth/register",
             json={
@@ -71,8 +67,8 @@ def test_registration_login_refresh_and_header_bypass_protection(tmp_path: Path)
         assert reused.status_code == 401
 
 
-def test_admin_temporary_password_requires_change_and_reset(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path))) as client:
+def test_admin_temporary_password_requires_change_and_reset(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         owner = client.post(
             "/v1/auth/register",
             json={
@@ -127,9 +123,10 @@ def test_admin_temporary_password_requires_change_and_reset(tmp_path: Path):
         assert reset.json()["account"]["must_change_password"] is True
 
 
-def test_required_jwt_does_not_fallback_for_disabled_account(tmp_path: Path):
+def test_required_jwt_does_not_fallback_for_disabled_account(tmp_path: Path, postgres_dsn):
     settings = _settings(
         tmp_path,
+        postgres_dsn,
         jwt_secret="required-jwt-secret-required-jwt-secret",
         jwt_required=True,
     )
@@ -172,8 +169,8 @@ def test_required_jwt_does_not_fallback_for_disabled_account(tmp_path: Path):
         assert rejected.json()["detail"]["code"] == "account_unavailable"
 
 
-def test_last_admin_cannot_be_disabled_or_deleted(tmp_path: Path):
-    with TestClient(create_app(_settings(tmp_path))) as client:
+def test_last_admin_cannot_be_disabled_or_deleted(tmp_path: Path, postgres_dsn):
+    with TestClient(create_app(_settings(tmp_path, postgres_dsn))) as client:
         owner = client.post(
             "/v1/auth/register",
             json={
@@ -200,11 +197,12 @@ def test_last_admin_cannot_be_disabled_or_deleted(tmp_path: Path):
         assert deleted.status_code == 409
 
 
-def test_production_disables_self_service_registration(tmp_path: Path, monkeypatch):
+def test_production_disables_self_service_registration(tmp_path: Path, monkeypatch, postgres_dsn):
     # Keep this endpoint test isolated from the production persistence validation.
     monkeypatch.setattr(Settings, "validate_runtime", lambda self: None)
     settings = _settings(
         tmp_path,
+        postgres_dsn,
         app_env="production",
         jwt_secret="test-production-jwt-secret-at-least-32-chars",
         account_bootstrap_token="production-bootstrap-token-long-enough",
@@ -225,10 +223,11 @@ def test_production_disables_self_service_registration(tmp_path: Path, monkeypat
         )
 
 
-def test_production_bootstrap_token_only_initializes_empty_tenant(tmp_path: Path, monkeypatch):
+def test_production_bootstrap_token_only_initializes_empty_tenant(tmp_path: Path, monkeypatch, postgres_dsn):
     monkeypatch.setattr(Settings, "validate_runtime", lambda self: None)
     settings = _settings(
         tmp_path,
+        postgres_dsn,
         app_env="production",
         jwt_secret="test-production-jwt-secret-at-least-32-chars",
         account_bootstrap_token="production-bootstrap-token-long-enough",

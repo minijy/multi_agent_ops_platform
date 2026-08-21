@@ -92,32 +92,27 @@ def open_runtime_stack(settings: Settings) -> Iterator[RuntimeStack]:
     )
     seed_skills_from_paths(agent_skill_store, settings.skills_paths)
     agent_registry = create_agent_registry(store=agent_skill_store)
-    binding_persistence = None
-    tool_catalog = None
-    if settings.control_plane_backend == "postgres":
-        from ..connector_control_plane import (
-            PostgresBindingPersistence,
-            PostgresToolCatalog,
-            delete_hybrid_agents,
-            import_json_bindings,
-            seed_tool_catalog,
-        )
+    from ..connector_control_plane import (
+        PostgresBindingPersistence,
+        PostgresToolCatalog,
+        delete_hybrid_agents,
+        import_json_bindings,
+        seed_tool_catalog,
+        seed_default_bindings,
+    )
 
-        binding_persistence = PostgresBindingPersistence(settings.postgres_dsn)
-        import_json_bindings(binding_persistence, settings.tool_bindings_path)
-        tool_catalog = PostgresToolCatalog(settings.postgres_dsn)
-        seed_tool_catalog(tool_catalog, agent_skill_store.list_agents())
-        if delete_hybrid_agents(agent_skill_store):
-            agent_registry.reload()
+    binding_persistence = PostgresBindingPersistence(settings.postgres_dsn)
+    import_json_bindings(binding_persistence, settings.tool_bindings_path)
+    tool_catalog = PostgresToolCatalog(settings.postgres_dsn)
+    seed_tool_catalog(tool_catalog, agent_skill_store.list_agents())
+    if delete_hybrid_agents(agent_skill_store):
+        agent_registry.reload()
     connection_registry = create_connection_registry(
         settings.connection_definitions_path,
         settings.connection_secrets_path,
         settings=settings,
     )
-    if binding_persistence is not None:
-        from ..connector_control_plane import seed_default_bindings
-
-        seed_default_bindings(binding_persistence, connection_registry.list_all())
+    seed_default_bindings(binding_persistence, connection_registry.list_all())
     knowledge_spaces = create_knowledge_space_registry(
         settings.knowledge_spaces_path, connection_registry
     )

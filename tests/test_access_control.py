@@ -1,13 +1,11 @@
-import sqlite3
-
 import pytest
 
 from ops_agent.access_control import AccessControlStore, ToolAssignmentConflict
 from ops_agent.agent_roles import SYSTEM_DEFAULT_TOOL_NAMES
 
 
-def test_rbac_compatibility_and_effective_tool_union(tmp_path):
-    store = AccessControlStore(tmp_path / "platform.sqlite3")
+def test_rbac_compatibility_and_effective_tool_union(tmp_path, postgres_dsn):
+    store = AccessControlStore(postgres_dsn)
 
     compatibility = store.effective_access("tenant-a", "unknown")
     assert compatibility.configured is False
@@ -30,16 +28,16 @@ def test_rbac_compatibility_and_effective_tool_union(tmp_path):
     assert denied.allowed_tools == frozenset()
 
 
-def test_disabled_user_has_no_tools(tmp_path):
-    store = AccessControlStore(tmp_path / "platform.sqlite3")
+def test_disabled_user_has_no_tools(tmp_path, postgres_dsn):
+    store = AccessControlStore(postgres_dsn)
     store.put_user("tenant-a", "alice", "Alice", enabled=False)
     result = store.effective_access("tenant-a", "alice")
     assert result.user_enabled is False
     assert result.allowed_tools == frozenset()
 
 
-def test_group_directly_configures_multiple_tools_and_tools_are_reusable(tmp_path):
-    store = AccessControlStore(tmp_path / "platform.sqlite3")
+def test_group_directly_configures_multiple_tools_and_tools_are_reusable(tmp_path, postgres_dsn):
+    store = AccessControlStore(postgres_dsn)
     store.put_user("tenant-a", "alice", "Alice")
     store.put_group("tenant-a", "finance", "Finance")
     store.put_group("tenant-a", "operations", "Operations")
@@ -64,14 +62,14 @@ def test_group_directly_configures_multiple_tools_and_tools_are_reusable(tmp_pat
         SYSTEM_DEFAULT_TOOL_NAMES | {"kingdee_cloud_query"}
     )
 
-    reopened = AccessControlStore(tmp_path / "platform.sqlite3")
+    reopened = AccessControlStore(postgres_dsn)
     assert reopened.get_group("tenant-a", "finance")["tool_names"] == [
         "kingdee_cloud_query"
     ]
 
 
-def test_enabled_user_gets_runtime_tools_without_permission_group(tmp_path):
-    store = AccessControlStore(tmp_path / "platform.sqlite3")
+def test_enabled_user_gets_runtime_tools_without_permission_group(tmp_path, postgres_dsn):
+    store = AccessControlStore(postgres_dsn)
     store.put_user("tenant-a", "alice", "Alice")
 
     result = store.effective_access("tenant-a", "alice", role="operator")
@@ -80,8 +78,8 @@ def test_enabled_user_gets_runtime_tools_without_permission_group(tmp_path):
     assert result.group_ids == ()
 
 
-def test_system_tools_are_removed_from_permission_rules(tmp_path):
-    store = AccessControlStore(tmp_path / "platform.sqlite3")
+def test_system_tools_are_removed_from_permission_rules(tmp_path, postgres_dsn):
+    store = AccessControlStore(postgres_dsn)
     store.put_group("tenant-a", "finance", "Finance")
     rule = store.put_rule(
         "tenant-a", "rule-a", "Rule A",
@@ -92,28 +90,8 @@ def test_system_tools_are_removed_from_permission_rules(tmp_path):
     assert rule["tool_names"] == ["profit_report_query"]
 
 
-def test_legacy_system_only_rule_is_removed_on_startup(tmp_path):
-    path = tmp_path / "platform.sqlite3"
-    store = AccessControlStore(path)
-    store.put_group("tenant-a", "runtime", "Runtime")
-    with sqlite3.connect(path) as connection:
-        connection.execute(
-            """INSERT INTO permission_rules(
-               tenant_id,rule_id,group_id,name,description,tool_names_json)
-               VALUES(?,?,?,?,?,?)""",
-            (
-                "tenant-a", "legacy-runtime", "runtime", "Legacy runtime", "",
-                '["delegate_subagent","load_skill"]',
-            ),
-        )
-
-    migrated = AccessControlStore(path)
-
-    assert migrated.get_rule("tenant-a", "legacy-runtime") is None
-
-
-def test_permission_rule_belongs_to_only_one_group(tmp_path):
-    store = AccessControlStore(tmp_path / "platform.sqlite3")
+def test_permission_rule_belongs_to_only_one_group(tmp_path, postgres_dsn):
+    store = AccessControlStore(postgres_dsn)
     store.put_group("tenant-a", "finance", "Finance")
     store.put_group("tenant-a", "operations", "Operations")
     store.put_rule(
@@ -129,38 +107,8 @@ def test_permission_rule_belongs_to_only_one_group(tmp_path):
     assert store.get_rule("tenant-a", "read-profit")["group_id"] == "operations"
 
 
-def test_legacy_many_to_many_rules_are_migrated_deterministically(tmp_path):
-    path = tmp_path / "platform.sqlite3"
-    with sqlite3.connect(path) as connection:
-        connection.executescript(
-            """
-            CREATE TABLE permission_groups(
-                tenant_id TEXT NOT NULL,group_id TEXT NOT NULL,name TEXT NOT NULL,
-                description TEXT NOT NULL DEFAULT '',PRIMARY KEY(tenant_id,group_id));
-            CREATE TABLE permission_rules(
-                tenant_id TEXT NOT NULL,rule_id TEXT NOT NULL,name TEXT NOT NULL,
-                description TEXT NOT NULL DEFAULT '',tool_names_json TEXT NOT NULL DEFAULT '[]',
-                PRIMARY KEY(tenant_id,rule_id));
-            CREATE TABLE group_permission_rules(
-                tenant_id TEXT NOT NULL,group_id TEXT NOT NULL,rule_id TEXT NOT NULL,
-                PRIMARY KEY(tenant_id,group_id,rule_id));
-            INSERT INTO permission_groups VALUES('tenant-a','group-b','B','');
-            INSERT INTO permission_groups VALUES('tenant-a','group-a','A','');
-            INSERT INTO permission_rules VALUES('tenant-a','rule-1','Rule','', '[]');
-            INSERT INTO group_permission_rules VALUES('tenant-a','group-b','rule-1');
-            INSERT INTO group_permission_rules VALUES('tenant-a','group-a','rule-1');
-            """
-        )
-
-    store = AccessControlStore(path)
-
-    assert store.get_rule("tenant-a", "rule-1")["group_id"] == "group-a"
-    assert store.get_group("tenant-a", "group-a")["rule_ids"] == ["rule-1"]
-    assert store.get_group("tenant-a", "group-b")["rule_ids"] == []
-
-
-def test_tool_is_unique_within_group_but_reusable_across_groups(tmp_path):
-    store = AccessControlStore(tmp_path / "platform.sqlite3")
+def test_tool_is_unique_within_group_but_reusable_across_groups(tmp_path, postgres_dsn):
+    store = AccessControlStore(postgres_dsn)
     store.put_group("tenant-a", "finance", "Finance")
     store.put_group("tenant-a", "operations", "Operations")
     store.put_rule(
@@ -183,8 +131,8 @@ def test_tool_is_unique_within_group_but_reusable_across_groups(tmp_path):
     assert reused["tool_names"] == ["profit_report_query"]
 
 
-def test_moving_rule_rejects_duplicate_tool_in_target_group(tmp_path):
-    store = AccessControlStore(tmp_path / "platform.sqlite3")
+def test_moving_rule_rejects_duplicate_tool_in_target_group(tmp_path, postgres_dsn):
+    store = AccessControlStore(postgres_dsn)
     store.put_group("tenant-a", "finance", "Finance")
     store.put_group("tenant-a", "operations", "Operations")
     store.put_rule(
@@ -202,8 +150,8 @@ def test_moving_rule_rejects_duplicate_tool_in_target_group(tmp_path):
     assert store.get_rule("tenant-a", "rule-b")["group_id"] == "operations"
 
 
-def test_admin_bypasses_user_group_and_rule_restrictions(tmp_path):
-    store = AccessControlStore(tmp_path / "platform.sqlite3")
+def test_admin_bypasses_user_group_and_rule_restrictions(tmp_path, postgres_dsn):
+    store = AccessControlStore(postgres_dsn)
     store.put_user("tenant-a", "disabled-admin", "Disabled Admin", enabled=False)
     store.put_user("tenant-a", "alice", "Alice")
 
@@ -220,8 +168,8 @@ def test_admin_bypasses_user_group_and_rule_restrictions(tmp_path):
     assert unregistered.allowed_tools is None
 
 
-def test_permission_denial_detail_explains_missing_binding(tmp_path):
-    store = AccessControlStore(tmp_path / "platform.sqlite3")
+def test_permission_denial_detail_explains_missing_binding(tmp_path, postgres_dsn):
+    store = AccessControlStore(postgres_dsn)
     store.put_user("tenant-a", "alice", "Alice")
 
     detail = store.effective_access(

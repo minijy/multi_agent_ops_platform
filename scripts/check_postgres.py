@@ -1,4 +1,4 @@
-"""Initialize and verify the configured PostgreSQL persistence backends."""
+"""Initialize and verify PostgreSQL persistence."""
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
@@ -12,14 +12,6 @@ from ops_agent.runtime.session_events import create_session_event_store
 def main() -> None:
     settings = Settings()
     settings.validate_runtime()
-    required_backends = {
-        "control_plane": settings.control_plane_backend,
-        "session_events": settings.session_event_backend,
-    }
-    if settings.memory_enabled:
-        required_backends["memory"] = settings.memory_backend
-    if set(required_backends.values()) != {"postgres"}:
-        raise SystemExit(f"All enabled persistence backends must be postgres: {required_backends}")
 
     create_platform_store(settings)
     create_session_event_store(settings)
@@ -38,7 +30,7 @@ def main() -> None:
             f"expected={expected_revision!r}. Run ops-agent-migrate."
         )
     print("PostgreSQL persistence and migration verification succeeded.")
-    print(f"Backends: {required_backends}; revision: {actual_revision}")
+    print(f"revision: {actual_revision}")
 
 
 if __name__ == "__main__":

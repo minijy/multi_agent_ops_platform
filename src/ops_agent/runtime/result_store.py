@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import json
 import math
-import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from pathlib import Path
 from typing import Any, Protocol
 
 from ..config import Settings
@@ -93,77 +91,6 @@ class ResultStore(Protocol):
 
     def delete_session(self, session_id: str, tenant_id: str) -> int: ...
 
-
-class SQLiteResultStore:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS agent_tool_results(
-                    result_ref TEXT PRIMARY KEY,
-                    tenant_id TEXT NOT NULL,
-                    user_id TEXT NOT NULL,
-                    session_id TEXT NOT NULL,
-                    tool_name TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_agent_tool_results_session
-                    ON agent_tool_results(tenant_id, session_id, created_at);
-                """
-            )
-
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30)
-        connection.row_factory = sqlite3.Row
-        return connection
-
-    def put(self, record: StoredResult) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """INSERT INTO agent_tool_results(
-                    result_ref,tenant_id,user_id,session_id,tool_name,payload_json,created_at
-                ) VALUES(?,?,?,?,?,?,?)""",
-                (
-                    record.result_ref,
-                    record.tenant_id,
-                    record.user_id,
-                    record.session_id,
-                    record.tool_name,
-                    json.dumps(record.payload, ensure_ascii=False, default=str),
-                    record.created_at,
-                ),
-            )
-
-    def get(self, result_ref: str, tenant_id: str) -> StoredResult | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM agent_tool_results WHERE result_ref=? AND tenant_id=?",
-                (result_ref, tenant_id),
-            ).fetchone()
-        if row is None:
-            return None
-        return StoredResult(
-            result_ref=row["result_ref"],
-            tenant_id=row["tenant_id"],
-            user_id=row["user_id"],
-            session_id=row["session_id"],
-            tool_name=row["tool_name"],
-            payload=json.loads(row["payload_json"]),
-            created_at=row["created_at"],
-        )
-
-    def delete_session(self, session_id: str, tenant_id: str) -> int:
-        with self._connect() as connection:
-            cursor = connection.execute(
-                "DELETE FROM agent_tool_results WHERE session_id=? AND tenant_id=?",
-                (session_id, tenant_id),
-            )
-            return int(cursor.rowcount or 0)
-
-
 class PostgresResultStore:
     def __init__(self, dsn: str) -> None:
         self.dsn = dsn
@@ -239,9 +166,7 @@ class PostgresResultStore:
 
 
 def create_result_store(settings: Settings) -> ResultStore:
-    if settings.session_event_backend == "postgres":
-        return PostgresResultStore(settings.postgres_dsn)
-    return SQLiteResultStore(settings.session_event_path)
+    return PostgresResultStore(settings.postgres_dsn)
 
 
 def materialize_tool_output(

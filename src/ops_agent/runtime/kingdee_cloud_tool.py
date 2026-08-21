@@ -6,7 +6,13 @@ from ..workflows.kingdee_cloud.domain import KingdeeQueryPlan
 from ..workflows.kingdee_cloud.query_tool import KingdeeQueryTool
 from .tools import ToolDefinition, ToolExecutionContext, ToolRegistry
 from .connectors import ConnectorRuntime
+from ..query_policy import enforce_query_plan
 from ..source_privacy import KINGDEE_SOURCE
+
+
+def _require_same_tenant(connection, tenant_id: str) -> None:
+    if connection.tenant_id != tenant_id:
+        raise PermissionError("connector tenant does not match principal")
 
 
 def register_kingdee_cloud_tool(
@@ -21,10 +27,16 @@ def register_kingdee_cloud_tool(
         plan: KingdeeQueryPlan,
         context: ToolExecutionContext,
     ) -> dict[str, Any]:
+        plan = enforce_query_plan("kingdee_cloud_query", plan, context.role)
+
+        def query(client, connection):
+            _require_same_tenant(connection, context.tenant_id)
+            return query_tool.execute(client, plan)
+
         rows, label, form_id, columns = connectors.execute_tool(
             context.tenant_id,
             "kingdee_cloud_query",
-            lambda client, _connection: query_tool.execute(client, plan),
+            query,
         )
         summary = (
             f"{label} 在 {plan.start_date} 至 {plan.end_date} 无匹配记录"
