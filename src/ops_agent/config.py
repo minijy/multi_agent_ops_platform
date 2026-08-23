@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     connection_secrets_path: Path = Path("data/connection_secrets.json")
     tool_bindings_path: Path = Path("data/tool_bindings.json")
     knowledge_spaces_path: Path = Path("data/knowledge_spaces.json")
+    knowledge_api_backend: Literal["ecommerce_graphrag", "wenshu"] = "ecommerce_graphrag"
     knowledge_api_url: str = ""
     knowledge_api_token: str = ""
     default_tenant_id: str = "tenant-a"
@@ -181,7 +182,7 @@ class Settings(BaseSettings):
             raise ValueError("DASHSCOPE_API_KEY is required when MODEL_PROVIDER=qwen")
         if self.model_provider == "deepseek" and not self.deepseek_api_key:
             raise ValueError("DEEPSEEK_API_KEY is required when MODEL_PROVIDER=deepseek")
-        # Knowledge documents are managed by 文枢 (KNOWLEDGE_API_URL).
+        # Knowledge retrieval is delegated to KNOWLEDGE_API_BACKEND.
         # Legacy QDRANT_* environment fields are retained only for memory search.
 
 

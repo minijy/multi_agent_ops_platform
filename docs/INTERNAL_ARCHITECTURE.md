@@ -36,7 +36,7 @@
 - [30. Catalog 如何拼出来](#30-catalog-如何拼出来)
 - [31. 前端 SSE 与消息回放](#31-前端-sse-与消息回放)
 - [32. 账户与 JWT](#32-账户与-jwt)
-- [33. 知识：文枢网关 vs 向量空间](#33-知识文枢网关-vs-向量空间)
+- [33. 知识：GraphRAG 网关 vs 向量空间](#33-知识graphrag-网关-vs-向量空间)
 - [34. 本地数据文件与排障](#34-本地数据文件与排障)
 
 ---
@@ -468,7 +468,7 @@ system prompt 拼接（`_execute_turn`）：
 | `kingdee_cloud_query` | kingdee | 单据查询计划 | WebAPI `execute_bill_query` |
 | `web_search` | tavily | query/max_results | Coordinator 只读，不审批 |
 | `dingtalk_*` | dingtalk | 用户/群/待办 | `requires_approval`，禁止自动重试 |
-| `search_knowledge` | 文枢 `KnowledgeGateway` | query/space_id/top_k | Coordinator；未配 API 返回中文提示而非编造 |
+| `search_knowledge` | GraphRAG `KnowledgeGateway` | query/space_id/top_k | Coordinator；未配 API 返回中文提示而非编造 |
 | `load_skill` | 无 | skill 名 | 把 SKILL.md 注入上下文 |
 | `sandbox_*` | 无 | 命令/路径 | Analyst 向；full-access 要审批 |
 | `delegate_*` | 无 | objective / tasks | 见第 13 节 |
@@ -662,7 +662,7 @@ Coordinator `_execute_turn` 在无 parent 时 `build_snapshot(question)`。子�
 
 回合成功结束后（仅 Coordinator、非 resume、`memory_mode=default`）：`extract_candidates` 写 `memory.candidates_extracted`；`capture_episode` 写 `memory.episode_extracted`。候选要确认才进检索。检索公式、冲突链、Worker 见 [第 26 节](#26-记忆检索冲突与维护)；产品策略见 [MEMORY_SYSTEM.md](MEMORY_SYSTEM.md)。
 
-对话检索走文枢网关，管理页还有独立的向量「知识空间」配置，两套不要混，见 [第 33 节](#33-知识文枢网关-vs-向量空间)。
+对话检索走 GraphRAG 网关，管理页还有独立的向量「知识空间」配置，两套不要混，见 [第 33 节](#33-知识graphrag-网关-vs-向量空间)。
 
 ---
 
@@ -1006,20 +1006,25 @@ OTel：`configure_tracing`。`otel_exporter=console|otlp`。span：`agent.turn`�
 
 ---
 
-## 33. 知识：文枢网关 vs 向量空间
+## 33. 知识：GraphRAG 网关 vs 向量空间
 
 两套并存，职责不同：
 
-| | 文枢 `KnowledgeGateway` | `KnowledgeSpaceRegistry` |
+| | GraphRAG `KnowledgeGateway` | `KnowledgeSpaceRegistry` |
 |---|---|---|
-| 配置 | `.env` 的 `KNOWLEDGE_API_URL` / `TOKEN` | 连接器 Qdrant/Milvus + `data/knowledge_spaces.json` |
-| 谁用 | `search_knowledge`；`register_knowledge_library_routes` 做库/分类/文档浏览（若文枢已实现入库） | 管理页「知识空间」测试连接、看 Collection 内容 |
-| 检索 | HTTP `X-Knowledge-Token` + `X-Tenant-ID` 调文枢 | 直连向量库字段映射 |
-| 未配置 | Tool 返回「尚未配置文枢」，不编造制度 | 空间列表为空 |
+| 配置 | `.env` 的 `KNOWLEDGE_API_BACKEND` / `URL` / 可选 `TOKEN` | 连接器 Qdrant/Milvus + `data/knowledge_spaces.json` |
+| 谁用 | Coordinator 的 `search_knowledge` | 管理页「知识空间」测试连接、看 Collection 内容 |
+| 检索 | HTTP 调用 `/v1/retrieve`，融合 OpenSearch 混合检索、LightRAG、Neo4j 和规则证据 | 直连向量库字段映射 |
+| 未配置 | Tool 返回「尚未连接知识检索服务」，不编造制度 | 空间列表为空 |
 
-`search_knowledge`：可指定 `space_id` / `category_ids`；默认扫网关列出的该租户空间；每空间 top_k，再按 score 合并。命中项含 title、page、chunk、≤800 字 snippet。指定了不存在的空间 → ok=false 的中文 summary。
+`search_knowledge`：GraphRAG 后端映射为单一虚拟空间 `ecommerce-graphrag`，
+调用时传入完整问题。网关只接收统一检索返回的可信 `citation_ids`，按证据优先级
+排序，再转为 title、page、chunk、source、evidence_id 和 ≤800 字 snippet。
+`KNOWLEDGE_API_BACKEND=wenshu` 仍可回退旧的多知识空间协议。
 
-不要把 Qdrant 空间配置理解成 `search_knowledge` 的唯一后端；Coordinator 制度问答以文枢为准。向量空间是控制面里「已有 Collection 的浏览/测试」以及记忆可选索引。
+不要把 Qdrant 空间配置理解成 `search_knowledge` 的唯一后端；Coordinator
+制度问答默认以电商 GraphRAG 统一检索为准。向量空间仍用于控制面的 Collection
+浏览/连接测试，以及记忆的可选索引。
 
 ---
 
@@ -1049,4 +1054,3 @@ OTel：`configure_tracing`。`otel_exporter=console|otlp`。span：`agent.turn`�
 6. 流式卡死 → `stream_slots` 429，或模型 Adapter 没打 token 也没结束
 7. 沙箱 Tool 消失 → 非 macOS/Windows，或 Seatbelt / AppContainer 探测失败
 8. 知识问答空洞 → `KNOWLEDGE_API_*` 未配，不是 Qdrant 空间没建
-

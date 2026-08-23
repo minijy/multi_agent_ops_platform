@@ -302,7 +302,9 @@ POSTGRES_PASSWORD='replace-me' docker compose -f docker-compose.production.yml u
 ### Tavily 网页搜索
 
 Coordinator 通过内置工具 `web_search` 检索公开互联网（新闻、官网、公开政策）。
-内部制度、手册、SOP 仍走 `search_knowledge`（文枢知识库），不要把网页结果写成公司文档。
+内部制度、手册、SOP 仍走 `search_knowledge`（默认为电商 GraphRAG
+统一检索），不要把网页结果写成公司文档。GraphRAG 网关会调用
+`/v1/retrieve`，使用查询改写、OpenSearch 混合向量检索、LightRAG 和图谱证据融合。
 
 管理员在「连接器」页创建「Tavily 网页搜索」连接，填写 Tavily API Key。
 Key 只写入独立 Secret Store，接口和页面只显示 `********`；不要把 Key 写进 `.env`。

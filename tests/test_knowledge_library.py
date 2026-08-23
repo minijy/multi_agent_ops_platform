@@ -22,6 +22,7 @@ def test_knowledge_library_proxies_wenshu_search(tmp_path: Path, postgres_dsn):
         postgres_dsn,
         knowledge_api_url="http://127.0.0.1:8000",
         knowledge_api_token="test-service-token",
+        knowledge_api_backend="wenshu",
     )
     captured: dict = {}
 

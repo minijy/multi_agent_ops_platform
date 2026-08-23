@@ -1,4 +1,4 @@
-"""Coordinator tool: retrieve published knowledge slices from 文枢."""
+"""Coordinator tool: retrieve evidence from the configured knowledge backend."""
 
 from __future__ import annotations
 
@@ -39,6 +39,9 @@ def _citation(item: dict[str, Any], space_id: str) -> dict[str, Any]:
         "category_id": item.get("category_id") or None,
         "score": float(item.get("score") or 0.0),
         "text": _snippet(str(item.get("text") or "")),
+        "source": str(item.get("source") or "knowledge"),
+        "evidence_id": str(item.get("evidence_id") or ""),
+        "authority": item.get("authority"),
     }
 
 
@@ -67,7 +70,7 @@ def register_search_knowledge_tool(
                 "ok": False,
                 "configured": False,
                 "items": [],
-                "summary": "尚未连接文枢知识库，无法检索文档。",
+                "summary": "尚未连接知识检索服务，无法检索文档。",
             }
         try:
             spaces = gateway.list_spaces(context.tenant_id)
@@ -134,7 +137,8 @@ def register_search_knowledge_tool(
         ToolDefinition(
             name="search_knowledge",
             description=(
-                "需要引用已发布制度、手册、故障码、SOP，或解释运营/平台政策术语时调用"
+                "需要引用已发布制度、手册、故障码、SOP，或解释运营/平台政策术语时调用。"
+                "底层使用电商 GraphRAG 的查询改写、OpenSearch 混合检索、LightRAG 与图谱证据融合"
                 "（包括用户只问「VAT 是什么意思」这类定义）。"
                 "寒暄、与文档无关的百科、以及上文切片已够用时不要调用。"
                 "query 写成独立完整的检索句，不要原样丢用户短追问。"

@@ -1,7 +1,8 @@
-"""Server-side client and proxy routes for the 文枢 knowledge-management API."""
+"""Server-side client and proxy routes for external knowledge services."""
 
 from __future__ import annotations
 
+import json as jsonlib
 from typing import Any, Callable
 
 import httpx
@@ -18,24 +19,41 @@ class KnowledgeGatewayError(Exception):
 
 
 class KnowledgeGateway:
-    def __init__(self, base_url: str = "", token: str = "", timeout_seconds: float = 60.0) -> None:
+    GRAPH_SPACE_ID = "ecommerce-graphrag"
+
+    def __init__(
+        self,
+        base_url: str = "",
+        token: str = "",
+        timeout_seconds: float = 60.0,
+        backend: str = "ecommerce_graphrag",
+    ) -> None:
         self.base_url = (base_url or "").rstrip("/")
         self.token = (token or "").strip()
         self.timeout_seconds = timeout_seconds
+        self.backend = backend.strip().lower() or "ecommerce_graphrag"
+        if self.backend not in {"ecommerce_graphrag", "wenshu"}:
+            raise ValueError(f"Unsupported knowledge API backend: {backend}")
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "KnowledgeGateway":
-        return cls(settings.knowledge_api_url, settings.knowledge_api_token)
+        return cls(
+            settings.knowledge_api_url,
+            settings.knowledge_api_token,
+            backend=settings.knowledge_api_backend,
+        )
 
     @property
     def configured(self) -> bool:
-        return bool(self.base_url and self.token)
+        if self.backend == "wenshu":
+            return bool(self.base_url and self.token)
+        return bool(self.base_url)
 
     def status(self) -> dict[str, Any]:
         return {
             "configured": self.configured,
             "base_url": self.base_url,
-            "backend": "wenshu" if self.configured else "unconfigured",
+            "backend": self.backend if self.configured else "unconfigured",
         }
 
     def request(
@@ -55,15 +73,16 @@ class KnowledgeGateway:
                 503,
                 {
                     "code": "knowledge_api_not_configured",
-                    "message": "尚未配置文枢知识库 API。",
-                    "hint": "在运营平台 .env 中设置 KNOWLEDGE_API_URL 和 KNOWLEDGE_API_TOKEN，并与文枢的 KNOWLEDGE_API_TOKEN 一致。",
+                    "message": "尚未配置知识检索 API。",
+                    "hint": "在运营平台 .env 中设置 KNOWLEDGE_API_BACKEND 和 KNOWLEDGE_API_URL。",
                 },
             )
-        headers = {
-            "Accept": "application/json",
-            "X-Knowledge-Token": self.token,
-            "X-Tenant-ID": tenant_id,
-        }
+        headers = {"Accept": "application/json", "X-Tenant-ID": tenant_id}
+        if self.token:
+            if self.backend == "wenshu":
+                headers["X-Knowledge-Token"] = self.token
+            else:
+                headers["Authorization"] = f"Bearer {self.token}"
         url = f"{self.base_url}{path}"
         try:
             response = httpx.request(
@@ -81,7 +100,7 @@ class KnowledgeGateway:
                 502,
                 {
                     "code": "knowledge_api_unreachable",
-                    "message": "无法连接文枢知识库服务。",
+                    "message": "无法连接知识检索服务。",
                     "hint": str(exc),
                 },
             ) from exc
@@ -98,8 +117,87 @@ class KnowledgeGateway:
         return response.json()
 
     def list_spaces(self, tenant_id: str) -> list[dict[str, Any]]:
+        if self.backend == "ecommerce_graphrag":
+            if not self.configured:
+                self.request("GET", "/health", tenant_id=tenant_id)
+            return [
+                {
+                    "id": self.GRAPH_SPACE_ID,
+                    "name": "电商 GraphRAG 知识库",
+                    "tenant_id": tenant_id,
+                    "backend": self.backend,
+                }
+            ]
         payload = self.request("GET", "/v1/spaces", tenant_id=tenant_id) or {}
         return list(payload.get("items") or [])
+
+    @staticmethod
+    def _evidence_text(source: str, data: dict[str, Any]) -> str:
+        for key in ("content", "text", "answer", "summary", "description"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        if source in {"postgresql", "neo4j", "rule_engine"} and data:
+            return jsonlib.dumps(data, ensure_ascii=False, default=str)
+        return ""
+
+    @classmethod
+    def _normalize_graphrag_result(
+        cls,
+        payload: dict[str, Any],
+        *,
+        top_k: int,
+    ) -> dict[str, Any]:
+        citation_ids = {str(value) for value in payload.get("citation_ids") or []}
+        items: list[dict[str, Any]] = []
+        for evidence in payload.get("evidence") or []:
+            if not isinstance(evidence, dict):
+                continue
+            evidence_id = str(evidence.get("evidence_id") or "")
+            if citation_ids and evidence_id not in citation_ids:
+                continue
+            if evidence.get("trusted_for_generation") is False:
+                continue
+            data = evidence.get("data") if isinstance(evidence.get("data"), dict) else {}
+            source = str(evidence.get("source") or "graphrag")
+            text = cls._evidence_text(source, data)
+            if not text:
+                continue
+            priority = float(evidence.get("priority") or 0.0)
+            document_id = (
+                data.get("document_id")
+                or data.get("source_id")
+                or data.get("path")
+                or evidence_id
+            )
+            chunk_id = data.get("chunk_id") or data.get("id") or evidence_id
+            items.append(
+                {
+                    "knowledge_space_id": cls.GRAPH_SPACE_ID,
+                    "document_id": str(document_id),
+                    "chunk_id": str(chunk_id),
+                    "evidence_id": evidence_id,
+                    "source": source,
+                    "authority": evidence.get("authority"),
+                    "title": str(evidence.get("title") or data.get("title") or "GraphRAG 证据"),
+                    "page": data.get("page") or data.get("page_start"),
+                    "category_id": data.get("topic") or data.get("category_id"),
+                    # Unified retrieval priorities are comparable across heterogeneous
+                    # evidence sources; raw OpenSearch scores are not.
+                    "score": max(0.0, min(priority / 100.0, 1.0)),
+                    "retrieval_score": data.get("retrieval_score") or data.get("score"),
+                    "text": text,
+                }
+            )
+        items.sort(key=lambda item: item["score"], reverse=True)
+        return {
+            "knowledge_space_id": cls.GRAPH_SPACE_ID,
+            "query_id": payload.get("query_id"),
+            "status": payload.get("status"),
+            "query_expansion": payload.get("query_expansion") or {},
+            "warnings": payload.get("warnings") or [],
+            "items": items[:top_k],
+        }
 
     def search_space(
         self,
@@ -110,6 +208,27 @@ class KnowledgeGateway:
         top_k: int = 5,
         category_ids: list[str] | None = None,
     ) -> dict[str, Any]:
+        if self.backend == "ecommerce_graphrag":
+            if space_id and space_id != self.GRAPH_SPACE_ID:
+                raise KnowledgeGatewayError(
+                    404,
+                    {"code": "knowledge_space_not_found", "message": "指定的 GraphRAG 知识空间不存在。"},
+                )
+            payload = self.request(
+                "POST",
+                "/v1/retrieve",
+                tenant_id=tenant_id,
+                json={"query": query, "include_debug": True},
+            )
+            if not isinstance(payload, dict):
+                return {"items": []}
+            result = self._normalize_graphrag_result(payload, top_k=top_k)
+            if category_ids:
+                result["warnings"] = [
+                    *result.get("warnings", []),
+                    "GraphRAG 统一检索暂不支持 category_ids 过滤。",
+                ]
+            return result
         payload = self.request(
             "POST",
             f"/v1/spaces/{space_id}/search",
@@ -173,7 +292,11 @@ def register_knowledge_library_routes(
         x_user_role: str | None = Header(default=None),
     ) -> Any:
         principal = _principal(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
-        return _call(_gateway(request), "GET", "/v1/spaces", principal.tenant_id)
+        try:
+            items = _gateway(request).list_spaces(principal.tenant_id)
+        except KnowledgeGatewayError as exc:
+            _raise(exc)
+        return {"items": items, "count": len(items)}
 
     @router.get("/catalog")
     def library_catalog(
@@ -465,13 +588,16 @@ def register_knowledge_library_routes(
         x_user_role: str | None = Header(default=None),
     ) -> Any:
         principal = _principal(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
-        return _call(
-            _gateway(request),
-            "POST",
-            f"/v1/spaces/{space_id}/search",
-            principal.tenant_id,
-            json=payload,
-        )
+        try:
+            return _gateway(request).search_space(
+                principal.tenant_id,
+                space_id,
+                query=str(payload.get("query") or ""),
+                top_k=max(1, min(int(payload.get("top_k") or 5), 20)),
+                category_ids=list(payload.get("category_ids") or []),
+            )
+        except KnowledgeGatewayError as exc:
+            _raise(exc)
 
     @router.post("/spaces/{space_id}/reindex")
     def reindex_space(
