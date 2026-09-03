@@ -43,17 +43,17 @@
 
 ## 1. 先读结论
 
-SellerForge 的「多智能体」是 **同一套 Agent Runtime 上的角色虚拟化**，不是多张 LangGraph 图，也不是每个角色一个进程。
+SellerForge 的「多智能体」使用 **Coordinator 工具委派 + Analyst LangGraph Subgraph**。角色仍复用同一套 Agent Runtime，不是每个角色一个进程。
 
 | 看起来像 | 实际是 |
 |---|---|
-| Coordinator / Analyst / Specialist | 同一份 `AgentRuntime`、同一张 `model↔tools` 图；差在 `agent_id`、prompt、Tool 白名单、Session |
-| 并行多个 Analyst | `SubagentManager.submit` 多次入队；专业模式同一父 Session 活跃任务 ≤ 3 |
+| Coordinator / Analyst / Specialist | 共用 `AgentRuntime` 的 `model↔tools` 内层图；每次 Analyst 委派由独立 compiled subgraph 和 child Session 承载 |
+| 并行多个 Analyst | `SubagentManager.submit` 调度多个 `subgraph.ainvoke`；专业模式同一父 Session 活跃任务 ≤ 3 |
 | MCP Agent | `MCPClientManager` 把远程工具登记进 `ToolRegistry`，名字 `mcp__{server}__{tool}` |
-| 子 Agent 工作流 | 嵌套调用同一个 `AgentRuntime.run()` |
+| 子 Agent 工作流 | compiled `prepare → agent → finalize` 子图；`agent` 节点进入共享的 `AgentRuntime` 图 |
 | 直连 BI Agent | `workflows/*/agent.py` 只生成 QueryPlan，执行仍走 `ToolExecutor` |
 
-LangGraph 只负责 function-calling 循环。RBAC、连接器、审批、队列、Result Store、审计都在图外面。
+LangGraph 负责 function-calling 循环和子任务生命周期图。RBAC、连接器、持久队列、Result Store 等控制面仍由应用层提供，并作为节点依赖注入。
 
 ---
 
@@ -138,7 +138,7 @@ multi_agent_ops_platform/
 
 subagent-worker (ops-agent-subagent-worker)
   与 API 共用 DSN 和 data 卷
-  claim_next_task → execute_subagent_task → AgentRuntime.run
+  claim_next_task → subgraph.ainvoke → AgentRuntime.run
 
 memory-worker (ops-agent-memory-worker)
   按租户循环 MemoryService.maintenance
@@ -151,7 +151,7 @@ memory-worker (ops-agent-memory-worker)
 - `APP_REPLICA_COUNT=1`（模型/连接注册表尚未进共享库）
 - `POSTGRES_DSN` 必填
 
-开发默认 `subagent_queue_backend=inline`，API 进程内线程池跑子任务。`analyst_mode` 为 `general` 或 `specialized_parallel`，可被 `data/runtime_overrides.json` 覆盖（页面改 Analyst 模式会写这份文件）。
+开发默认 `subagent_queue_backend=inline`，API 进程内异步循环调用 compiled subgraph 的 `ainvoke`，并由 Semaphore 限制并发。`analyst_mode` 为 `general` 或 `specialized_parallel`，可被 `data/runtime_overrides.json` 覆盖（页面改 Analyst 模式会写这份文件）。
 
 其它关键默认：
 
@@ -218,7 +218,7 @@ LangGraph model↔tools      │
         │                  │
         ▼                  ▼
 ToolExecutor（schema → Guard → handler + timeout）
-        ├─ delegate_*  → Subagent 队列 → 再 run(agent_id=analyst)
+        ├─ delegate_*  → Subagent 队列 → compiled subgraph → run(agent_id=analyst)
         ├─ 查询/钉钉/Tavily → ConnectorRuntime → 外部系统
         ├─ MCP → MCPClientManager.call → MCP Server
         └─ 沙箱 / Skill / 记忆 → 本地实现
@@ -330,7 +330,15 @@ tools  --waiting_approval--> END
 tools  --否则--> model
 ```
 
-没有 Supervisor 节点，没有按角色拆开的图节点。子 Agent 是再 `invoke` 一次这张图。
+Coordinator 内层图没有 Supervisor 节点，也没有按角色复制 `model/tools` 节点。委派工具会调用独立的 Analyst compiled subgraph：
+
+```text
+START → prepare
+prepare --可运行--> agent → finalize → END
+prepare --已取消--> finalize → END
+```
+
+其中 `agent` 节点进入共享的 `AgentRuntime` function-calling 图；父子状态通过 `SubagentTaskRecord` 和 child Session 隔离，而不是共享父图整包 `RuntimeState`。
 
 `RuntimeState`（`agent_loop.py`）是图在内存里的整包状态：
 
@@ -519,28 +527,27 @@ system prompt 拼接（`_execute_turn`）：
 
 `task_projection` 把记录收成给模型看的精简 JSON（status、answer 截断、error），避免把子 Session 全量事件灌回父模型。
 
-### 13.2 执行 `execute_subagent_task`
+### 13.2 执行 `LangGraphSubagent`
 
 ```text
-update running + 父事件 subagent.running
-runtime.run(
-  question=objective,
-  session_id=child_session_id,
-  agent_id=record.agent_id,
-  allowed_tools=set(record.allowed_tools),
-  connection_ids / resource_scope / memory_snapshot = 快照,
-  parent_session_id, delegation_depth=depth,
-  timeout_seconds, token_budget,
-  cancellation_event,
-)
-映射 response.status → 任务终态
-写 subagent.finished（父 Session）
+compiled subgraph.invoke / ainvoke
+  → prepare：update running + 父事件 subagent.running
+  → agent：runtime.run(
+      question=objective,
+      session_id=child_session_id,
+      agent_id=record.agent_id,
+      allowed_tools / connections / scope / memory = 冻结快照,
+      parent_session_id, depth, timeout, token_budget, cancellation_event,
+    )
+  → finalize：映射 response.status → 任务终态；写 subagent.finished
 ```
+
+子图同时暴露 `invoke`、`ainvoke`、`astream`。同步兼容入口 `execute_subagent_task` 仍保留，但内部也只调用 compiled subgraph。
 
 `queue_backend`：
 
-- `inline`（开发）：`submit` 后立刻 `ThreadPoolExecutor.submit(_run_inline)`。`wait()` 轮询 Governance 记录直到终态或超时。`cancel` 对 `_cancellations[task_id]` 置位。进程退出 `shutdown(wait=False)`。
-- `db`（生产）：`submit` 只 `create_task`。`wait()` 同样轮询库。真正执行在独立进程 `claim_next_task`。API 副本和 Worker 必须共享 DSN；配置变更后要滚动 Worker，否则它仍用旧的模型/连接 JSON。
+- `inline`（开发）：`submit` 后通过专用 asyncio loop 调度 `subgraph.ainvoke`，Semaphore 使用 `subagent_worker_count` 限制并发；不再维护项目级 `ThreadPoolExecutor`。同步调用方使用 `wait()`，异步调用方可使用 `wait_async()`。
+- `db`（生产）：`submit` 只 `create_task`。真正执行在独立进程 `claim_next_task`，Worker 同样调用 `subgraph.ainvoke`。API 副本和 Worker 必须共享 DSN；配置变更后要滚动 Worker，否则它仍用旧的模型/连接 JSON。
 
 生产禁止「只入队无 Worker」。`health` 会带出当前 `subagents` 后端名。
 
@@ -800,13 +807,13 @@ SSE `type` 包括：`session`、`user.message`、`token`、`reasoning`、上述�
 
 ## 24. 测试、迁移、边界
 
-相关测试：`test_runtime.py`、`test_multi_agent_roles.py`、`test_agent_tool_policy.py`、`test_subagent_queue.py`、`test_governance.py`、`test_result_store.py`、`test_memory.py`、`test_connector_runtime.py`、`test_connections.py`、`test_api.py`、`test_access_control.py`、`test_accounts.py`、`test_web_search_tool.py`、`test_dingtalk.py`、`test_mysql_query_tools.py`。PG 集成：`RUN_POSTGRES_TESTS=1`。
+相关测试：`test_subagent_graph.py`、`test_runtime.py`、`test_multi_agent_roles.py`、`test_agent_tool_policy.py`、`test_subagent_queue.py`、`test_governance.py`、`test_result_store.py`、`test_memory.py`、`test_connector_runtime.py`、`test_connections.py`、`test_api.py`、`test_access_control.py`、`test_accounts.py`、`test_web_search_tool.py`、`test_dingtalk.py`、`test_mysql_query_tools.py`。
 
 评测：`ops-agent-eval`、`ops-agent-memory-eval evals/enterprise_memory.json`。
 
 读代码时不要误解：
 
-1. 不是 LangGraph 多 Agent 图。
+1. 不是单张共享状态的 Supervisor 图；它是工具委派到隔离状态的 LangGraph Subgraph。
 2. Worker 不是另一套 Runtime，只是再 `open_runtime_stack`。
 3. MCP 不是 LangGraph MCP 组件。
 4. `workflows/*/agent.py` 不做 SQL。
@@ -830,7 +837,7 @@ SSE `type` 包括：`session`、`user.message`、`token`、`reasoning`、上述�
 | 4 | `_model_node` | tool_call：`amazon-finance-analyst` + 写清日期/Top10/SKU 的 objective |
 | 5 | `_normalize_specialist_delegations` | 保证 ≤3 路 |
 | 6 | `delegate_specialists` → `submit` | 冻结 tools/connections/scope/memory；`child_session_id` |
-| 7 | Worker `execute_subagent_task` | 第二次 `run(agent_id=amazon-finance-analyst)` |
+| 7 | Worker `subgraph.ainvoke` | `agent` 节点进入 `run(agent_id=amazon-finance-analyst)` |
 | 8 | 子 `_model_node` | 只能调 `amazon_finance_query`；参数是 `metric=sku` 等 |
 | 9 | `AmazonFinanceQueryTool.execute` | 参数化 `GROUP BY sku`，`transactionStatus=RELEASED` |
 | 10 | `materialize_tool_output` | 全量 rows 入库；子模型看 preview + statistics + result_ref |

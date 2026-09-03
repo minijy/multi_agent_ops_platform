@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import signal
 import socket
@@ -10,7 +11,7 @@ from dataclasses import dataclass
 from ..config import Settings, get_settings
 from .governance import RuntimeGovernanceStore, SubagentTaskRecord
 from .stack import RuntimeStack, open_runtime_stack
-from .subagents import execute_subagent_task
+from .subagents import execute_subagent_task_async
 
 logger = logging.getLogger(__name__)
 
@@ -94,12 +95,15 @@ class SubagentQueueWorker:
                 record.attempt,
                 record.tenant_id,
             )
-            execute_subagent_task(
-                runtime=self.stack.agent_runtime,
-                store=self.store,
-                event_store=self.stack.session_events,
-                record=current,
-                cancellation=cancellation,
+            asyncio.run(
+                execute_subagent_task_async(
+                    runtime=self.stack.agent_runtime,
+                    store=self.store,
+                    event_store=self.stack.session_events,
+                    record=current,
+                    cancellation=cancellation,
+                    subgraph=self.stack.subagent_manager.subgraph,
+                )
             )
         finally:
             stop_heartbeat.set()

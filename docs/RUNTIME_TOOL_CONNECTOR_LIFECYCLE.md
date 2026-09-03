@@ -622,13 +622,13 @@ erp-analyst
 
 每个任务获得独立 `task_id`、`child_session_id`、Agent、目标、模型、预算、超时、Tool 白名单、Connection IDs 和 Resource Scope，初始状态为 `queued`，随后记录 `subagent.started`。
 
-### D6：线程池并行
+### D6：LangGraph 异步并行
 
-Inline Backend 使用 `ThreadPoolExecutor(max_workers=subagent_worker_count)`。并行的是多个完整 Analyst Runtime，不是父 `_tools_node` 的普通 pending calls。
+Inline Backend 在专用 asyncio loop 上调度 compiled subgraph 的 `ainvoke`，并用 `Semaphore(subagent_worker_count)` 限制并发。并行的是多个状态隔离的 Analyst 子图，不是父 `_tools_node` 的普通 pending calls。
 
-### D7：子 Agent 再次进入 Runtime
+### D7：子 Agent 进入 compiled subgraph
 
-Worker 调用 [`execute_subagent_task()`](../src/ops_agent/runtime/subagents.py#L79)，内部重新执行 `runtime.run()`，因此每个 Analyst 有独立模型—Tool—模型循环和 child session。
+Inline 调度器和 DB Worker 都调用 `LangGraphSubagent.ainvoke()`。子图按 `prepare → agent → finalize` 执行；`agent` 节点进入 `runtime.run()`，因此每个 Analyst 有独立生命周期状态、模型—Tool—模型循环和 child session。
 
 ---
 
@@ -642,7 +642,7 @@ Worker 调用 [`execute_subagent_task()`](../src/ops_agent/runtime/subagents.py#
 
 ### 13.2 子任务最终结果就绪
 
-子 `runtime.run()` 返回后，[`execute_subagent_task()`](../src/ops_agent/runtime/subagents.py#L110) 更新：
+子图的 `agent` 节点返回后，`finalize` 节点更新：
 
 ```text
 status = response.status
@@ -880,7 +880,7 @@ done
 
 ### 子 Agent Token 限制
 
-`execute_subagent_task()` 调用子 `runtime.run()` 时没有传父请求 `on_event`，所以三个 Analyst 内部 Token 不会原样透传到父 SSE。父前端主要看到 Coordinator Token、父 Runtime 事件、委派完成状态和 `done`。
+子图的 `agent` 节点调用 `runtime.run()` 时没有传父请求 `on_event`，所以三个 Analyst 内部 Token 不会原样透传到父 SSE。父前端主要看到 Coordinator Token、父 Runtime 事件、委派完成状态和 `done`。
 
 ### 流式并非最后才开始
 

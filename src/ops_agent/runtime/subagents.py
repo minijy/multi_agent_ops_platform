@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 import uuid
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 
+from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field, model_validator
-from typing import Any
+from typing import Any, AsyncIterator, Literal, TypedDict
 
 from ..config import Settings
 from .agent_loop import AgentRuntime
@@ -76,50 +78,93 @@ class DelegateSpecialistsArguments(BaseModel):
     token_budget: int | None = Field(default=None, ge=256)
 
 
-def execute_subagent_task(
-    *,
-    runtime: AgentRuntime,
-    store: RuntimeGovernanceStore,
-    event_store,
-    record: SubagentTaskRecord,
-    cancellation: threading.Event,
-) -> SubagentTaskRecord:
-    started = record.model_copy(
-        update={
-            "status": "running" if record.status != "cancel_requested" else record.status,
-            "started_at": record.started_at or _now(),
-        }
-    )
-    if started.status == "cancel_requested":
-        cancellation.set()
-    store.update_task(started)
-    if started.status == "running":
-        event_store.append(
-            session_id=record.parent_session_id,
-            tenant_id=record.tenant_id,
-            user_id=record.user_id,
-            event_type="subagent.running",
-            payload={
-                "task_id": record.task_id,
-                "child_session_id": record.child_session_id,
-                "agent_id": record.agent_id,
-                "objective": record.objective,
-                "status": "running",
-            },
+class SubagentGraphState(TypedDict, total=False):
+    """Private state owned by one compiled Analyst subgraph invocation."""
+
+    record: SubagentTaskRecord
+    cancellation: threading.Event
+    response: Any
+    error: str
+    skip_finalize: bool
+
+
+class LangGraphSubagent:
+    """Compiled LangGraph subgraph for the governed Analyst lifecycle.
+
+    The Coordinator continues to expose delegation as a tool, while each delegated
+    task gets isolated graph state and an isolated child session.  The `agent` node
+    invokes the existing model/tools agent graph through ``AgentRuntime``; the
+    surrounding nodes keep queue status and audit events inside the subgraph.
+    """
+
+    def __init__(
+        self,
+        *,
+        runtime: AgentRuntime,
+        store: RuntimeGovernanceStore,
+        event_store,
+    ) -> None:
+        self.runtime = runtime
+        self.store = store
+        self.event_store = event_store
+        builder = StateGraph(SubagentGraphState)
+        builder.add_node("prepare", self._prepare)
+        builder.add_node("agent", self._run_agent)
+        builder.add_node("finalize", self._finalize)
+        builder.add_edge(START, "prepare")
+        builder.add_conditional_edges(
+            "prepare",
+            self._route_after_prepare,
+            {"agent": "agent", "finalize": "finalize"},
         )
-    final = started
-    try:
-        if cancellation.is_set():
-            final = started.model_copy(
-                update={
-                    "status": "cancelled",
-                    "completed_at": _now(),
-                    "worker_id": None,
-                    "lease_expires_at": None,
-                }
+        builder.add_edge("agent", "finalize")
+        builder.add_edge("finalize", END)
+        self.graph = builder.compile()
+
+    def _prepare(self, state: SubagentGraphState) -> dict[str, Any]:
+        submitted = state["record"]
+        cancellation = state["cancellation"]
+        record = self.store.get_task(
+            submitted.task_id, submitted.tenant_id
+        ) or submitted
+        if record.status in TERMINAL_SUBAGENT_STATUSES:
+            return {"record": record, "skip_finalize": True}
+        cancelling = cancellation.is_set() or record.status == "cancel_requested"
+        started = record.model_copy(
+            update={
+                "status": "cancel_requested" if cancelling else "running",
+                "started_at": record.started_at or _now(),
+            }
+        )
+        if cancelling:
+            cancellation.set()
+        self.store.update_task(started)
+        if started.status == "running":
+            self.event_store.append(
+                session_id=record.parent_session_id,
+                tenant_id=record.tenant_id,
+                user_id=record.user_id,
+                event_type="subagent.running",
+                payload={
+                    "task_id": record.task_id,
+                    "child_session_id": record.child_session_id,
+                    "agent_id": record.agent_id,
+                    "objective": record.objective,
+                    "status": "running",
+                },
             )
-        else:
-            response = runtime.run(
+        return {"record": started}
+
+    @staticmethod
+    def _route_after_prepare(
+        state: SubagentGraphState,
+    ) -> Literal["agent", "finalize"]:
+        return "finalize" if state["cancellation"].is_set() else "agent"
+
+    def _run_agent(self, state: SubagentGraphState) -> dict[str, Any]:
+        record = state["record"]
+        try:
+            response = self.runtime.run(
                 RuntimeAgentRequest(
                     question=record.objective,
                     session_id=record.child_session_id,
@@ -135,10 +180,41 @@ def execute_subagent_task(
                 connection_ids=record.connection_ids,
                 resource_scope=record.resource_scope,
                 memory_snapshot=record.memory_snapshot,
-                cancellation_event=cancellation,
+                cancellation_event=state["cancellation"],
                 timeout_seconds=record.timeout_seconds,
                 token_budget=record.token_budget,
             )
+            return {"response": response}
+        except Exception as exc:
+            return {"error": str(exc)}
+
+    def _finalize(self, state: SubagentGraphState) -> dict[str, Any]:
+        started = state["record"]
+        if state.get("skip_finalize"):
+            return {"record": started}
+        cancellation = state["cancellation"]
+        response = state.get("response")
+        error = state.get("error")
+        if error is not None:
+            final = started.model_copy(
+                update={
+                    "status": "cancelled" if cancellation.is_set() else "failed",
+                    "error": error,
+                    "completed_at": _now(),
+                    "worker_id": None,
+                    "lease_expires_at": None,
+                }
+            )
+        elif response is None:
+            final = started.model_copy(
+                update={
+                    "status": "cancelled",
+                    "completed_at": _now(),
+                    "worker_id": None,
+                    "lease_expires_at": None,
+                }
+            )
+        else:
             mapped = "cancelled" if cancellation.is_set() else response.status
             if mapped not in {
                 "completed",
@@ -158,32 +234,99 @@ def execute_subagent_task(
                     "lease_expires_at": None,
                 }
             )
-    except Exception as exc:
-        cancelled = cancellation.is_set()
-        final = started.model_copy(
-            update={
-                "status": "cancelled" if cancelled else "failed",
-                "error": str(exc),
-                "completed_at": _now(),
-                "worker_id": None,
-                "lease_expires_at": None,
-            }
+        self.store.update_task(final)
+        self.event_store.append(
+            session_id=final.parent_session_id,
+            tenant_id=final.tenant_id,
+            user_id=final.user_id,
+            event_type="subagent.finished",
+            payload={
+                "task_id": final.task_id,
+                "child_session_id": final.child_session_id,
+                "status": final.status,
+                "answer": final.answer,
+                "error": final.error,
+            },
         )
-    store.update_task(final)
-    event_store.append(
-        session_id=record.parent_session_id,
-        tenant_id=record.tenant_id,
-        user_id=record.user_id,
-        event_type="subagent.finished",
-        payload={
-            "task_id": record.task_id,
-            "child_session_id": record.child_session_id,
-            "status": final.status,
-            "answer": final.answer,
-            "error": final.error,
-        },
+        return {"record": final}
+
+    @staticmethod
+    def _input(
+        record: SubagentTaskRecord, cancellation: threading.Event
+    ) -> SubagentGraphState:
+        return {"record": record, "cancellation": cancellation}
+
+    @staticmethod
+    def _config(record: SubagentTaskRecord) -> dict[str, Any]:
+        return {
+            "tags": ["subagent", record.agent_id],
+            "metadata": {
+                "task_id": record.task_id,
+                "parent_session_id": record.parent_session_id,
+                "child_session_id": record.child_session_id,
+                "agent_id": record.agent_id,
+            },
+        }
+
+    def invoke(
+        self, record: SubagentTaskRecord, cancellation: threading.Event
+    ) -> SubagentTaskRecord:
+        result = self.graph.invoke(
+            self._input(record, cancellation), config=self._config(record)
+        )
+        return result["record"]
+
+    async def ainvoke(
+        self, record: SubagentTaskRecord, cancellation: threading.Event
+    ) -> SubagentTaskRecord:
+        result = await self.graph.ainvoke(
+            self._input(record, cancellation), config=self._config(record)
+        )
+        return result["record"]
+
+    async def astream(
+        self, record: SubagentTaskRecord, cancellation: threading.Event
+    ) -> AsyncIterator[dict[str, Any]]:
+        async for update in self.graph.astream(
+            self._input(record, cancellation),
+            config=self._config(record),
+            stream_mode="updates",
+        ):
+            yield update
+
+
+def execute_subagent_task(
+    *,
+    runtime: AgentRuntime,
+    store: RuntimeGovernanceStore,
+    event_store,
+    record: SubagentTaskRecord,
+    cancellation: threading.Event,
+    subgraph: LangGraphSubagent | None = None,
+) -> SubagentTaskRecord:
+    workflow = subgraph or LangGraphSubagent(
+        runtime=runtime,
+        store=store,
+        event_store=event_store,
     )
-    return final
+    return workflow.invoke(record, cancellation)
+
+
+async def execute_subagent_task_async(
+    *,
+    runtime: AgentRuntime,
+    store: RuntimeGovernanceStore,
+    event_store,
+    record: SubagentTaskRecord,
+    cancellation: threading.Event,
+    subgraph: LangGraphSubagent | None = None,
+) -> SubagentTaskRecord:
+    workflow = subgraph or LangGraphSubagent(
+        runtime=runtime,
+        store=store,
+        event_store=event_store,
+    )
+    return await workflow.ainvoke(record, cancellation)
 
 
 class SubagentManager:
@@ -208,13 +351,52 @@ class SubagentManager:
         self.queue_backend = settings.subagent_queue_backend
         self._lock = threading.Lock()
         self._submission_lock = threading.Lock()
-        self._futures: dict[str, Future[None]] = {}
+        self._futures: dict[str, Future[SubagentTaskRecord]] = {}
         self._cancellations: dict[str, threading.Event] = {}
-        self.pool: ThreadPoolExecutor | None = None
+        self._closed = False
+        self.subgraph = LangGraphSubagent(
+            runtime=runtime,
+            store=governance_store,
+            event_store=event_store,
+        )
+        self._async_loop: asyncio.AbstractEventLoop | None = None
+        self._async_thread: threading.Thread | None = None
+        self._async_ready = threading.Event()
+        self._async_capacity: asyncio.Semaphore | None = None
+        # Compatibility marker for callers that asserted DB mode had no pool.
+        # Execution no longer uses a project-owned ThreadPoolExecutor.
+        self.pool = None
         if self.queue_backend == "inline":
-            self.pool = ThreadPoolExecutor(
-                max_workers=settings.subagent_worker_count,
-                thread_name_prefix="subagent",
+            self._async_loop = asyncio.new_event_loop()
+            self._async_thread = threading.Thread(
+                target=self._run_async_loop,
+                name="subagent-langgraph",
+                daemon=True,
+            )
+            self._async_thread.start()
+            self._async_ready.wait(timeout=5)
+
+    def _run_async_loop(self) -> None:
+        assert self._async_loop is not None
+        asyncio.set_event_loop(self._async_loop)
+        self._async_capacity = asyncio.Semaphore(
+            self.settings.subagent_worker_count
+        )
+        self._async_ready.set()
+        self._async_loop.run_forever()
+
+    async def _run_inline_async(
+        self, record: SubagentTaskRecord, cancellation: threading.Event
+    ) -> SubagentTaskRecord:
+        assert self._async_capacity is not None
+        async with self._async_capacity:
+            return await execute_subagent_task_async(
+                runtime=self.runtime,
+                store=self.store,
+                event_store=self.event_store,
+                record=record,
+                cancellation=cancellation,
+                subgraph=self.subgraph,
             )
 
     def _resolve_target_agent(self, agent_id: str):
@@ -387,6 +569,8 @@ class SubagentManager:
         role: str,
         depth: int = 1,
     ) -> SubagentTaskRecord:
+        if self._closed:
+            raise RuntimeError("subagent manager is shut down")
         if depth > self.settings.subagent_max_depth:
             raise ValueError(
                 f"subagent depth exceeds {self.settings.subagent_max_depth}"
@@ -470,33 +654,31 @@ class SubagentManager:
             },
         )
         if self.queue_backend == "inline":
-            assert self.pool is not None
+            if self._async_loop is None or not self._async_ready.is_set():
+                raise RuntimeError("subagent async runtime is not available")
             cancellation = threading.Event()
             with self._lock:
                 self._cancellations[task_id] = cancellation
-            future = self.pool.submit(self._run_inline, record, cancellation)
+            future = asyncio.run_coroutine_threadsafe(
+                self._run_inline_async(record, cancellation), self._async_loop
+            )
             with self._lock:
                 self._futures[task_id] = future
-                if future.done():
+            future.add_done_callback(
+                lambda _future, submitted_task_id=task_id: self._forget_inline(
+                    submitted_task_id
+                )
+            )
+            if future.done():
+                with self._lock:
                     self._futures.pop(task_id, None)
                     self._cancellations.pop(task_id, None)
         return record
 
-    def _run_inline(
-        self, record: SubagentTaskRecord, cancellation: threading.Event
-    ) -> None:
-        try:
-            execute_subagent_task(
-                runtime=self.runtime,
-                store=self.store,
-                event_store=self.event_store,
-                record=record,
-                cancellation=cancellation,
-            )
-        finally:
-            with self._lock:
-                self._futures.pop(record.task_id, None)
-                self._cancellations.pop(record.task_id, None)
+    def _forget_inline(self, task_id: str) -> None:
+        with self._lock:
+            self._futures.pop(task_id, None)
+            self._cancellations.pop(task_id, None)
 
     def get(self, task_id: str, tenant_id: str) -> SubagentTaskRecord | None:
         return self.store.get_task(task_id, tenant_id)
@@ -526,6 +708,26 @@ class SubagentManager:
                 return record
             time.sleep(0.05)
 
+    async def wait_async(
+        self,
+        task_id: str,
+        tenant_id: str,
+        timeout: float | None = None,
+        cancellation_event: threading.Event | None = None,
+    ) -> SubagentTaskRecord:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if cancellation_event is not None and cancellation_event.is_set():
+                self.cancel(task_id, tenant_id)
+            record = self.get(task_id, tenant_id)
+            if record is None:
+                raise KeyError("subagent task not found")
+            if record.status in TERMINAL_SUBAGENT_STATUSES:
+                return record
+            if deadline is not None and time.monotonic() >= deadline:
+                return record
+            await asyncio.sleep(0.05)
+
     def cancel(self, task_id: str, tenant_id: str) -> SubagentTaskRecord:
         record = self.get(task_id, tenant_id)
         if record is None:
@@ -548,11 +750,8 @@ class SubagentManager:
         if self.queue_backend == "inline":
             with self._lock:
                 cancellation = self._cancellations.get(task_id)
-                future = self._futures.get(task_id)
             if cancellation is not None:
                 cancellation.set()
-            if future is not None:
-                future.cancel()
 
         latest = self.get(task_id, tenant_id)
         if latest is None:
@@ -595,11 +794,30 @@ class SubagentManager:
 
     def shutdown(self) -> None:
         with self._lock:
+            if self._closed:
+                return
+            self._closed = True
             cancellations = list(self._cancellations.values())
+            futures = list(self._futures.values())
         for cancellation in cancellations:
             cancellation.set()
-        if self.pool is not None:
-            self.pool.shutdown(wait=False, cancel_futures=True)
+        deadline = time.monotonic() + 2
+        for future in futures:
+            try:
+                future.result(timeout=max(0.0, deadline - time.monotonic()))
+            except Exception:
+                if not future.done():
+                    future.cancel()
+        if self._async_loop is not None and self._async_loop.is_running():
+            self._async_loop.call_soon_threadsafe(self._async_loop.stop)
+        if self._async_thread is not None:
+            self._async_thread.join(timeout=2)
+        if (
+            self._async_loop is not None
+            and not self._async_loop.is_running()
+            and not self._async_loop.is_closed()
+        ):
+            self._async_loop.close()
 
 
 def register_subagent_tool(
