@@ -66,7 +66,7 @@ screen -dmS intent-vllm bash -lc \
     --max-model-len '${MAX_MODEL_LEN}' --max-num-seqs '${MAX_NUM_SEQS}' \
     --max-num-batched-tokens '${MAX_NUM_BATCHED_TOKENS}' \
     ${QUANTIZATION:+--quantization '${QUANTIZATION}'} \
-    --enable-prefix-caching --enable-chunked-prefill --disable-log-requests \
+    --enable-prefix-caching --enable-chunked-prefill \
     --generation-config vllm \
     >'${SERVING_ROOT}/logs/vllm.log' 2>&1"
 
