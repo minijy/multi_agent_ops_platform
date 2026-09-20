@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SERVING_ROOT="${INTENT_SERVING_ROOT:-/root/autodl-tmp/intent-serving}"
-SERVING_ENV="${INTENT_SERVING_ENV:-/root/autodl-tmp/envs/intent-serving}"
+SERVING_ENV="${INTENT_SERVING_ENV:-/root/autodl-tmp/envs/intent-serving-next}"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 PIP_CACHE_DIR="${PIP_CACHE_DIR:-/root/autodl-tmp/pip-cache}"
@@ -19,10 +19,13 @@ fi
 
 PIP_CACHE_DIR="${PIP_CACHE_DIR}" "${SERVING_ENV}/bin/python" -m pip install \
   --index-url "${PIP_INDEX_URL}" \
-  "transformers==4.56.2" \
-  "vllm==0.10.2" \
+  "transformers==5.17.0" \
+  "vllm==0.28.0" \
   "litellm[proxy]>=1.70,<2" \
   "prisma>=0.15,<0.16"
+
+"${SERVING_ENV}/bin/python" \
+  "${PROJECT_ROOT}/scripts/patch_vllm_028_qwen_warmup.py"
 
 install -m 0600 \
   "${PROJECT_ROOT}/config/litellm.intent.example.yaml" \
