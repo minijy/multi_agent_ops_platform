@@ -21,7 +21,8 @@ PIP_CACHE_DIR="${PIP_CACHE_DIR}" "${SERVING_ENV}/bin/python" -m pip install \
   --index-url "${PIP_INDEX_URL}" \
   "transformers==4.56.2" \
   "vllm==0.10.2" \
-  "litellm[proxy]>=1.70,<2"
+  "litellm[proxy]>=1.70,<2" \
+  "prisma>=0.15,<0.16"
 
 install -m 0600 \
   "${PROJECT_ROOT}/config/litellm.intent.example.yaml" \
