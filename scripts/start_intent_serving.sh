@@ -32,12 +32,17 @@ if [ ! -f "${LITELLM_CONFIG}" ]; then
   exit 1
 fi
 
-screen -S intent-redis -X quit >/dev/null 2>&1 || true
 screen -S intent-vllm -X quit >/dev/null 2>&1 || true
 screen -S intent-gateway -X quit >/dev/null 2>&1 || true
 
-screen -dmS intent-redis bash -lc \
-  "exec redis-server --bind 127.0.0.1 --port 6379 --dir '${SERVING_ROOT}/redis' --appendonly yes --maxmemory-policy noeviction"
+if redis-cli -h 127.0.0.1 -p 6379 ping >/dev/null 2>&1; then
+  redis-cli -h 127.0.0.1 -p 6379 shutdown save >/dev/null
+fi
+redis-server \
+  --bind 127.0.0.1 --port 6379 --dir "${SERVING_ROOT}/redis" \
+  --appendonly yes --maxmemory-policy noeviction --daemonize yes \
+  --pidfile "${SERVING_ROOT}/redis/redis.pid" \
+  --logfile "${SERVING_ROOT}/logs/redis.log"
 
 screen -dmS intent-vllm bash -lc \
   "exec '${SERVING_ENV}/bin/python' -m vllm.entrypoints.openai.api_server \
@@ -53,4 +58,4 @@ screen -dmS intent-gateway bash -lc \
    exec '${SERVING_ENV}/bin/litellm' --config '${LITELLM_CONFIG}' --host 0.0.0.0 --port 8200 \
    >'${SERVING_ROOT}/logs/litellm.log' 2>&1"
 
-echo "started screen sessions: intent-redis, intent-vllm, intent-gateway"
+echo "started Redis daemon and screen sessions: intent-vllm, intent-gateway"
