@@ -295,6 +295,9 @@ class SmallModelIntentClient:
         query: str,
         history: list[dict[str, str]],
         schemas: list[dict[str, Any]],
+        *,
+        tenant_id: str = "",
+        user_id: str = "",
     ) -> IntentRoute:
         if not self.base_url:
             raise RuntimeError("intent router base URL is not configured")
@@ -325,6 +328,10 @@ class SmallModelIntentClient:
         headers = {"content-type": "application/json"}
         if self.api_key:
             headers["authorization"] = f"Bearer {self.api_key}"
+        if tenant_id:
+            headers["x-tenant-id"] = tenant_id
+        if user_id:
+            headers["x-user-id"] = user_id
         response = httpx.post(
             f"{self.base_url}/chat/completions",
             headers=headers,
@@ -356,6 +363,8 @@ class ThreeLayerIntentRouter:
         query: str,
         history: list[dict[str, str]],
         schemas: list[dict[str, Any]],
+        tenant_id: str = "",
+        user_id: str = "",
     ) -> IntentRoute:
         if not self.settings.intent_routing_enabled:
             return IntentRoute(layer="disabled", reason="intent routing is disabled")
@@ -366,7 +375,13 @@ class ThreeLayerIntentRouter:
                 **{**hard.__dict__, "latency_ms": (time.perf_counter() - started) * 1000}
             )
         try:
-            route = self.small_model.classify(query, history, schemas)
+            route = self.small_model.classify(
+                query,
+                history,
+                schemas,
+                tenant_id=tenant_id,
+                user_id=user_id,
+            )
             return IntentRoute(
                 **{**route.__dict__, "latency_ms": (time.perf_counter() - started) * 1000}
             )

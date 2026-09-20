@@ -84,6 +84,11 @@ from ..runtime.model_router import create_model_router_from_registry
 from ..runtime.memory import MemoryCreate, MemoryFeedback
 from ..runtime.result_store import materialize_tool_output, result_page
 from ..runtime.session_events import SessionEvent
+from ..runtime.session_coordination import (
+    SessionBusyError,
+    SessionTurnCoordinator,
+    create_session_turn_coordinator,
+)
 from ..runtime.connectors import ToolConnectionBindingRequest
 from ..runtime.stack import open_runtime_stack
 from ..runtime.subagents import SubagentSubmitRequest
@@ -370,6 +375,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         application.state.settings = runtime_settings
         application.state.store = create_platform_store(runtime_settings)
         application.state.account_service = create_account_service(runtime_settings)
+        session_turns = create_session_turn_coordinator(runtime_settings)
+        application.state.session_turns = session_turns
         application.state.amazon_finance_agent = AmazonFinanceAgent(
             model,
             AmazonFinanceQueryTool(
@@ -421,7 +428,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             application.state.stream_slots = threading.BoundedSemaphore(
                 runtime_settings.agent_stream_max_concurrency
             )
-            yield
+            try:
+                yield
+            finally:
+                session_turns.close()
 
     application = FastAPI(
         title="SellerForge",
@@ -649,6 +659,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not events or owner != principal.user_id:
             raise HTTPException(status_code=404, detail="agent session not found")
         return events
+
+    def coordinated_agent_request(
+        payload: RuntimeAgentRequest,
+        principal: Principal,
+        idempotency_key: str | None,
+    ) -> tuple[RuntimeAgentRequest, str]:
+        key = (idempotency_key or "").strip()
+        if len(key) > 200 or (key and any(ord(char) < 33 or ord(char) > 126 for char in key)):
+            raise HTTPException(status_code=400, detail="invalid Idempotency-Key")
+        if payload.session_id:
+            return payload, key
+        coordinator: SessionTurnCoordinator = application.state.session_turns
+        session_id = (
+            coordinator.stable_session_id(principal.tenant_id, principal.user_id, key)
+            if key
+            else str(uuid.uuid4())
+        )
+        return payload.model_copy(update={"session_id": session_id}), key
+
+    def acquire_session_turn(
+        request: Request,
+        principal: Principal,
+        session_id: str,
+    ):
+        try:
+            return request.app.state.session_turns.acquire(
+                tenant_id=principal.tenant_id,
+                user_id=principal.user_id,
+                session_id=session_id,
+            )
+        except SessionBusyError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "session_turn_in_progress",
+                    "message": "同一会话已有请求正在处理，请等待当前轮次完成后重试。",
+                },
+                headers={"Retry-After": "1"},
+            ) from exc
 
     def agent_visible_for_access(agent: Any, allowed_tools: frozenset[str] | None) -> bool:
         if agent.id not in SPECIALIST_ANALYST_IDS or allowed_tools is None:
@@ -999,26 +1048,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_tenant_id: str | None = Header(default=None),
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> RuntimeAgentResponse:
         principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
+        original_session_id = payload.session_id
+        payload, idempotency_key = coordinated_agent_request(
+            payload, principal, idempotency_key
+        )
         decision = request.app.state.access_control.effective_access(
             principal.tenant_id, principal.user_id, principal.role
         )
         if decision.configured and not decision.user_enabled:
             raise HTTPException(status_code=403, detail=decision.denial_detail())
-        if payload.session_id:
+        if original_session_id:
             owned_session_events(request, principal, payload.session_id)
         try:
-            result = request.app.state.agent_runtime.run(
-                payload,
-                tenant_id=principal.tenant_id,
-                user_id=principal.user_id,
-                role=principal.role,
-                token_budget=request.app.state.settings.run_token_budget,
-                allowed_tools=(
-                    set(decision.allowed_tools) if decision.allowed_tools is not None else None
-                ),
-            )
+            with acquire_session_turn(request, principal, payload.session_id):
+                cached = request.app.state.session_turns.get_result(
+                    tenant_id=principal.tenant_id,
+                    user_id=principal.user_id,
+                    idempotency_key=idempotency_key,
+                )
+                if cached is not None:
+                    return RuntimeAgentResponse.model_validate(cached)
+                result = request.app.state.agent_runtime.run(
+                    payload,
+                    tenant_id=principal.tenant_id,
+                    user_id=principal.user_id,
+                    role=principal.role,
+                    token_budget=request.app.state.settings.run_token_budget,
+                    allowed_tools=(
+                        set(decision.allowed_tools) if decision.allowed_tools is not None else None
+                    ),
+                )
+                request.app.state.session_turns.put_result(
+                    tenant_id=principal.tenant_id,
+                    user_id=principal.user_id,
+                    idempotency_key=idempotency_key,
+                    payload=result.model_dump(mode="json"),
+                )
             audit_agent_result(request, principal, result)
             return result
         except ModelProviderError as exc:
@@ -1040,22 +1108,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         x_tenant_id: str | None = Header(default=None),
         x_user_id: str | None = Header(default=None),
         x_user_role: str | None = Header(default=None),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> StreamingResponse:
         principal = principal_from_headers(request, x_api_key, x_tenant_id, x_user_id, x_user_role)
+        original_session_id = payload.session_id
+        payload, idempotency_key = coordinated_agent_request(
+            payload, principal, idempotency_key
+        )
         decision = request.app.state.access_control.effective_access(
             principal.tenant_id, principal.user_id, principal.role
         )
         if decision.configured and not decision.user_enabled:
             raise HTTPException(status_code=403, detail=decision.denial_detail())
-        if payload.session_id:
+        if original_session_id:
             owned_session_events(request, principal, payload.session_id)
         events: Queue[dict[str, Any] | None] = Queue()
+        lease = acquire_session_turn(request, principal, payload.session_id)
 
         def emit(item: dict[str, Any]) -> None:
             events.put(item)
 
         def worker() -> None:
             try:
+                cached = request.app.state.session_turns.get_result(
+                    tenant_id=principal.tenant_id,
+                    user_id=principal.user_id,
+                    idempotency_key=idempotency_key,
+                )
+                if cached is not None:
+                    events.put({"type": "done", **cached, "idempotent_replay": True})
+                    return
                 result = request.app.state.agent_runtime.run(
                     payload,
                     tenant_id=principal.tenant_id,
@@ -1069,6 +1151,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     ),
                 )
                 audit_agent_result(request, principal, result)
+                request.app.state.session_turns.put_result(
+                    tenant_id=principal.tenant_id,
+                    user_id=principal.user_id,
+                    idempotency_key=idempotency_key,
+                    payload=result.model_dump(mode="json"),
+                )
                 events.put({"type": "done", **result.model_dump(mode="json")})
             except ModelProviderError as exc:
                 events.put({"type": "error", **exc.as_dict(), "status_code": exc.status_code})
@@ -1082,9 +1170,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     }
                 )
             finally:
+                lease.release()
                 events.put(None)
 
-        start_stream_worker(request, worker, name="agent-query-stream")
+        try:
+            start_stream_worker(request, worker, name="agent-query-stream")
+        except Exception:
+            lease.release()
+            raise
 
         def sse() -> Iterator[str]:
             while True:

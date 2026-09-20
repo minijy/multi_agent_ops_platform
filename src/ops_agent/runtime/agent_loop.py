@@ -1317,6 +1317,8 @@ class AgentRuntime:
             query=query,
             history=self._intent_history(state["messages"]),
             schemas=schemas,
+            tenant_id=state["tenant_id"],
+            user_id=state["user_id"],
         )
         self._append_event(
             state,

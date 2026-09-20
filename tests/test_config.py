@@ -55,6 +55,7 @@ def test_production_configuration_closes_shared_state_requirements():
         jwt_audience="audience",
         account_bootstrap_token="bootstrap-token-that-is-long-enough",
         subagent_queue_backend="db",
+        session_redis_url="redis://127.0.0.1:6379/0",
     )
     settings.validate_runtime()
 

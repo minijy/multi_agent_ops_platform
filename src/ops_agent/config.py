@@ -127,6 +127,10 @@ class Settings(BaseSettings):
     sandbox_max_output_bytes: int = Field(default=65536, ge=1024)
     sandbox_full_access_enabled: bool = False
     agent_stream_max_concurrency: int = Field(default=32, ge=1, le=512)
+    session_redis_url: str = ""
+    session_lock_wait_seconds: float = Field(default=5.0, ge=0.05, le=120)
+    session_lock_ttl_seconds: int = Field(default=600, ge=30, le=3600)
+    session_idempotency_ttl_seconds: int = Field(default=86_400, ge=60, le=604_800)
 
     jwt_secret: str = ""
     jwt_issuer: str = ""
@@ -175,6 +179,8 @@ class Settings(BaseSettings):
                     "APP_REPLICA_COUNT must remain 1 until configuration registries "
                     "use shared persistence"
                 )
+            if not self.session_redis_url.strip():
+                raise ValueError("SESSION_REDIS_URL is required in production")
         if self.jwt_required and not self.jwt_secret:
             raise ValueError("JWT_SECRET is required when JWT_REQUIRED=true")
         # Qdrant is normally configured per tenant from the connector page.
