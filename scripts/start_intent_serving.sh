@@ -50,7 +50,7 @@ screen -dmS intent-vllm bash -lc \
     --served-model-name qwen3-1.7b-intent-router \
     --host 127.0.0.1 --port 8001 --dtype half \
     --gpu-memory-utilization 0.85 --max-model-len 8192 --max-num-seqs 16 \
-    --enable-prefix-caching \
+    --max-num-batched-tokens 2048 --enable-prefix-caching --enable-chunked-prefill \
     >'${SERVING_ROOT}/logs/vllm.log' 2>&1"
 
 screen -dmS intent-gateway bash -lc \

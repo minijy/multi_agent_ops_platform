@@ -104,8 +104,10 @@ class Settings(BaseSettings):
     intent_routing_api_key: str = ""
     intent_routing_model: str = "qwen3-1.7b-intent-router"
     intent_routing_timeout_seconds: float = Field(default=3.0, ge=0.2, le=30)
-    intent_routing_history_messages: int = Field(default=8, ge=0, le=32)
+    intent_routing_history_messages: int = Field(default=4, ge=0, le=32)
+    intent_routing_history_max_chars: int = Field(default=4_000, ge=256, le=50_000)
     intent_routing_parallel_limit: int = Field(default=3, ge=1, le=3)
+    intent_routing_compact_schemas: bool = True
     memory_enabled: bool = True
     memory_semantic_backend: Literal["local", "pgvector", "qdrant"] = "local"
     memory_embedding_provider: Literal["hash", "sentence_transformers"] = "hash"

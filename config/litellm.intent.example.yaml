@@ -12,8 +12,8 @@ general_settings:
 
 router_settings:
   routing_strategy: least-busy
-  redis_host: 127.0.0.1
-  redis_port: 6379
-  enable_pre_call_checks: true
-  allowed_fails: 2
-  cooldown_time: 20
+  # A single local backend should not be put into a long global cooldown after
+  # two slow requests; the application already fails open to Coordinator.
+  enable_pre_call_checks: false
+  allowed_fails: 100
+  cooldown_time: 5

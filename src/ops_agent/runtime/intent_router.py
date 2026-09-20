@@ -20,6 +20,34 @@ from .domain import ToolCall
 Decision = Literal["direct_answer", "clarify", "tool_plan", "abstain"]
 Layer = Literal["disabled", "hard_match", "small_model", "coordinator"]
 
+_INTENT_SCHEMA_KEYS = frozenset(
+    {
+        "$defs",
+        "$ref",
+        "additionalProperties",
+        "allOf",
+        "anyOf",
+        "const",
+        "default",
+        "description",
+        "enum",
+        "format",
+        "items",
+        "maximum",
+        "maxItems",
+        "maxLength",
+        "minimum",
+        "minItems",
+        "minLength",
+        "nullable",
+        "oneOf",
+        "pattern",
+        "properties",
+        "required",
+        "type",
+    }
+)
+
 
 INTENT_SYSTEM_PROMPT = """
 你是多 Agent 系统的前置意图路由器。你不回答问题，只输出一个紧凑 JSON 对象。
@@ -64,6 +92,77 @@ def _tool_names(schemas: list[dict[str, Any]]) -> set[str]:
         for item in schemas
         if item.get("function", {}).get("name")
     }
+
+
+def _compact_schema_node(value: Any) -> Any:
+    """Keep tool-selection semantics while removing prompt-only JSON Schema noise."""
+    if isinstance(value, list):
+        return [_compact_schema_node(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    compact: dict[str, Any] = {}
+    for key, item in value.items():
+        if key not in _INTENT_SCHEMA_KEYS:
+            continue
+        if key in {"properties", "$defs"} and isinstance(item, dict):
+            compact[key] = {
+                str(name): _compact_schema_node(schema)
+                for name, schema in item.items()
+            }
+            continue
+        if key == "description" and isinstance(item, str):
+            normalized = " ".join(item.split())
+            if normalized:
+                compact[key] = normalized[:160]
+            continue
+        compact[key] = _compact_schema_node(item)
+    return compact
+
+
+def compact_tool_schemas(schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    compacted: list[dict[str, Any]] = []
+    for schema in schemas:
+        function = schema.get("function") or {}
+        name = function.get("name")
+        if not name:
+            continue
+        description = " ".join(str(function.get("description") or "").split())[:160]
+        compact_function: dict[str, Any] = {
+            "name": str(name),
+            "parameters": _compact_schema_node(function.get("parameters") or {}),
+        }
+        if description:
+            compact_function["description"] = description
+        compacted.append({"type": "function", "function": compact_function})
+    return compacted
+
+
+def bounded_history(
+    history: list[dict[str, str]],
+    *,
+    max_messages: int,
+    max_chars: int,
+) -> list[dict[str, str]]:
+    if max_messages <= 0 or max_chars <= 0:
+        return []
+    selected: list[dict[str, str]] = []
+    remaining = max_chars
+    for message in reversed(history[-max_messages:]):
+        if remaining <= 0:
+            break
+        content = str(message.get("content") or "")
+        if not content:
+            continue
+        clipped = content[-remaining:]
+        selected.append(
+            {
+                "role": str(message.get("role") or "user"),
+                "content": clipped,
+            }
+        )
+        remaining -= len(clipped)
+    selected.reverse()
+    return selected
 
 
 def _first_json_object(text: str) -> dict[str, Any]:
@@ -289,6 +388,20 @@ class SmallModelIntentClient:
         self.model = settings.intent_routing_model
         self.timeout = settings.intent_routing_timeout_seconds
         self.max_history_messages = settings.intent_routing_history_messages
+        self.max_history_chars = settings.intent_routing_history_max_chars
+        self.compact_schemas = settings.intent_routing_compact_schemas
+        self._client = httpx.Client(
+            timeout=httpx.Timeout(self.timeout),
+            limits=httpx.Limits(
+                max_connections=32,
+                max_keepalive_connections=16,
+                keepalive_expiry=30,
+            ),
+            trust_env=False,
+        )
+
+    def close(self) -> None:
+        self._client.close()
 
     def classify(
         self,
@@ -301,9 +414,12 @@ class SmallModelIntentClient:
     ) -> IntentRoute:
         if not self.base_url:
             raise RuntimeError("intent router base URL is not configured")
-        routed_history = (
-            history[-self.max_history_messages :] if self.max_history_messages > 0 else []
+        routed_history = bounded_history(
+            history,
+            max_messages=self.max_history_messages,
+            max_chars=self.max_history_chars,
         )
+        routed_schemas = compact_tool_schemas(schemas) if self.compact_schemas else schemas
         request_body = {
             "model": self.model,
             "messages": [
@@ -312,9 +428,11 @@ class SmallModelIntentClient:
                     "role": "user",
                     "content": json.dumps(
                         {
+                            # Put the stable, usually shared prefix first so vLLM's
+                            # automatic prefix cache can reuse it across user queries.
+                            "visible_tools": routed_schemas,
                             "history": routed_history,
                             "query": query,
-                            "visible_tools": schemas,
                         },
                         ensure_ascii=False,
                         separators=(",", ":"),
@@ -333,7 +451,7 @@ class SmallModelIntentClient:
             headers["x-tenant-id"] = tenant_id
         if user_id:
             headers["x-user-id"] = user_id
-        response = httpx.post(
+        response = self._client.post(
             f"{self.base_url}/chat/completions",
             headers=headers,
             json=request_body,
