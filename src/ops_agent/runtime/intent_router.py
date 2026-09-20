@@ -440,8 +440,11 @@ class SmallModelIntentClient:
                 },
             ],
             "temperature": 0,
-            "repetition_penalty": 1.05,
+            # Repeated JSON punctuation and field names are legitimate. A penalty
+            # above 1.0 can corrupt the fixed response contract.
+            "repetition_penalty": 1.0,
             "max_tokens": 128,
+            "chat_template_kwargs": {"enable_thinking": False},
             "stream": False,
         }
         headers = {"content-type": "application/json"}

@@ -5,6 +5,13 @@ SERVING_ROOT="${INTENT_SERVING_ROOT:-/root/autodl-tmp/intent-serving}"
 SERVING_ENV="${INTENT_SERVING_ENV:-/root/autodl-tmp/envs/intent-serving}"
 MODEL_PATH="${INTENT_MODEL_PATH:-/root/autodl-tmp/models/qwen3-1.7b-intent-router-cp100-merged}"
 LITELLM_CONFIG="${LITELLM_CONFIG_PATH:-${SERVING_ROOT}/litellm.yaml}"
+DTYPE="${INTENT_DTYPE:-bfloat16}"
+ATTENTION_BACKEND="${INTENT_ATTENTION_BACKEND:-XFORMERS}"
+GPU_MEMORY_UTILIZATION="${INTENT_GPU_MEMORY_UTILIZATION:-0.90}"
+MAX_MODEL_LEN="${INTENT_MAX_MODEL_LEN:-8192}"
+MAX_NUM_SEQS="${INTENT_MAX_NUM_SEQS:-32}"
+MAX_NUM_BATCHED_TOKENS="${INTENT_MAX_NUM_BATCHED_TOKENS:-2048}"
+QUANTIZATION="${INTENT_QUANTIZATION:-}"
 
 : "${INTENT_VLLM_API_KEY:?INTENT_VLLM_API_KEY is required}"
 : "${INFERENCE_GATEWAY_API_KEY:?INFERENCE_GATEWAY_API_KEY is required}"
@@ -45,12 +52,17 @@ redis-server \
   --logfile "${SERVING_ROOT}/logs/redis.log"
 
 screen -dmS intent-vllm bash -lc \
-  "exec '${SERVING_ENV}/bin/python' -m vllm.entrypoints.openai.api_server \
+  "export VLLM_ATTENTION_BACKEND='${ATTENTION_BACKEND}'; \
+   exec '${SERVING_ENV}/bin/python' -m vllm.entrypoints.openai.api_server \
     --model '${MODEL_PATH}' \
     --served-model-name qwen3-1.7b-intent-router \
-    --host 127.0.0.1 --port 8001 --dtype half \
-    --gpu-memory-utilization 0.85 --max-model-len 8192 --max-num-seqs 16 \
-    --max-num-batched-tokens 2048 --enable-prefix-caching --enable-chunked-prefill \
+    --host 127.0.0.1 --port 8001 --dtype '${DTYPE}' \
+    --gpu-memory-utilization '${GPU_MEMORY_UTILIZATION}' \
+    --max-model-len '${MAX_MODEL_LEN}' --max-num-seqs '${MAX_NUM_SEQS}' \
+    --max-num-batched-tokens '${MAX_NUM_BATCHED_TOKENS}' \
+    ${QUANTIZATION:+--quantization '${QUANTIZATION}'} \
+    --enable-prefix-caching --enable-chunked-prefill --disable-log-requests \
+    --generation-config vllm \
     >'${SERVING_ROOT}/logs/vllm.log' 2>&1"
 
 screen -dmS intent-gateway bash -lc \

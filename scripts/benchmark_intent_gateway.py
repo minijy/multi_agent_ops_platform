@@ -51,6 +51,7 @@ DEFAULT_PAYLOAD = {
     ],
     "temperature": 0,
     "max_tokens": 128,
+    "chat_template_kwargs": {"enable_thinking": False},
     "stream": False,
 }
 

@@ -142,6 +142,7 @@ def test_small_model_places_stable_tools_before_dynamic_query(monkeypatch):
 
     content = json.loads(captured["messages"][1]["content"])
     assert list(content) == ["visible_tools", "history", "query"]
+    assert captured["chat_template_kwargs"] == {"enable_thinking": False}
     assert route.decision == "direct_answer"
     client.close()
 
