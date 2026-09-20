@@ -322,6 +322,7 @@ class SmallModelIntentClient:
                 },
             ],
             "temperature": 0,
+            "repetition_penalty": 1.05,
             "max_tokens": 128,
             "stream": False,
         }
