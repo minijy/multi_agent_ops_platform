@@ -69,6 +69,10 @@ class ContextWindowUpdate(BaseModel):
     tool_max_chars: int | None = Field(default=None, ge=500, le=80_000)
 
 
+class IntentRoutingUpdate(BaseModel):
+    enabled: bool
+
+
 class RuntimeAgentResponse(BaseModel):
     session_id: str
     answer: str

@@ -46,6 +46,7 @@ from .memory import (
     register_memory_tools,
 )
 from .model_router import create_model_router_from_registry
+from .intent_router import create_intent_router
 from .observability import create_metrics_store
 from .result_store import ResultStore, create_result_store
 from .sandbox import SandboxRunner, register_sandbox_tools
@@ -185,6 +186,7 @@ def open_runtime_stack(settings: Settings) -> Iterator[RuntimeStack]:
         result_store=result_store,
         memory_service=memory_service,
         tool_catalog=tool_catalog,
+        intent_router=create_intent_router(settings),
     )
     subagent_manager = SubagentManager(
         runtime=agent_runtime,

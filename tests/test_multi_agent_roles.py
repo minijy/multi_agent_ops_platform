@@ -103,7 +103,7 @@ def test_coordinator_and_analyst_use_different_tool_allowlists(tmp_path):
         agent_registry.analyst_config(), agent_registry, settings, tools,
         connections, "tenant-a",
     )
-    assert coordinator == {"delegate_subagent", "load_skill"}
+    assert coordinator == {"delegate_subagent", "delegate_specialists", "load_skill"}
     assert "amazon_finance_query" not in coordinator
     assert "delegate_subagent" not in analyst
     assert "amazon_finance_query" in analyst
@@ -111,7 +111,7 @@ def test_coordinator_and_analyst_use_different_tool_allowlists(tmp_path):
     assert "profit_report_query" in analyst
 
 
-def test_specialist_mode_repairs_stale_coordinator_override(tmp_path):
+def test_automatic_routing_keeps_both_delegation_tools(tmp_path):
     path = tmp_path / "agents.json"
     path.write_text(
         json.dumps(
@@ -132,7 +132,6 @@ def test_specialist_mode_repairs_stale_coordinator_override(tmp_path):
     )
     settings = Settings(
         _env_file=None,
-        analyst_mode="specialized_parallel",
         agent_definitions_path=path,
     )
     agents = create_agent_registry(path)
@@ -145,9 +144,9 @@ def test_specialist_mode_repairs_stale_coordinator_override(tmp_path):
     )
 
     assert "delegate_specialists" in allowed
-    assert "delegate_subagent" not in allowed
+    assert "delegate_subagent" in allowed
     assert "agent_id 必须是 analyst" not in agents.runtime_config().system_prompt
-    assert "系统不会预先检索知识库" in agents.runtime_config().system_prompt
+    assert "前置意图路由" in agents.runtime_config().system_prompt
 
 
 def test_coordinator_prompt_upgrades_stock_knowledge_routing(tmp_path):
@@ -170,8 +169,8 @@ def test_coordinator_prompt_upgrades_stock_knowledge_routing(tmp_path):
     )
     agents = create_agent_registry(path)
     prompt = agents.runtime_config().system_prompt
-    assert "系统不会预先检索知识库" in prompt
-    assert "也没有单独的意图分类器" in prompt
+    assert "前置意图路由" in prompt
+    assert "任务复杂、不确定" in prompt
     assert "即使问「是什么意思」" in prompt
     assert "web_search" in prompt
     assert "当前工具列表里有 web_search" in prompt
@@ -221,10 +220,9 @@ def test_specialist_analysts_have_distinct_tool_allowlists(tmp_path):
     assert erp == {"load_skill"}
 
 
-def test_specialized_mode_rejects_general_and_limits_parallel_tasks(tmp_path, postgres_dsn):
+def test_automatic_routing_allows_general_and_limits_parallel_tasks(tmp_path, postgres_dsn):
     settings = Settings(
         _env_file=None,
-        analyst_mode="specialized_parallel",
         subagent_queue_backend="db",
         agent_definitions_path=tmp_path / "agents.json",
     )
@@ -250,17 +248,17 @@ def test_specialized_mode_rejects_general_and_limits_parallel_tasks(tmp_path, po
         settings=settings,
     )
     try:
-        with pytest.raises(PermissionError, match="general analyst is disabled"):
-            manager.submit(
-                SubagentSubmitRequest(
-                    agent_id=ANALYST_AGENT_ID,
-                    objective="通用分析不应运行",
-                    parent_session_id="parent-specialized",
-                ),
-                tenant_id="tenant-a",
-                user_id="user-a",
-                role="admin",
-            )
+        general = manager.submit(
+            SubagentSubmitRequest(
+                agent_id=ANALYST_AGENT_ID,
+                objective="领域不明确时使用通用分析",
+                parent_session_id="parent-general",
+            ),
+            tenant_id="tenant-a",
+            user_id="user-a",
+            role="admin",
+        )
+        assert general.agent_id == ANALYST_AGENT_ID
 
         for agent_id in (
             AMAZON_FINANCE_ANALYST_ID,
@@ -296,7 +294,6 @@ def test_specialized_mode_rejects_general_and_limits_parallel_tasks(tmp_path, po
 def test_delegate_specialists_returns_all_parallel_results(tmp_path, postgres_dsn):
     settings = Settings(
         _env_file=None,
-        analyst_mode="specialized_parallel",
         subagent_worker_count=3,
         agent_definitions_path=tmp_path / "agents.json",
     )
@@ -358,7 +355,6 @@ def test_delegate_specialists_returns_all_parallel_results(tmp_path, postgres_ds
 def test_delegate_specialists_allows_parallel_same_role(tmp_path, postgres_dsn):
     settings = Settings(
         _env_file=None,
-        analyst_mode="specialized_parallel",
         subagent_worker_count=3,
         agent_definitions_path=tmp_path / "agents.json",
     )
@@ -482,17 +478,17 @@ def test_delegate_subagent_requires_analyst_role(tmp_path, postgres_dsn):
                 user_id="user-a",
                 role="admin",
             )
-        with pytest.raises(PermissionError, match="disabled in general mode"):
-            manager.submit(
-                SubagentSubmitRequest(
-                    agent_id=AMAZON_FINANCE_ANALYST_ID,
-                    objective="专业 Agent 在通用模式下不可运行",
-                    parent_session_id="parent-1",
-                ),
-                tenant_id="tenant-a",
-                user_id="user-a",
-                role="admin",
-            )
+        specialist = manager.submit(
+            SubagentSubmitRequest(
+                agent_id=AMAZON_FINANCE_ANALYST_ID,
+                objective="明确 Amazon 领域时使用专业 Agent",
+                parent_session_id="parent-1",
+            ),
+            tenant_id="tenant-a",
+            user_id="user-a",
+            role="admin",
+        )
+        assert specialist.agent_id == AMAZON_FINANCE_ANALYST_ID
     finally:
         manager.shutdown()
 
@@ -521,21 +517,19 @@ def test_coordinator_prompt_does_not_list_query_tools(tmp_path, postgres_dsn):
     analyst_prompt = runtime._base_system_prompt(
         {"amazon_finance_query"}, agent_id=ANALYST_AGENT_ID
     )
-    assert "agent_id 填 analyst" in coordinator_prompt
-    assert "系统不会预先检索知识库" in coordinator_prompt
-    assert "也没有单独的意图分类器" in coordinator_prompt
+    assert "领域不明确时委派 analyst" in coordinator_prompt
+    assert "前置意图路由" in coordinator_prompt
     assert "即使问「是什么意思」" in coordinator_prompt
     assert "search_knowledge" in coordinator_prompt
     assert "web_search" in coordinator_prompt
     assert "amazon_finance_query" not in coordinator_prompt
     assert "amazon_finance_query" in analyst_prompt
 
-    settings.analyst_mode = "specialized_parallel"
     specialist_tools = resolve_agent_tool_allowlist(
         agent_registry.runtime_config(), agent_registry, settings, tools
     )
     assert "delegate_specialists" in specialist_tools
-    assert "delegate_subagent" not in specialist_tools
+    assert "delegate_subagent" in specialist_tools
     specialist_prompt = runtime._base_system_prompt(
         {"delegate_subagent"}, agent_id=COORDINATOR_AGENT_ID
     )
@@ -549,7 +543,6 @@ def test_coordinator_prompt_does_not_list_query_tools(tmp_path, postgres_dsn):
 def test_runtime_normalizes_legacy_delegations_into_bounded_batches(tmp_path, postgres_dsn):
     settings = Settings(
         _env_file=None,
-        analyst_mode="specialized_parallel",
         agent_definitions_path=tmp_path / "agents.json",
     )
     tools = ToolRegistry()
@@ -604,7 +597,6 @@ def test_runtime_normalizes_legacy_delegations_into_bounded_batches(tmp_path, po
 def test_runtime_normalizes_rich_objectives_and_merges_same_specialist(tmp_path, postgres_dsn):
     settings = Settings(
         _env_file=None,
-        analyst_mode="specialized_parallel",
         agent_definitions_path=tmp_path / "agents.json",
     )
     tools = ToolRegistry()
@@ -655,9 +647,10 @@ def test_runtime_normalizes_rich_objectives_and_merges_same_specialist(tmp_path,
     DelegateSpecialistsArguments.model_validate(normalized[0].arguments)
 
 
-def test_session_snapshot_refreshes_orchestration_tools_after_mode_switch():
+def test_session_snapshot_keeps_both_automatic_delegation_tools():
     current = {
         "delegate_specialists",
+        "delegate_subagent",
         "search_memory",
         "profit_report_query",
     }
@@ -672,43 +665,32 @@ def test_session_snapshot_refreshes_orchestration_tools_after_mode_switch():
     )
 
     assert "delegate_specialists" in merged
-    assert "delegate_subagent" not in merged
+    assert "delegate_subagent" in merged
     assert "search_memory" in merged
     assert "profit_report_query" in merged
     assert merged <= (old_general_snapshot | SYSTEM_DEFAULT_TOOL_NAMES)
 
 
-def test_general_mode_repairs_stale_specialist_delegation_call():
+def test_single_specialist_delegation_is_not_forced_into_batch():
     calls = [
         ToolCall(
             call_id="stale-specialist-call",
-            name="delegate_specialists",
+            name="delegate_subagent",
             arguments={
-                "tasks": [
-                    {
-                        "agent_id": PROFIT_ANALYST_ID,
-                        "objective": "查询 2026 年 5 月毛利率",
-                    },
-                    {
-                        "agent_id": AMAZON_FINANCE_ANALYST_ID,
-                        "objective": "核对 2026 年 5 月结算费用",
-                    },
-                ],
-                "timeout_seconds": 120,
+                "agent_id": PROFIT_ANALYST_ID,
+                "objective": "查询 2026 年 5 月毛利率",
             },
         )
     ]
-
-    repaired, count = AgentRuntime._repair_delegation_mode(
-        calls, {"delegate_subagent", "search_memory"}
+    runtime = object.__new__(AgentRuntime)
+    runtime.registry = ToolRegistry()
+    normalized, count, batches = runtime._normalize_specialist_delegations(
+        calls,
+        ToolExecutionContext(session_id="s", tenant_id="t", user_id="u"),
     )
-
-    assert count == 1
-    assert repaired[0].name == "delegate_subagent"
-    assert repaired[0].arguments["agent_id"] == ANALYST_AGENT_ID
-    assert repaired[0].arguments["run_in_background"] is False
-    assert "5 月毛利率" in repaired[0].arguments["objective"]
-    assert "5 月结算费用" in repaired[0].arguments["objective"]
+    assert normalized == calls
+    assert count == 0
+    assert batches == 0
 
 
 def test_subagent_rejects_foreign_connection_and_widened_resource_scope(tmp_path, postgres_dsn):

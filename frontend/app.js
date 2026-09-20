@@ -850,11 +850,10 @@ function renderAgentCards(agents){
   const coordinator=byId['function-calling-runtime'];
   const general=byId.analyst;
   const specialists=SPECIALIST_ANALYST_IDS.map(id=>byId[id]).filter(Boolean);
-  const mode=state.configuration?.analyst_runtime?.mode||'general';
-  const effectiveStatus=agent=>agent.status!=='active'?'disabled':agent.id==='function-calling-runtime'?'active':mode==='general'?(agent.id==='analyst'?'active':'standby'):(SPECIALIST_ANALYST_IDS.includes(agent.id)?'active':'standby');
+  const effectiveStatus=agent=>agent.status!=='active'?'disabled':'active';
   const root=$('#agent-sections');
   if(!root)return;
-  const specialistSection=specialists.length?`<div class="agent-section"><h2 class="section-title">专业分析 <span class="section-sub">专业模式下按领域委派，最多并行 ${state.configuration?.analyst_runtime?.max_parallel||3} 个</span></h2><div class="agent-grid">${specialists.map(agent=>renderAgentCard(agent,effectiveStatus(agent))).join('')}</div></div>`:'';
+  const specialistSection=specialists.length?`<div class="agent-section"><h2 class="section-title">专业分析 <span class="section-sub">由意图路由按业务领域自动选择，跨领域最多并行 3 个</span></h2><div class="agent-grid">${specialists.map(agent=>renderAgentCard(agent,effectiveStatus(agent))).join('')}</div></div>`:'';
   root.innerHTML=`<div class="agent-section"><h2 class="section-title">协调与通用分析</h2><div class="agent-grid agent-grid-core">${[coordinator,general].filter(Boolean).map(agent=>renderAgentCard(agent,effectiveStatus(agent))).join('')}</div></div>${specialistSection}`;
   $$('[data-edit-agent]',root).forEach(button=>button.addEventListener('click',()=>openAgentEditor(button.dataset.editAgent)));
 }
@@ -950,7 +949,7 @@ function connectionEditorPayload(){
 }
 async function saveConnectionEditor(event){event.preventDefault();const editing=state.editingConnection;if(!editing)return;const payload=connectionEditorPayload();const submit=$('#connection-edit-save');submit.disabled=true;try{if(editing.isNew)await api('/v1/connections',{method:'POST',body:JSON.stringify(payload)});else{delete payload.connector_type;await api(`/v1/connections/${encodeURIComponent(editing.id)}`,{method:'PATCH',body:JSON.stringify(payload)})}toast(editing.isNew?'连接器已创建':'连接器已更新','success');closeDrawer('#connection-editor-drawer');state.catalog=null;await loadConnectorsPage()}catch(error){toast(error.message,'error')}finally{submit.disabled=false}}
 async function deleteConnectionEditor(){const editing=state.editingConnection;if(!editing||editing.isNew)return;if(!await askConfirm(`确定删除连接器「${editing.name}」？删除后无法恢复。`,{title:'删除连接器',okLabel:'删除',danger:true}))return;try{await api(`/v1/connections/${encodeURIComponent(editing.id)}`,{method:'DELETE'});toast('连接器已删除','success');closeDrawer('#connection-editor-drawer');state.catalog=null;await loadConnectorsPage()}catch(error){toast(error.message,'error')}}
-async function loadAgentsPage(){const [agents,configuration]=await Promise.all([api('/v1/agents'),api('/v1/configuration')]);state.agents=agents.items;state.configuration=configuration;$('#analyst-mode-select').value=configuration.analyst_runtime?.mode||'general';renderAgentCards(agents.items)}
+async function loadAgentsPage(){const [agents,configuration]=await Promise.all([api('/v1/agents'),api('/v1/configuration')]);state.agents=agents.items;state.configuration=configuration;renderAgentCards(agents.items)}
 async function loadSkillsPage(){
   const result=await api('/v1/agent/skills');
   state.skills=result.items||[];
@@ -1261,8 +1260,7 @@ async function uploadKnowledgeDocument(event){
   }catch(error){toast(error.message,'error')}
   finally{submit.disabled=false}
 }
-async function openAgentEditor(agentId){try{const agent=await api(`/v1/agents/${agentId}`);state.editingAgent=agent;$('#agent-editor-title').textContent=agent.name;$('#agent-editor-subtitle').textContent=agent.kind==='runtime'?'协调器':agent.kind==='role'?'分析角色':'助手';$('#agent-edit-name').value=agent.name;$('#agent-edit-role').value=agent.role;$('#agent-edit-description').value=agent.description||'';$('#agent-edit-enabled').checked=!!agent.enabled;$('#agent-edit-system-prompt').value=agent.system_prompt||'';const toolsWrap=$('#agent-edit-tools-wrap');if(agent.id==='function-calling-runtime'||agent.kind==='role'){toolsWrap.hidden=false;const roleTools=agent.role_tools||agent.allowed_tools||[];renderBuiltinToolChips(roleTools,agent.tool_catalog);const optional=document.getElementById('agent-optional-tools');if(optional&&optional.parentElement)optional.parentElement.hidden=true;const add=document.getElementById('agent-add-tool-button');if(add&&add.parentElement)add.parentElement.hidden=true;const hint=toolsWrap.querySelector('.form-hint');if(hint)hint.textContent=agent.kind==='role'?'分析助手使用独立工具白名单，不能继续委派。':'协调器只保留委派工具；查数由当前模式允许的分析助手执行。';state.editingOptionalTools=[]}else{toolsWrap.hidden=true;state.editingOptionalTools=[]}openDrawer('#agent-editor-drawer')}catch(error){toast(error.message)}}
-async function saveAnalystMode(event){event.preventDefault();const mode=$('#analyst-mode-select').value;try{const result=await api('/v1/configuration/analyst-runtime',{method:'PATCH',body:JSON.stringify({mode})});if(state.configuration)state.configuration.analyst_runtime=result.analyst_runtime;toast(mode==='general'?'已切换为通用分析助手':'已切换为并行专业分析','success');await loadAgentsPage()}catch(error){toast(error.message,'error')}}
+async function openAgentEditor(agentId){try{const agent=await api(`/v1/agents/${agentId}`);state.editingAgent=agent;$('#agent-editor-title').textContent=agent.name;$('#agent-editor-subtitle').textContent=agent.kind==='runtime'?'协调器':agent.kind==='role'?'分析角色':'助手';$('#agent-edit-name').value=agent.name;$('#agent-edit-role').value=agent.role;$('#agent-edit-description').value=agent.description||'';$('#agent-edit-enabled').checked=!!agent.enabled;$('#agent-edit-system-prompt').value=agent.system_prompt||'';const toolsWrap=$('#agent-edit-tools-wrap');if(agent.id==='function-calling-runtime'||agent.kind==='role'){toolsWrap.hidden=false;const roleTools=agent.role_tools||agent.allowed_tools||[];renderBuiltinToolChips(roleTools,agent.tool_catalog);const optional=document.getElementById('agent-optional-tools');if(optional&&optional.parentElement)optional.parentElement.hidden=true;const add=document.getElementById('agent-add-tool-button');if(add&&add.parentElement)add.parentElement.hidden=true;const hint=toolsWrap.querySelector('.form-hint');if(hint)hint.textContent=agent.kind==='role'?'分析助手使用独立工具白名单，不能继续委派。':'协调器保留两类委派工具，由意图路由自动选择分析助手。';state.editingOptionalTools=[]}else{toolsWrap.hidden=true;state.editingOptionalTools=[]}openDrawer('#agent-editor-drawer')}catch(error){toast(error.message)}}
 async function saveAgentEditor(event){event.preventDefault();const agent=state.editingAgent;if(!agent)return;const payload={name:$('#agent-edit-name').value.trim(),role:$('#agent-edit-role').value.trim(),description:$('#agent-edit-description').value.trim(),enabled:$('#agent-edit-enabled').checked,system_prompt:$('#agent-edit-system-prompt').value};const submit=$('#agent-edit-save');submit.disabled=true;try{await api(`/v1/agents/${agent.id}`,{method:'PATCH',body:JSON.stringify(payload)});toast('助手配置已保存');closeDrawer('#agent-editor-drawer');closeToolMenu();await loadAgentsPage()}catch(error){toast(error.message)}finally{submit.disabled=false}}
 async function loadConfiguration(){
   state.configuration=await api('/v1/configuration');
@@ -1274,7 +1272,23 @@ async function loadConfiguration(){
     system.innerHTML=[['运行环境',c.environment==='production'?'生产':'测试','当前部署环境'],['对话事件库',c.persistence.session_events,'保存任务对话'],['默认模型',modelSummary,`已配置 ${c.models?.count||0} 个模型`],['控制面数据库',c.persistence.control_plane,'审计与配置'],['本回合 Token 预算',String(c.limits.run_token_budget),'超限会停止本回合'],['密钥','界面不展示','API 不返回任何密钥']].map(settingCard).join('');
   }
   await loadModelSettings();
+  fillIntentRoutingForm(c.intent_routing);
   fillContextWindowForm(c.context_window);
+}
+function fillIntentRoutingForm(config){
+  const enabled=$('#intent-routing-enabled');
+  const status=$('#intent-routing-status');
+  if(enabled)enabled.checked=!!config?.enabled;
+  if(status)status.textContent=config?.configured?`小模型：${config.model||'未命名'}；失败自动回退 Coordinator`:'小模型服务未配置；开启后请求将回退 Coordinator';
+}
+async function saveIntentRouting(event){
+  event.preventDefault();
+  try{
+    const result=await api('/v1/configuration/intent-routing',{method:'PATCH',body:JSON.stringify({enabled:$('#intent-routing-enabled').checked})});
+    if(state.configuration)state.configuration.intent_routing=result.intent_routing;
+    fillIntentRoutingForm(result.intent_routing);
+    toast(result.intent_routing.enabled?'意图识别已开启':'意图识别已关闭','success');
+  }catch(error){toast(error.message,'error')}
 }
 function modelProviderLabel(provider){return ({zhipu:'智谱',qwen:'通义千问',deepseek:'DeepSeek',openai:'OpenAI'})[provider]||provider}
 function renderModelCard(model){
@@ -1498,7 +1512,7 @@ async function saveContextWindow(event){
   }
 }
 function settingCard([title,value,description]){return`<article class="setting-card"><h3>${escapeHTML(title)}</h3><div class="setting-value">${escapeHTML(value)}</div><p>${escapeHTML(description)}</p></article>`}
-const auditActionLabels={'account.registered':'账户注册','account.login_succeeded':'登录成功','account.login_failed':'登录失败','account.password_changed':'修改密码','account.password_reset':'重置密码','access.user_saved':'保存用户','access.permission_group_updated':'修改权限组','agent.updated':'更新 Agent','agent_session.deleted':'删除会话','connection.created':'创建连接','connection.updated':'更新连接','connection.deleted':'删除连接','model.created':'创建模型','model.updated':'更新模型','model.deleted':'删除模型','tool.connection_bound':'绑定 Tool 连接','analyst_runtime.mode_updated':'切换 Analyst 模式','amazon_finance.queried':'查询 Amazon 财务','lingxing_profit.queried':'查询领星利润','profit_report.queried':'查询利润报表','kingdee_cloud.queried':'查询金蝶云','memory.created':'创建记忆','memory.confirmed':'确认记忆','memory.rejected':'拒绝记忆','memory.corrected':'纠正记忆','memory.forgotten':'删除记忆','memory.compliance_deleted':'合规删除记忆'};
+const auditActionLabels={'account.registered':'账户注册','account.login_succeeded':'登录成功','account.login_failed':'登录失败','account.password_changed':'修改密码','account.password_reset':'重置密码','access.user_saved':'保存用户','access.permission_group_updated':'修改权限组','agent.updated':'更新 Agent','agent_session.deleted':'删除会话','connection.created':'创建连接','connection.updated':'更新连接','connection.deleted':'删除连接','model.created':'创建模型','model.updated':'更新模型','model.deleted':'删除模型','tool.connection_bound':'绑定 Tool 连接','intent_routing.updated':'更新意图识别','amazon_finance.queried':'查询 Amazon 财务','lingxing_profit.queried':'查询领星利润','profit_report.queried':'查询利润报表','kingdee_cloud.queried':'查询金蝶云','memory.created':'创建记忆','memory.confirmed':'确认记忆','memory.rejected':'拒绝记忆','memory.corrected':'纠正记忆','memory.forgotten':'删除记忆','memory.compliance_deleted':'合规删除记忆'};
 const auditResourceLabels={account:'账户',access_user:'用户',permission_group:'权限组',agent:'Agent',agent_session:'Agent 会话',agent_tool_approval:'Tool 审批',connection:'连接',model:'模型',tool:'Tool',runtime_configuration:'运行时配置',amazon_finance:'Amazon 财务',lingxing_profit:'领星利润',profit_report:'利润报表',kingdee_cloud:'金蝶云',memory:'记忆',user_memory:'用户记忆'};
 const auditFieldLabels={connector_type:'类型',connection_id:'连接',tool_name:'工具',event_count:'事件',result_count:'结果',subagent_count:'子任务',child_event_count:'子事件',name:'名称',enabled:'启用',provider:'提供方',model_name:'模型',model_id:'模型',base_url:'接口',api_url:'接口',is_default:'默认',supports_image:'图片',timeout_seconds:'超时',max_tokens:'Token',mode:'模式',code:'错误码',reason:'原因',user_id:'用户',role:'角色',group_id:'权限组',agent_id:'助手',session_id:'会话',status:'状态'};
 function auditStatus(action){if(action.endsWith('_failed')||action.endsWith('.rejected'))return ['失败','audit-failed'];if(action.includes('deleted')||action.endsWith('.forgotten'))return ['已删除','audit-warning'];if(action.endsWith('_succeeded')||action.endsWith('.confirmed')||action.endsWith('.created')||action.endsWith('.registered'))return ['成功','audit-success'];return ['已记录','audit-neutral']}
@@ -2052,8 +2066,7 @@ async function loadAgentChat(){
   const configurationPromise=state.configuration?Promise.resolve(state.configuration):api('/v1/configuration');
   const [,configuration]=await Promise.all([refreshAgentModelSelect(),configurationPromise]);
   state.configuration=configuration;
-  const specialist=configuration.analyst_runtime?.mode==='specialized_parallel';
-  $('#agent-runtime-mode').textContent=specialist?`专业并行 · 最多 ${configuration.analyst_runtime?.max_parallel||3}`:'通用 Analyst · 单任务';
+  $('#agent-runtime-mode').textContent=configuration.intent_routing?.enabled?'三级意图路由 · 自动委派':'Coordinator 直达';
   if(state.agentChat.sessionId){
     try{await refreshAgentEvents()}
     catch{startNewAgentSession()}
@@ -2541,7 +2554,6 @@ async function navigate(page,options={}){
   if(!options.skipHistory)syncPageUrl(page,{replace:!!options.replace});
   try{await loaders[page]()}catch(error){pageEl?.classList.add('has-error');toast(error.message)}finally{pageEl?.classList.remove('is-loading')}
 }
-$('#analyst-mode-form')?.addEventListener('submit',saveAnalystMode);
 $('#access-user-form')?.addEventListener('submit',saveAccessUser);
 $('#access-group-form')?.addEventListener('submit',saveAccessGroup);
 $$('[data-open-access-editor]').forEach(button=>button.addEventListener('click',()=>openAccessEditor(button.dataset.openAccessEditor)));
@@ -2634,6 +2646,7 @@ function handleAgentQuestionKeydown(event){
 }
 $('#agent-question')?.addEventListener('input',autosizeAgentQuestion);
 autosizeAgentQuestion();
+$('#intent-routing-form')?.addEventListener('submit',saveIntentRouting);
 $$('.nav-item').forEach(button=>button.addEventListener('click',()=>{const page=button.dataset.page;if(page==='guide')navigate('guide',{topic:''});else navigate(page)}));$$('[data-go]').forEach(button=>button.addEventListener('click',()=>navigate(button.dataset.go)));$('#context-window-form').addEventListener('submit',saveContextWindow);$('#agent-editor-form').addEventListener('submit',saveAgentEditor);$('#skill-editor-form')?.addEventListener('submit',saveSkillEditor);$('#skill-add-button')?.addEventListener('click',()=>openSkillEditor());$('#skill-edit-delete')?.addEventListener('click',deleteSkillEditor);$$('[data-close-skill-editor]').forEach(button=>button.addEventListener('click',()=>closeDrawer('#skill-editor-drawer')));$('#skill-editor-drawer')?.addEventListener('click',event=>{if(event.target.id==='skill-editor-drawer')closeDrawer(event.currentTarget)});$('#connection-editor-form')?.addEventListener('submit',saveConnectionEditor);$('#connection-add-button')?.addEventListener('click',()=>openConnectionEditor());$('#connection-edit-type')?.addEventListener('change',updateConnectionFields);$('#connection-edit-delete')?.addEventListener('click',deleteConnectionEditor);$$('[data-close-connection-editor]').forEach(button=>button.addEventListener('click',()=>closeDrawer('#connection-editor-drawer')));$('#connection-editor-drawer')?.addEventListener('click',event=>{if(event.target.id==='connection-editor-drawer')closeDrawer(event.currentTarget)});$('#model-editor-form').addEventListener('submit',saveModelEditor);$('#model-add-button')?.addEventListener('click',()=>openModelEditor());$('#model-edit-delete')?.addEventListener('click',deleteModelEditor);$('#model-edit-provider')?.addEventListener('change',()=>applyModelProviderDefaults());$('#agent-model-select')?.addEventListener('change',onAgentModelChange);$$('[data-close-model-editor]').forEach(button=>button.addEventListener('click',()=>closeDrawer('#model-editor-drawer')));$('#model-editor-drawer')?.addEventListener('click',event=>{if(event.target.id==='model-editor-drawer')closeDrawer(event.currentTarget)});$$('[data-close-agent-editor]').forEach(button=>button.addEventListener('click',()=>{closeToolMenu();closeDrawer('#agent-editor-drawer')}));$('#agent-editor-drawer').addEventListener('click',event=>{if(event.target.id==='agent-editor-drawer'){closeToolMenu();closeDrawer(event.currentTarget)}});$('#agent-add-tool-button').addEventListener('click',event=>{event.stopPropagation();const menu=$('#agent-tool-menu');const opening=!menu.classList.contains('is-open');if(opening){renderToolMenuOptions();openMenu(menu)}else closeToolMenu()});document.addEventListener('click',event=>{if(!event.target.closest('.tool-picker-add'))closeToolMenu();if(!event.target.closest('.agent-session-menu'))closeAgentSessionMenu()});$('#context-window-form').addEventListener('submit',saveContextWindow);$('#agent-chat-form').addEventListener('submit',sendAgentMessage);$('#agent-question').addEventListener('keydown',handleAgentQuestionKeydown);$('#agent-session-search')?.addEventListener('focus',unlockAgentSessionSearch);$('#agent-session-search')?.addEventListener('pointerdown',unlockAgentSessionSearch);$('#agent-session-search')?.addEventListener('input',onAgentSessionSearchInput);
 $$('[data-toggle-password]').forEach(button=>button.addEventListener('click',()=>{const input=$(`#${button.dataset.togglePassword}`);if(!input)return;const show=input.type==='password';input.type=show?'text':'password';button.textContent=show?'隐藏':'显示';button.setAttribute('aria-label',show?'隐藏密码':'显示密码')}));$('#agent-new-session').addEventListener('click',startNewAgentSession);$('#agent-delete-session').addEventListener('click',()=>deleteAgentSession(state.agentChat.sessionId));$('#agent-attach-image').addEventListener('click',()=>$('#agent-image-input').click());$('#agent-image-input').addEventListener('change',handleAgentImageSelect);$('#agent-interrupt-button').addEventListener('click',interruptAgentTurn);$('#agent-resume-button').addEventListener('click',resumeInterruptedTurn);$('#tool-binding-form')?.addEventListener('submit',saveToolBinding);$$('[data-close-tool-binding]').forEach(button=>button.addEventListener('click',closeToolBindingDrawer));$('#tool-binding-drawer')?.addEventListener('click',event=>{if(event.target.id==='tool-binding-drawer')closeToolBindingDrawer()});$('#tool-binding-to-connectors')?.addEventListener('click',()=>{closeToolBindingDrawer();navigate('connectors')});$('#refresh-button').addEventListener('click',()=>navigate(state.page,{replace:true}));
 function setNavCollapsed(collapsed){

@@ -27,7 +27,7 @@ from ops_agent.runtime.model_errors import ModelProviderError
 from ops_agent.runtime.model_router import ModelRouter, create_model_router
 from ops_agent.runtime.session_events import PostgresSessionEventStore
 from ops_agent.runtime.skills import SkillRegistry, register_skill_tool
-from ops_agent.runtime.subagents import DelegateSubagentArguments
+from ops_agent.runtime.subagents import DelegateSpecialistsArguments, DelegateSubagentArguments
 from ops_agent.runtime.tools import (
     ToolDefinition,
     ToolExecutionContext,
@@ -131,7 +131,7 @@ def test_runtime_function_call_and_session_events(tmp_path: Path, postgres_dsn):
     assert completed.payload["answer"] == "echo 工具调用完成"
 
 
-def test_runtime_repairs_stale_specialist_call_in_general_mode(tmp_path: Path, postgres_dsn):
+def test_runtime_executes_specialist_delegation_without_manual_mode(tmp_path: Path, postgres_dsn):
     class StaleSpecialistAdapter:
         provider = "fake"
         model_name = "stale-specialist"
@@ -176,6 +176,20 @@ def test_runtime_repairs_stale_specialist_call_in_general_mode(tmp_path: Path, p
             builtin=True,
         )
     )
+    registry.register(
+        ToolDefinition(
+            name="delegate_specialists",
+            description="automatic specialist delegation",
+            arguments_model=DelegateSpecialistsArguments,
+            handler=lambda args, _context: {
+                "tasks": [
+                    {"agent_id": item.agent_id, "answer": "5 月毛利率查询完成"}
+                    for item in args.tasks
+                ]
+            },
+            builtin=True,
+        )
+    )
     events = PostgresSessionEventStore(postgres_dsn)
     runtime = AgentRuntime(
         router=ModelRouter(
@@ -190,19 +204,18 @@ def test_runtime_repairs_stale_specialist_call_in_general_mode(tmp_path: Path, p
         RuntimeAgentRequest(question="再查5月份的毛利率"),
         tenant_id="tenant-a",
         user_id="user-a",
-        allowed_tools={"delegate_subagent"},
+        allowed_tools={"delegate_subagent", "delegate_specialists"},
     )
 
     assert response.answer == "通用 Analyst 已完成查询"
-    assert response.tool_results[0].tool_name == "delegate_subagent"
-    assert response.tool_results[0].output["agent_id"] == "analyst"
+    assert response.tool_results[0].tool_name == "delegate_specialists"
     event_types = {
         event.event_type
         for event in events.list_events(
             session_id=response.session_id, tenant_id="tenant-a"
         )
     }
-    assert "delegation.mode_repaired" in event_types
+    assert "delegation.mode_repaired" not in event_types
     assert "model.tool_call_rejected" not in event_types
 
 

@@ -203,8 +203,7 @@
 @media(max-width:1000px){.agent-grid-core,.agent-grid-profit{grid-template-columns:repeat(2,minmax(0,1fr));max-width:none}}
 @media(max-width:760px){.agent-grid,.agent-grid-core,.agent-grid-profit{grid-template-columns:1fr}}
 .status-chip.disabled{background:#eef0ee;color:#7a8684}
-.analyst-mode-panel{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:22px}.analyst-mode-panel h2{margin:0 0 6px}.analyst-mode-panel>div>p{margin:0}.analyst-mode-panel form{display:flex;align-items:flex-end;gap:10px;min-width:430px}.analyst-mode-panel form label{flex:1}.section-sub{font-size:11px;font-weight:400;color:var(--muted);margin-left:8px}
-@media(max-width:760px){.analyst-mode-panel,.analyst-mode-panel form{display:block;min-width:0}.analyst-mode-panel form{margin-top:16px}.analyst-mode-panel button{margin-top:10px;width:100%}}
+.section-sub{font-size:11px;font-weight:400;color:var(--muted);margin-left:8px}
 .agent-icon{width:44px;height:44px;border-radius:12px;display:grid;place-items:center;flex-shrink:0;box-shadow:inset 0 1px 0 rgba(255,255,255,.55)}
 .agent-icon svg{width:22px;height:22px;display:block}
 .agent-icon-runtime{background:linear-gradient(145deg,#dff2eb,#c7e8dc);color:#0f6b5f}
@@ -556,9 +555,7 @@ td{padding:10px 12px}
 .row-actions{display:flex;gap:8px;justify-content:flex-end;white-space:nowrap}
 .table-wrap .access-danger{float:none}
 .muted{color:var(--muted);font-size:12px}
-.analyst-mode-panel,.context-window-panel,.model-config-panel{margin-bottom:16px}
-.analyst-mode-panel{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap}
-.analyst-mode-panel form{display:flex;gap:10px;align-items:flex-end}
+.context-window-panel,.model-config-panel{margin-bottom:16px}
 .memory-toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:14px}
 .memory-toolbar label{margin:0;min-width:140px}
 .knowledge-library-main .table-wrap{background:#fff;border:1px solid #ecece8;border-radius:12px;overflow:auto;min-height:0;box-shadow:none}
@@ -1004,7 +1001,6 @@ button:focus-visible,.nav-item:focus-visible,.text-button:focus-visible,.icon-bu
   .inline-bind{flex-wrap:wrap}
   .inline-bind .secondary{width:auto}
   .filter-input{width:100%}
-  .analyst-mode-panel form{width:100%;flex-direction:column;align-items:stretch}
   .chat-sessions-toggle{display:inline-flex}
   #page-agent-chat .chat-sidebar{display:none;position:absolute;z-index:12;inset:52px 12px auto 12px;max-height:min(52vh,420px);border:1px solid var(--line);border-radius:14px}
   #page-agent-chat.sessions-open .chat-sidebar{display:flex}

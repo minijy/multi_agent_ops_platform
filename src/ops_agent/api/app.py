@@ -49,11 +49,11 @@ from ..agent_skill_store import build_skill_markdown
 from ..runtime.skills import register_skill_tool
 from ..config import (
     Settings,
-    analyst_runtime_snapshot,
     context_window_snapshot,
     get_settings,
-    update_analyst_runtime,
+    intent_routing_snapshot,
     update_context_window,
+    update_intent_routing,
 )
 from ..domain import ApprovalRequest
 from ..infrastructure.platform_store import PlatformStore, create_platform_store
@@ -72,6 +72,7 @@ from ..runtime.domain import (
     AttachmentReference,
     AttachmentUploadRequest,
     ContextWindowUpdate,
+    IntentRoutingUpdate,
     ResumeAgentRequest,
     RuntimeAgentRequest,
     RuntimeAgentResponse,
@@ -130,10 +131,6 @@ from ..workflows.profit_report.query_tool import ProfitReportQueryTool
 
 LOGGER = logging.getLogger(__name__)
 ROLES = {"viewer", "operator", "approver", "admin"}
-
-
-class AnalystRuntimeUpdate(BaseModel):
-    mode: Literal["general", "specialized_parallel"]
 
 
 class AccessUserUpsert(BaseModel):
@@ -4090,7 +4087,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "max_tool_steps": settings.max_tool_steps,
                 "run_token_budget": settings.run_token_budget,
             },
-            "analyst_runtime": analyst_runtime_snapshot(settings),
+            "intent_routing": intent_routing_snapshot(settings),
             "context_window": context_window_snapshot(settings),
             "secrets": {"exposed": False},
         }
@@ -4121,9 +4118,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"context_window": snapshot}
 
-    @application.patch("/v1/configuration/analyst-runtime")
-    def patch_analyst_runtime(
-        payload: AnalystRuntimeUpdate,
+    @application.patch("/v1/configuration/intent-routing")
+    def patch_intent_routing(
+        payload: IntentRoutingUpdate,
         request: Request,
         x_api_key: str | None = Header(default=None),
         x_tenant_id: str | None = Header(default=None),
@@ -4139,7 +4136,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             {"admin"},
         )
         try:
-            snapshot = update_analyst_runtime(
+            snapshot = update_intent_routing(
                 request.app.state.settings,
                 payload.model_dump(),
             )
@@ -4149,12 +4146,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             tenant_id=principal.tenant_id,
             actor_id=principal.user_id,
             actor_role=principal.role,
-            action="analyst_runtime.mode_updated",
+            action="intent_routing.updated",
             resource_type="runtime_configuration",
-            resource_id="analyst-runtime",
+            resource_id="intent-routing",
             detail=snapshot,
         )
-        return {"analyst_runtime": snapshot}
+        return {"intent_routing": snapshot}
 
     @application.get("/v1/audit-events")
     def audit_events(

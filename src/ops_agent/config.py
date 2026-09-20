@@ -19,8 +19,8 @@ CONTEXT_WINDOW_API_TO_FIELD = {
     "tool_max_chars": "context_tool_max_chars",
 }
 
-ANALYST_RUNTIME_API_TO_FIELD = {
-    "mode": "analyst_mode",
+INTENT_ROUTING_API_TO_FIELD = {
+    "enabled": "intent_routing_enabled",
 }
 
 
@@ -99,8 +99,13 @@ class Settings(BaseSettings):
     subagent_worker_poll_seconds: float = Field(default=0.5, ge=0.05, le=30)
     subagent_max_attempts: int = Field(default=3, ge=1, le=20)
     subagent_worker_id: str = ""
-    analyst_mode: Literal["general", "specialized_parallel"] = "general"
-    analyst_parallel_limit: int = Field(default=3, ge=1, le=3)
+    intent_routing_enabled: bool = False
+    intent_routing_base_url: str = "http://127.0.0.1:8001/v1"
+    intent_routing_api_key: str = ""
+    intent_routing_model: str = "qwen3-1.7b-intent-router"
+    intent_routing_timeout_seconds: float = Field(default=3.0, ge=0.2, le=30)
+    intent_routing_history_messages: int = Field(default=8, ge=0, le=32)
+    intent_routing_parallel_limit: int = Field(default=3, ge=1, le=3)
     memory_enabled: bool = True
     memory_semantic_backend: Literal["local", "pgvector", "qdrant"] = "local"
     memory_embedding_provider: Literal["hash", "sentence_transformers"] = "hash"
@@ -205,7 +210,7 @@ def apply_runtime_overrides(settings: Settings) -> Settings:
         return settings
     overridable = {
         *CONTEXT_WINDOW_API_TO_FIELD.values(),
-        *ANALYST_RUNTIME_API_TO_FIELD.values(),
+        *INTENT_ROUTING_API_TO_FIELD.values(),
     }
     updates = {field: payload[field] for field in overridable if field in payload}
     if not updates:
@@ -243,22 +248,24 @@ def update_context_window(settings: Settings, updates: dict[str, Any]) -> dict[s
     return context_window_snapshot(settings)
 
 
-def analyst_runtime_snapshot(settings: Settings) -> dict[str, Any]:
+def intent_routing_snapshot(settings: Settings) -> dict[str, Any]:
     return {
-        "mode": settings.analyst_mode,
-        "max_parallel": settings.analyst_parallel_limit,
+        "enabled": settings.intent_routing_enabled,
+        "configured": bool(settings.intent_routing_base_url.strip()),
+        "model": settings.intent_routing_model,
+        "strategy": ["hard_match", "small_model", "coordinator"],
     }
 
 
-def update_analyst_runtime(settings: Settings, updates: dict[str, Any]) -> dict[str, Any]:
+def update_intent_routing(settings: Settings, updates: dict[str, Any]) -> dict[str, Any]:
     mapped = {
-        ANALYST_RUNTIME_API_TO_FIELD[key]: value
+        INTENT_ROUTING_API_TO_FIELD[key]: value
         for key, value in updates.items()
-        if key in ANALYST_RUNTIME_API_TO_FIELD and value is not None
+        if key in INTENT_ROUTING_API_TO_FIELD and value is not None
     }
     if mapped:
         validated = Settings.model_validate({**settings.model_dump(), **mapped})
-        for field in ANALYST_RUNTIME_API_TO_FIELD.values():
+        for field in INTENT_ROUTING_API_TO_FIELD.values():
             setattr(settings, field, getattr(validated, field))
         path = settings.runtime_overrides_path
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -271,10 +278,10 @@ def update_analyst_runtime(settings: Settings, updates: dict[str, Any]) -> dict[
             except (OSError, json.JSONDecodeError):
                 existing = {}
         existing.update(
-            {field: getattr(settings, field) for field in ANALYST_RUNTIME_API_TO_FIELD.values()}
+            {field: getattr(settings, field) for field in INTENT_ROUTING_API_TO_FIELD.values()}
         )
         write_json_atomic(path, existing)
-    return analyst_runtime_snapshot(settings)
+    return intent_routing_snapshot(settings)
 
 
 @lru_cache(maxsize=1)

@@ -410,32 +410,21 @@ class SubagentManager:
             raise PermissionError(f"agent is disabled: {agent_id}")
         if not agent.accepts_delegation():
             raise PermissionError(f"agent is not delegatable: {agent_id}")
-        if self.settings.analyst_mode == "general" and agent_id != ANALYST_AGENT_ID:
-            raise PermissionError("specialist analysts are disabled in general mode")
-        if (
-            self.settings.analyst_mode == "specialized_parallel"
-            and agent_id not in SPECIALIST_ANALYST_IDS
-        ):
-            raise PermissionError(
-                "general analyst is disabled in specialized parallel mode"
-            )
         return agent
 
     def _enforce_parallel_limit(
         self, *, tenant_id: str, parent_session_id: str
     ) -> None:
-        if self.settings.analyst_mode != "specialized_parallel":
-            return
         active_statuses = {"queued", "running", "cancel_requested"}
         active = [
             task
             for task in self.store.list_tasks(tenant_id, parent_session_id)
             if task.status in active_statuses
         ]
-        if len(active) >= self.settings.analyst_parallel_limit:
+        if len(active) >= self.settings.intent_routing_parallel_limit:
             raise ValueError(
                 "specialist analyst parallel limit reached: "
-                f"{self.settings.analyst_parallel_limit}"
+                f"{self.settings.intent_routing_parallel_limit}"
             )
 
     def _resolved_tools(
@@ -879,9 +868,8 @@ def register_subagent_tool(
         ToolDefinition(
             name="delegate_subagent",
             description=(
-                "把任务委派给当前模式允许的分析决策核。通用模式使用 analyst；"
-                "专业模式使用 amazon-finance-analyst、profit-analyst 或 erp-analyst。"
-                "objective 写清要查什么；专业模式最多并行 3 个任务。"
+                "把单一领域任务委派给分析 Agent。明确属于 Amazon、利润或 ERP 时选择"
+                "对应专业 Agent；领域不明确时选择 analyst。objective 写清完整用户目标。"
             ),
             arguments_model=DelegateSubagentArguments,
             handler=delegate,
@@ -898,10 +886,6 @@ def register_subagent_tool(
         arguments: DelegateSpecialistsArguments,
         context: ToolExecutionContext,
     ):
-        if manager.settings.analyst_mode != "specialized_parallel":
-            raise PermissionError(
-                "delegate_specialists requires specialized parallel mode"
-            )
         timeout = arguments.timeout_seconds or min(
             manager.settings.subagent_default_timeout_seconds,
             170.0,
@@ -950,7 +934,7 @@ def register_subagent_tool(
         ToolDefinition(
             name="delegate_specialists",
             description=(
-                "专业模式下并行委派 1 到 3 个 Analyst，并等待全部结果。"
+                "跨多个独立业务领域时并行委派 1 到 3 个专业 Analyst，并等待全部结果。"
                 "每个任务选择 amazon-finance-analyst、profit-analyst 或 erp-analyst；"
                 "任务可以使用相同专业角色，但同领域统计应优先合并为一次查询。"
             ),

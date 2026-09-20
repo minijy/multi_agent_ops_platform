@@ -199,15 +199,10 @@ def resolve_agent_tool_allowlist(
                 "web_search",
             }
             requested -= DATA_QUERY_TOOL_NAMES
-            if settings.analyst_mode == "general":
-                requested.add("delegate_subagent")
-                requested.discard("delegate_specialists")
-            else:
-                # In specialist mode every delegation goes through the batch tool.
-                # This makes concurrency a Runtime guarantee instead of relying on
-                # the model to choose between two overlapping delegation tools.
-                requested.add("delegate_specialists")
-                requested.discard("delegate_subagent")
+            # Both delegation shapes stay visible. The intent layer selects a
+            # single specialist for one domain and a bounded batch for multiple
+            # independent domains; Coordinator is the fallback for ambiguity.
+            requested.update({"delegate_subagent", "delegate_specialists"})
         if agent.id == ANALYST_AGENT_ID or agent.id in SPECIALIST_ANALYST_IDS:
             requested.discard("delegate_subagent")
             requested -= {
@@ -235,57 +230,43 @@ def resolve_agent_tool_allowlist(
 
 def coordinator_delegation_prompt(
     registry: AgentRegistry | None,
-    analyst_mode: str = "general",
     allowed_data_tools: set[str] | frozenset[str] | None = None,
 ) -> str:
     lines = ["\n可委派的子 Agent："]
-    if analyst_mode == "specialized_parallel":
-        specialists = (
-            (AMAZON_FINANCE_ANALYST_ID, "Amazon 结算、费用、SKU 和结算批次"),
-            (PROFIT_ANALYST_ID, "订单利润、收入、成本和毛利"),
-            (ERP_ANALYST_ID, "金蝶销售、出库、应收和回款"),
-        )
-        available = [
-            (agent_id, description)
-            for agent_id, description in specialists
-            if registry is not None
-            and (agent := registry.get(agent_id)) is not None
-            and agent.enabled
-            and (
-                allowed_data_tools is None
-                or bool(
-                    (set(agent.allowed_tools) & DATA_QUERY_TOOL_NAMES)
-                    & set(allowed_data_tools)
-                )
-            )
-        ]
-        if not available:
-            lines.append("- 当前没有已启用的专业分析 Agent。")
-            return "\n".join(lines)
-        for agent_id, description in available:
-            lines.append(f"- {agent_id}：{description}。")
-        lines.append(
-            "- 所有数据分析任务只调用 delegate_specialists，一次性提交完整计划中的 "
-            "1–3 个任务，并行完成后统一返回；不要调用 delegate_subagent。"
-        )
-        lines.append(
-            "- delegate_specialists 会阻塞等待全部子任务结束。工具返回后必须立即根据 "
-            "tasks[].answer 汇总最终答案；禁止回复‘正在收集’、‘请稍等’或‘稍后反馈’，"
-            "也不能在没有实际结果时宣称任务已完成。"
-        )
-        lines.append(
-            "- 不要按月份、产品或分页把同一领域拆成多个任务；应合并为一个专业任务，"
-            "让查询工具通过时间范围和 group_by 完成统计。只有职责可独立时才拆分。"
-        )
-        return "\n".join(lines)
     analyst = registry.get(ANALYST_AGENT_ID) if registry is not None else None
     if analyst is not None and analyst.enabled:
         lines.append(
-            "- analyst：Amazon 结算、费用、SKU、利润报表、领星或金蝶查询；"
-            "agent_id 填 analyst，objective 写清用户目标。"
+            "- analyst：无法可靠归入单一专业领域的数据分析任务。"
         )
-    else:
-        lines.append("- 当前没有已启用的分析子 Agent。")
+    specialists = (
+        (AMAZON_FINANCE_ANALYST_ID, "Amazon 结算、费用、SKU 和结算批次"),
+        (PROFIT_ANALYST_ID, "订单利润、收入、成本和毛利"),
+        (ERP_ANALYST_ID, "金蝶销售、出库、应收和回款"),
+    )
+    available = [
+        (agent_id, description)
+        for agent_id, description in specialists
+        if registry is not None
+        and (agent := registry.get(agent_id)) is not None
+        and agent.enabled
+        and (
+            allowed_data_tools is None
+            or bool(
+                (set(agent.allowed_tools) & DATA_QUERY_TOOL_NAMES)
+                & set(allowed_data_tools)
+            )
+        )
+    ]
+    for agent_id, description in available:
+        lines.append(f"- {agent_id}：{description}。")
+    lines.extend(
+        [
+            "- 单一明确领域调用 delegate_subagent 并选择对应专业 Agent；"
+            "跨多个独立领域调用 delegate_specialists，一次提交 1–3 个任务。",
+            "- 无法可靠判断领域时委派 analyst。不要按月份、产品或分页拆分同一领域任务。",
+            "- 委派工具会阻塞等待结果；返回后立即汇总，禁止回复‘请稍等’或‘稍后反馈’。",
+        ]
+    )
     return "\n".join(lines)
 
 

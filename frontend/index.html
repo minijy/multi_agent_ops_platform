@@ -204,18 +204,7 @@
 
       <section class="page" id="page-agents">
         <div class="page-toolbar">
-          <p class="page-lead">协调助手拆任务，分析助手查数。凭证在连接器配置，工具绑定在工具页选择。查数步骤说明在「技能」页维护。</p>
-          <form id="analyst-mode-form" class="toolbar-form">
-            <label>委派策略
-              <span class="toolbar-field">
-                <select id="analyst-mode-select" name="mode">
-                  <option value="general">通用分析助手</option>
-                  <option value="specialized_parallel">并行专业分析（最多 3 个）</option>
-                </select>
-                <button type="submit" class="secondary small">保存</button>
-              </span>
-            </label>
-          </form>
+          <p class="page-lead">意图路由自动选择通用或专业分析助手；复杂或不确定请求进入协调助手。凭证在连接器配置，工具绑定在工具页选择。</p>
         </div>
         <div id="agent-sections"></div>
       </section>
@@ -619,6 +608,20 @@
             <button type="button" class="primary small" id="model-add-button">添加模型</button>
           </div>
           <div class="agent-grid" id="model-grid"></div>
+        </article>
+        <h2 class="section-title">意图路由</h2>
+        <article class="panel context-window-panel">
+          <div>
+            <h2>三级意图识别</h2>
+            <p>按“硬匹配 → Qwen 小模型 → Coordinator 大模型”路由。小模型异常或结果不合法时自动进入协调节点。</p>
+          </div>
+          <form id="intent-routing-form">
+            <label class="context-toggle"><input id="intent-routing-enabled" name="enabled" type="checkbox">启用意图识别</label>
+            <p class="form-hint" id="intent-routing-status">读取配置…</p>
+            <div class="modal-actions" style="justify-content:flex-start;margin-top:16px">
+              <button type="submit" class="primary">保存</button>
+            </div>
+          </form>
         </article>
         <h2 class="section-title">对话上下文</h2>
         <article class="panel context-window-panel">

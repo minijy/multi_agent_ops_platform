@@ -43,7 +43,7 @@ window.SellerForgeGuide = {
           heading: "系统实际怎么跑",
           items: [
             "协调助手（Coordinator）理解目标、拆子任务，自己不直接打专业数据库。",
-            "分析助手按委派策略查数：通用模式走一个通用分析助手；专业模式最多并行 3 个（Amazon / 利润 / ERP）。",
+            "三级意图路由先做硬匹配，再调用 Qwen 小模型；不确定或复杂请求进入 Coordinator。单领域自动选择专业助手，跨领域最多并行 3 个。",
             "没有权限的业务工具不会出现在对应分析助手上，提问时会得到中文原因和管理员建议。",
             "知识检索调用文枢；公开网页搜索调用 Tavily。内部制度和外部网页不要混为一谈。"
           ]
@@ -163,15 +163,15 @@ window.SellerForgeGuide = {
       audience: "所有角色（策略由管理员保存）",
       page: "agents",
       pageLabel: "打开助手",
-      summary: "协调助手负责拆任务，分析助手负责查数。专业模式下最多并行 3 个领域助手。",
-      intro: "不要让同一个助手既决策又打全部数据库。页面上的委派策略决定 Coordinator 如何找分析助手。",
+      summary: "意图路由自动选择分析助手，复杂请求由 Coordinator 拆解，跨领域最多并行 3 个。",
+      intro: "不再手动选择通用或专业模式。运行时根据问题和可见 Tool Schema 自动路由。",
       blocks: [
         {
-          heading: "两种委派策略",
+          heading: "自动委派策略",
           steps: [
-            {title: "通用分析助手", body: "适合口径简单、不必按业务线拆开的问题。Coordinator 把查数交给通用 Analyst。"},
-            {title: "并行专业分析", body: "按领域委派：Amazon 财务、利润、ERP（金蝶）。同一会话最多 3 个并行。专业助手有独立工具白名单，不能再委派，避免递归越权。"},
-            {title: "保存", body: "改完下拉框后点「保存」。未保存不会生效。"}
+            {title: "硬匹配", body: "对明确的 Amazon、利润或 ERP 查询直接委派对应专业助手。"},
+            {title: "小模型识别", body: "硬规则未命中时，由 Qwen 意图模型结合对话历史和动态 Tool Schema 判断。"},
+            {title: "Coordinator 回退", body: "小模型超时、输出非法或任务复杂时，自动进入 Coordinator 拆解和协调。"}
           ]
         },
         {

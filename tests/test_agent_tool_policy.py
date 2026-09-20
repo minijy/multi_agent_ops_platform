@@ -83,7 +83,6 @@ def test_coordinator_prompt_only_lists_accessible_specialists(tmp_path):
 
     prompt = coordinator_delegation_prompt(
         registry,
-        "specialized_parallel",
         {"kingdee_cloud_query"},
     )
 

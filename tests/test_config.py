@@ -2,7 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from ops_agent.config import Settings, apply_runtime_overrides, update_context_window
+from ops_agent.config import (
+    Settings,
+    apply_runtime_overrides,
+    update_context_window,
+    update_intent_routing,
+)
 
 
 def test_postgres_is_required_and_paths_are_absolute(tmp_path: Path, monkeypatch):
@@ -103,3 +108,22 @@ def test_context_window_overrides_roundtrip(tmp_path: Path):
     apply_runtime_overrides(reloaded)
     assert reloaded.context_keep_recent_user_turns == 4
     assert reloaded.context_max_messages == 20
+
+
+def test_intent_routing_override_roundtrip(tmp_path: Path):
+    settings = Settings(
+        _env_file=None,
+        runtime_overrides_path=tmp_path / "overrides.json",
+        intent_routing_enabled=False,
+    )
+    snapshot = update_intent_routing(settings, {"enabled": True})
+    assert snapshot["enabled"] is True
+    assert snapshot["strategy"] == ["hard_match", "small_model", "coordinator"]
+
+    reloaded = Settings(
+        _env_file=None,
+        runtime_overrides_path=tmp_path / "overrides.json",
+        intent_routing_enabled=False,
+    )
+    apply_runtime_overrides(reloaded)
+    assert reloaded.intent_routing_enabled is True

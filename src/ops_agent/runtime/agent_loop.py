@@ -28,6 +28,7 @@ from .memory import (
     memory_prompt,
 )
 from .model_errors import ModelProviderError
+from .intent_router import ThreeLayerIntentRouter, optional_arguments_are_grounded
 from .governance import RuntimeGovernanceStore
 from .observability import MetricsStore, TurnMetric, usage_from_events
 from .session_events import SessionEvent, SessionEventStore
@@ -180,6 +181,9 @@ class RuntimeState(TypedDict):
     explicit_memory_consent: bool
     explicit_memory_forget: bool
     memory_snapshot: list[dict[str, Any]]
+    intent_bypass: bool
+    intent_layer: str
+    intent_short_circuit: bool
 
 
 class AgentRuntime:
@@ -205,6 +209,7 @@ class AgentRuntime:
         result_store=None,
         memory_service: MemoryService | None = None,
         tool_catalog=None,
+        intent_router: ThreeLayerIntentRouter | None = None,
     ) -> None:
         self.router = router
         self.registry = registry
@@ -225,6 +230,7 @@ class AgentRuntime:
         self.result_store = result_store
         self.memory_service = memory_service
         self.tool_catalog = tool_catalog
+        self.intent_router = intent_router
         self.live_hub = SessionLiveHub()
         self.graph = self._build_graph()
 
@@ -284,7 +290,6 @@ class AgentRuntime:
                     )
             prompt += coordinator_delegation_prompt(
                 self.agent_registry,
-                self.settings.analyst_mode if self.settings is not None else "general",
                 principal_data_tools,
             )
         return prompt
@@ -481,7 +486,7 @@ class AgentRuntime:
                 and not arguments.get("run_in_background", False)
             ):
                 eligible.append((index, call))
-        if not eligible:
+        if len(eligible) < 2:
             return calls, 0, 0
 
         batches: list[ToolCall] = []
@@ -613,64 +618,6 @@ class AgentRuntime:
             normalized_calls.append(call.model_copy(update={"arguments": arguments}))
 
         return normalized_calls, normalized_objectives, merged_tasks
-
-    @staticmethod
-    def _repair_delegation_mode(
-        calls: list[ToolCall],
-        visible_tool_names: set[str],
-    ) -> tuple[list[ToolCall], int]:
-        """Translate stale specialist calls after a session switches to general mode."""
-        if (
-            "delegate_subagent" not in visible_tool_names
-            or "delegate_specialists" in visible_tool_names
-        ):
-            return calls, 0
-        repaired: list[ToolCall] = []
-        repaired_count = 0
-        for call in calls:
-            if call.name != "delegate_specialists":
-                repaired.append(call)
-                continue
-            tasks = call.arguments.get("tasks")
-            if not isinstance(tasks, list):
-                repaired.append(call)
-                continue
-            objectives = [
-                str(task.get("objective") or "").strip()
-                for task in tasks
-                if isinstance(task, dict)
-                and str(task.get("objective") or "").strip()
-            ]
-            if not objectives:
-                repaired.append(call)
-                continue
-            objective = (
-                objectives[0]
-                if len(objectives) == 1
-                else "请在一次分析中同时完成：\n"
-                + "\n".join(
-                    f"{index}. {item}"
-                    for index, item in enumerate(objectives, start=1)
-                )
-            )
-            arguments: dict[str, Any] = {
-                "agent_id": ANALYST_AGENT_ID,
-                "objective": objective[:4000],
-                "run_in_background": False,
-            }
-            for name in ("timeout_seconds", "token_budget"):
-                if call.arguments.get(name) is not None:
-                    arguments[name] = call.arguments[name]
-            repaired.append(
-                call.model_copy(
-                    update={
-                        "name": "delegate_subagent",
-                        "arguments": arguments,
-                    }
-                )
-            )
-            repaired_count += 1
-        return repaired, repaired_count
 
     @staticmethod
     def _merge_session_tool_snapshot(
@@ -1104,20 +1051,6 @@ class AgentRuntime:
                         "merged_tasks": merged_task_count,
                     },
                 )
-            calls, mode_repaired_count = self._repair_delegation_mode(
-                calls, visible_tool_names
-            )
-            if mode_repaired_count:
-                self._append_event(
-                    state,
-                    "delegation.mode_repaired",
-                    {
-                        "from_tool": "delegate_specialists",
-                        "to_tool": "delegate_subagent",
-                        "count": mode_repaired_count,
-                        "analyst_mode": "general",
-                    },
-                )
             calls, normalized_count, batch_count = (
                 self._normalize_specialist_delegations(calls, context)
             )
@@ -1150,7 +1083,7 @@ class AgentRuntime:
                     answer = (
                         "当前 Agent 无权调用模型请求的工具："
                         + "、".join(sorted(set(hidden_calls)))
-                        + "。请检查当前 Analyst 模式和权限组配置。"
+                        + "。请检查意图路由、Agent 状态和权限组配置。"
                     )
         if calls and state["tool_steps"] >= self.max_tool_steps:
             calls = []
@@ -1295,6 +1228,17 @@ class AgentRuntime:
                     ),
                 }
             )
+        intent_short_circuit = bool(state.get("intent_short_circuit"))
+        if intent_short_circuit and not waiting_approval:
+            if results and all(item.ok for item in results):
+                intent_answer = self._intent_result_answer(results)
+            else:
+                # A failed fast-path Tool must be visible to Coordinator so it
+                # can recover, clarify or explain instead of returning raw data.
+                intent_short_circuit = False
+                intent_answer = state["answer"]
+        else:
+            intent_answer = state["answer"]
         return {
             "messages": messages,
             "pending_calls": [],
@@ -1304,10 +1248,175 @@ class AgentRuntime:
             "pending_approval_ids": pending_approval_ids,
             "answer": (
                 "高风险工具正在等待逐次人工审批。"
-                if waiting_approval else state["answer"]
+                if waiting_approval else intent_answer
             ),
             "status": "waiting_approval" if waiting_approval else state["status"],
+            "intent_short_circuit": intent_short_circuit,
         }
+
+    @staticmethod
+    def _intent_result_answer(results: list[ToolResult]) -> str:
+        sections: list[str] = []
+        for result in results:
+            output = result.output
+            if result.tool_name == "delegate_subagent" and isinstance(output, dict):
+                answer = str(output.get("answer") or "").strip()
+                if answer:
+                    sections.append(answer)
+                    continue
+            if result.tool_name == "delegate_specialists" and isinstance(output, dict):
+                for task in output.get("tasks") or []:
+                    if not isinstance(task, dict):
+                        continue
+                    answer = str(task.get("answer") or "").strip()
+                    if answer:
+                        label = str(task.get("agent_id") or "分析 Agent")
+                        sections.append(f"### {label}\n{answer}")
+                continue
+            if isinstance(output, str) and output.strip():
+                sections.append(output.strip())
+            elif output is not None:
+                sections.append(json.dumps(output, ensure_ascii=False, default=str))
+        return sanitize_public_text("\n\n".join(sections).strip() or "任务已完成。")
+
+    @staticmethod
+    def _intent_history(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+        history: list[dict[str, str]] = []
+        user_indexes = [
+            index for index, message in enumerate(messages) if message.get("role") == "user"
+        ]
+        current_user = user_indexes[-1] if user_indexes else -1
+        for index, message in enumerate(messages):
+            role = str(message.get("role") or "")
+            if role not in {"user", "assistant"} or index == current_user:
+                continue
+            content = AgentRuntime._message_text(message).strip()
+            if content:
+                history.append({"role": role, "content": content[:4000]})
+        return history
+
+    def _intent_node(self, state: RuntimeState) -> dict[str, Any]:
+        if (
+            self.intent_router is None
+            or state.get("intent_bypass")
+            or state["agent_id"] != COORDINATOR_AGENT_ID
+            or "image" in state["required_modalities"]
+        ):
+            return {"intent_layer": "coordinator", "intent_short_circuit": False}
+        context = self._context(state)
+        schemas = self.registry.schemas(context)
+        query = next(
+            (
+                self._message_text(message).strip()
+                for message in reversed(state["messages"])
+                if message.get("role") == "user" and self._message_text(message).strip()
+            ),
+            "",
+        )
+        route = self.intent_router.route(
+            query=query,
+            history=self._intent_history(state["messages"]),
+            schemas=schemas,
+        )
+        self._append_event(
+            state,
+            "intent.routed",
+            {
+                "layer": route.layer,
+                "decision": route.decision,
+                "candidate_tool": route.candidate_tool,
+                "missing_slots": list(route.missing_slots),
+                "tools": [call.name for call in route.calls],
+                "reason": route.reason,
+                "latency_ms": round(route.latency_ms, 3),
+                "model": route.model,
+            },
+        )
+        if route.uses_coordinator:
+            return {"intent_layer": route.layer, "intent_short_circuit": False}
+        if route.decision == "clarify":
+            fields = "、".join(route.missing_slots)
+            answer = f"为了继续调用 {route.candidate_tool}，请补充：{fields}。"
+            self._append_event(
+                state,
+                "model.response",
+                {
+                    "provider": route.provider or "intent-router",
+                    "model": route.model or route.layer,
+                    "content": answer,
+                    "reasoning_content": "",
+                    "tool_calls": [],
+                    "usage": {},
+                },
+            )
+            return {
+                "answer": answer,
+                "provider": route.provider or "intent-router",
+                "model": route.model or route.layer,
+                "intent_layer": route.layer,
+                "intent_short_circuit": True,
+            }
+        calls = list(route.calls)
+        try:
+            for call in calls:
+                definition = self.registry.get(call.name, context)
+                definition.arguments_model.model_validate(call.arguments)
+                if not optional_arguments_are_grounded(
+                    call,
+                    schemas,
+                    "\n".join(
+                        [query]
+                        + [item["content"] for item in self._intent_history(state["messages"])]
+                    ),
+                ):
+                    raise ValueError(
+                        f"ungrounded optional argument in routed call: {call.name}"
+                    )
+        except Exception as exc:
+            self._append_event(
+                state,
+                "intent.rejected",
+                {"reason": f"invalid routed tool call: {type(exc).__name__}: {exc}"[:500]},
+            )
+            return {"intent_layer": "coordinator", "intent_short_circuit": False}
+        calls, _normalized, _merged = self._canonicalize_delegation_arguments(calls)
+        calls, _original, _batches = self._normalize_specialist_delegations(calls, context)
+        turn = ModelTurn(
+            provider=route.provider or "intent-router",
+            model=route.model or route.layer,
+            tool_calls=calls,
+        )
+        self._append_event(
+            state,
+            "model.response",
+            {
+                "provider": turn.provider,
+                "model": turn.model,
+                "content": "",
+                "reasoning_content": "",
+                "tool_calls": [item.model_dump(mode="json") for item in calls],
+                "usage": {},
+            },
+        )
+        short_circuit = bool(calls) and all(
+            call.name in {"delegate_subagent", "delegate_specialists"} for call in calls
+        )
+        return {
+            "messages": [*state["messages"], self._assistant_message(turn)],
+            "pending_calls": [item.model_dump(mode="json") for item in calls],
+            "provider": turn.provider,
+            "model": turn.model,
+            "intent_layer": route.layer,
+            "intent_short_circuit": short_circuit,
+        }
+
+    @staticmethod
+    def _route_after_intent(state: RuntimeState) -> Literal["model", "tools", "__end__"]:
+        if state["pending_calls"]:
+            return "tools"
+        if state.get("intent_short_circuit") and state.get("answer"):
+            return END
+        return "model"
 
     @staticmethod
     def _route_after_model(state: RuntimeState) -> Literal["tools", "__end__"]:
@@ -1315,13 +1424,15 @@ class AgentRuntime:
 
     @staticmethod
     def _route_after_tools(state: RuntimeState) -> Literal["model", "__end__"]:
-        return END if state["waiting_approval"] else "model"
+        return END if state["waiting_approval"] or state.get("intent_short_circuit") else "model"
 
     def _build_graph(self):
         graph = StateGraph(RuntimeState)
+        graph.add_node("intent", self._intent_node)
         graph.add_node("model", self._model_node)
         graph.add_node("tools", self._tools_node)
-        graph.add_edge(START, "model")
+        graph.add_edge(START, "intent")
+        graph.add_conditional_edges("intent", self._route_after_intent)
         graph.add_conditional_edges("model", self._route_after_model)
         graph.add_conditional_edges("tools", self._route_after_tools)
         return graph.compile()
@@ -2179,6 +2290,9 @@ class AgentRuntime:
                 and explicit_forget_requested(request.question)
             ),
             "memory_snapshot": memory_snapshot,
+            "intent_bypass": resume,
+            "intent_layer": "coordinator",
+            "intent_short_circuit": False,
         }
         if resume:
             state["messages"] = self._fill_missing_tool_results(
@@ -2498,6 +2612,9 @@ class AgentRuntime:
             "token_budget": 30_000,
             "tokens_used": 0,
             "status": "completed",
+            "intent_bypass": True,
+            "intent_layer": "coordinator",
+            "intent_short_circuit": False,
         }
         result = self.graph.invoke(
             state,

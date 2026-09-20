@@ -877,33 +877,31 @@ def test_context_window_configuration_roundtrip(tmp_path: Path, postgres_dsn):
         assert denied.status_code == 403
 
 
-def test_analyst_runtime_mode_configuration_roundtrip(tmp_path: Path, postgres_dsn):
+def test_intent_routing_configuration_roundtrip(tmp_path: Path, postgres_dsn):
     settings = _settings(
         tmp_path,
         postgres_dsn,
         runtime_overrides_path=tmp_path / "overrides.json",
     )
     with TestClient(create_app(settings)) as client:
-        initial = client.get("/v1/configuration").json()["analyst_runtime"]
-        assert initial == {"mode": "general", "max_parallel": 3}
+        initial = client.get("/v1/configuration").json()["intent_routing"]
+        assert initial["enabled"] is False
+        assert initial["strategy"] == ["hard_match", "small_model", "coordinator"]
 
         patched = client.patch(
-            "/v1/configuration/analyst-runtime",
-            json={"mode": "specialized_parallel"},
+            "/v1/configuration/intent-routing",
+            json={"enabled": True},
         )
         assert patched.status_code == 200
-        assert patched.json()["analyst_runtime"] == {
-            "mode": "specialized_parallel",
-            "max_parallel": 3,
-        }
-        assert settings.analyst_mode == "specialized_parallel"
+        assert patched.json()["intent_routing"]["enabled"] is True
+        assert settings.intent_routing_enabled is True
         saved = json.loads((tmp_path / "overrides.json").read_text(encoding="utf-8"))
-        assert saved["analyst_mode"] == "specialized_parallel"
+        assert saved["intent_routing_enabled"] is True
 
         denied = client.patch(
-            "/v1/configuration/analyst-runtime",
+            "/v1/configuration/intent-routing",
             headers={"X-User-Role": "viewer"},
-            json={"mode": "general"},
+            json={"enabled": False},
         )
         assert denied.status_code == 403
 
