@@ -41,7 +41,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--samples", type=int, default=512)
     parser.add_argument("--max-sequence-length", type=int, default=2048)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--scheme", choices=("W4A16", "W8A16"), default="W4A16")
+    parser.add_argument(
+        "--scheme",
+        choices=("W4A16", "W8A16", "FP8_DYNAMIC"),
+        default="W4A16",
+        help="FP8_DYNAMIC produces channel-wise FP8 weights with dynamic per-token FP8 activations",
+    )
     args = parser.parse_args()
     if args.samples < 1 or args.max_sequence_length < 128:
         parser.error("samples must be positive and max-sequence-length must be at least 128")
