@@ -537,6 +537,11 @@ class SubagentManager:
         }
         for name, values in requested_scope.items():
             normalized = set(str(item) for item in values)
+            # An empty scope is metadata saying that the parent has no explicit
+            # restriction for that dimension. It must not make an unrelated
+            # specialist fail visibility validation.
+            if not normalized:
+                continue
             if name not in maximum:
                 raise PermissionError(
                     f"subagent resource scope is not visible: {name}"
@@ -548,6 +553,47 @@ class SubagentManager:
                 )
             resolved[name] = sorted(normalized)
         return selected_ids, resolved
+
+    def _scope_for_allowed_tools(
+        self,
+        connection_ids: list[str],
+        resource_scope: dict[str, list[str]],
+        allowed_tools: list[str],
+        *,
+        tenant_id: str,
+    ) -> tuple[list[str], dict[str, list[str]]]:
+        """Reduce inherited connector authority to the child's actual tools."""
+        bindings = getattr(self.runtime, "tool_bindings", None)
+        connections = getattr(self.runtime, "connection_registry", None)
+        if bindings is None or connections is None:
+            return connection_ids, resource_scope
+        tool_ids, tool_scope = bindings.execution_scope(
+            tenant_id, set(allowed_tools), connections
+        )
+        if not tool_ids:
+            return [], {}
+        selected = sorted(set(connection_ids) & set(tool_ids))
+        if not selected:
+            raise PermissionError(
+                "subagent has no reachable connector for its allowed tools"
+            )
+        narrowed: dict[str, list[str]] = {}
+        for name, values in tool_scope.items():
+            permitted = {str(item) for item in values}
+            if not permitted:
+                continue
+            inherited = {
+                str(item) for item in resource_scope.get(name, values)
+            }
+            if "*" in inherited:
+                effective = permitted
+            elif "*" in permitted:
+                effective = inherited
+            else:
+                effective = inherited & permitted
+            if effective:
+                narrowed[name] = sorted(effective)
+        return selected, narrowed
 
     def submit(
         self,
@@ -589,6 +635,12 @@ class SubagentManager:
             connection_ids, resource_scope = self._resolved_connection_scope(
                 request.connection_ids,
                 request.resource_scope,
+                tenant_id=tenant_id,
+            )
+            connection_ids, resource_scope = self._scope_for_allowed_tools(
+                connection_ids,
+                resource_scope,
+                allowed_tools,
                 tenant_id=tenant_id,
             )
             memory_snapshot = list(request.memory_snapshot)

@@ -1,11 +1,24 @@
 # SellerForge
 
+SellerForge 是面向跨境电商和企业运营分析的多智能体数据平台。用户可以直接用自然语言查询销售、费用、利润、结算、应收与回款；Coordinator 负责拆解问题并调度专业 Analyst，数据库和业务 Tool 完成确定性查询与统计，模型只负责理解需求、解释指标和汇总结论。
+
+## 核心能力
+
+1. **自然语言智能问数**：将业务问题转换为受约束的结构化查询计划，支持按店铺、SKU、月份等维度汇总销售、费用与利润。聚合计算根据数据源和查询规模下沉到数据库或 Tool，模型不读取全量明细重新计算。
+2. **多 Agent 并行协作**：采用 Coordinator + Analyst 架构，可并行调度 Amazon 财务、利润和 ERP 等专业 Analyst，单批最多 3 个任务；支持后台排队、超时、中断、检查点恢复和失败状态追踪。并行发生在独立 Analyst 任务之间，单个 Runtime 内的普通 Tool Calls 仍按顺序执行。
+3. **权限与数据隔离**：以 tenant + user 作为会话和数据的双重隔离边界，结合角色、权限组、Agent Tool 白名单和 Connection 数据范围裁剪最终权限。模型只生成查询计划，不编写裸 SQL；SQL 由代码按指标白名单参数化构造，物理表名在模型上下文、事件流和最终回答中统一脱敏。
+4. **统一连接器体系**：接入 PostgreSQL、MySQL、领星、金蝶、钉钉、Qdrant 和 Milvus，支持同类型多实例、Tool 动态绑定连接、凭证分离存储与 API 脱敏，并提供节流、重试、熔断和健康状态。
+5. **结果与成本可控**：完整 Tool 结果写入 Result Store，前端通过 `result_ref` 分页查看；模型只接收统计摘要、数据质量、计算口径和少量预览。运行时通过历史 Tool 结果截断、上下文裁剪和单回合 Token 预算控制上下文规模与调用成本。
+6. **多模型、治理与可观测**：统一适配通义千问、DeepSeek、智谱 GLM 和 OpenAI-compatible 模型，Thinking 模式将推理过程与最终回答分通道流式输出。高风险操作进入人工审批，批准后从原任务续跑；会话事件、Tool 轨迹、Token、审计日志和 OpenTelemetry 指标支持全链路追踪。
+
+项目地址：[GitHub](https://github.com/minijy/multi_agent_ops_platform)
+
 > 完整的项目定位、总体架构、模块说明、部署流程与能力边界请参阅
 > [SellerForge 项目介绍](docs/PROJECT_INTRODUCTION.md)。
 > 代码级模块地图、启动装配、LangGraph 调用栈与存储分层见
 > [内部代码结构与流转分析](docs/INTERNAL_ARCHITECTURE.md)。
 
-面向生产化演进的 **Agent Runtime 平台**：通用 Function Calling 对话、工具审批、Subagent 外部队列、沙箱执行、可观测性，跨境电商 BI 查询 Agent（Amazon 结算、领星利润、金蝶云星空），以及 Coordinator 的知识库检索与公开网页搜索（Tavily）。项目提供商用控制台形态的 Dashboard、审批中心、Agent 对话、知识库、审计和设置页面。
+平台还提供通用 Function Calling 对话、沙箱执行、长期记忆、知识库检索与公开网页搜索，以及 Dashboard、审批中心、Agent 对话、知识库、审计和系统设置等管理页面。
 
 开发环境需要 PostgreSQL（可用 `docker compose -f docker-compose.postgres.yml up -d`）和页面配置的模型；`APP_ENV=production` 会强制 JWT 认证，并把子任务队列切到数据库。分析类 Agent 可连接 PostgreSQL 或 MySQL 分析库；虚构样本数据由脚本生成后导入，不随仓库分发。
 

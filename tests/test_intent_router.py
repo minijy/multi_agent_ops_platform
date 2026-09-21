@@ -6,9 +6,10 @@ import pytest
 
 from ops_agent.config import Settings
 from ops_agent.runtime.agent_loop import AgentRuntime
-from ops_agent.runtime.domain import RuntimeAgentRequest, ToolCall
+from ops_agent.runtime.domain import ModelTurn, RuntimeAgentRequest, ToolCall
 from ops_agent.runtime.intent_router import (
     HardIntentMatcher,
+    IntentRoute,
     SmallModelIntentClient,
     ThreeLayerIntentRouter,
     _validate_model_route,
@@ -266,6 +267,65 @@ class _MustNotInvokeCoordinator:
 
     def invoke(self, _messages, _tools, **_kwargs):
         raise AssertionError("hard-matched request must not invoke Coordinator")
+
+
+class _CapturingCoordinator:
+    provider = "fake"
+    model_name = "coordinator"
+    input_modalities = frozenset({"text"})
+
+    def __init__(self) -> None:
+        self.tools: list[dict] | None = None
+
+    def invoke(self, _messages, tools, **_kwargs):
+        self.tools = tools
+        return ModelTurn(
+            provider=self.provider,
+            model=self.model_name,
+            content="这是一个普通问答。",
+        )
+
+
+def test_direct_answer_hands_coordinator_no_tools(monkeypatch):
+    settings = Settings(_env_file=None, intent_routing_enabled=True)
+    tools = ToolRegistry()
+    tools.register(
+        ToolDefinition(
+            name="search_knowledge",
+            description="search documents",
+            arguments_model=DelegateSubagentArguments,
+            handler=lambda _args, _context: {"items": []},
+            builtin=True,
+        )
+    )
+    coordinator = _CapturingCoordinator()
+    intent_router = ThreeLayerIntentRouter(settings)
+    monkeypatch.setattr(
+        intent_router,
+        "route",
+        lambda **_kwargs: IntentRoute(
+            layer="small_model",
+            decision="direct_answer",
+            reason="ordinary question",
+        ),
+    )
+    runtime = AgentRuntime(
+        router=ModelRouter({"fake": coordinator}, default_model_id="fake"),
+        registry=tools,
+        executor=ToolExecutor(tools),
+        event_store=_MemoryEvents(),
+        settings=settings,
+        intent_router=intent_router,
+    )
+
+    response = runtime.run(
+        RuntimeAgentRequest(question="香港科技大学有哪些学院"),
+        tenant_id="tenant-a",
+        user_id="user-a",
+    )
+
+    assert response.answer == "这是一个普通问答。"
+    assert coordinator.tools == []
 
 
 def test_hard_match_short_circuits_coordinator_and_returns_subagent_answer():

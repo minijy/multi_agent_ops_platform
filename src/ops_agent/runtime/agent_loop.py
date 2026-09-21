@@ -181,8 +181,10 @@ class RuntimeState(TypedDict):
     explicit_memory_consent: bool
     explicit_memory_forget: bool
     memory_snapshot: list[dict[str, Any]]
+    delegated_data_tools: list[str]
     intent_bypass: bool
     intent_layer: str
+    intent_decision: str | None
     intent_short_circuit: bool
 
 
@@ -250,6 +252,30 @@ class AgentRuntime:
             self.agent_registry, self.settings, self.connection_registry
         )
 
+    def _principal_data_tools(
+        self,
+        tenant_id: str,
+        user_id: str,
+        role: str,
+    ) -> set[str]:
+        """Data tools a Coordinator may safely make reachable to specialists."""
+        if self.agent_registry is None or self.settings is None:
+            return set()
+        available = set(
+            active_data_query_tools(
+                self.agent_registry,
+                self.settings,
+                self.connection_registry,
+                tenant_id,
+                getattr(self, "tool_catalog", None),
+            )
+        )
+        if self.access_control is not None:
+            access = self.access_control.effective_access(tenant_id, user_id, role)
+            if access.allowed_tools is not None:
+                available &= set(access.allowed_tools)
+        return available
+
     def _default_prompt_for(self, agent_id: str) -> str:
         prompts = {
             ANALYST_AGENT_ID: ANALYST_SYSTEM_PROMPT,
@@ -279,15 +305,11 @@ class AgentRuntime:
                 self._active_data_tools_for_prompt(allowed_tools)
             )
         else:
-            principal_data_tools = None
-            if self.access_control is not None and tenant_id and user_id:
-                access = self.access_control.effective_access(
-                    tenant_id, user_id, role
-                )
-                if access.allowed_tools is not None:
-                    principal_data_tools = (
-                        set(access.allowed_tools) & DATA_QUERY_TOOL_NAMES
-                    )
+            principal_data_tools = (
+                self._principal_data_tools(tenant_id, user_id, role or "operator")
+                if tenant_id and user_id
+                else set()
+            )
             prompt += coordinator_delegation_prompt(
                 self.agent_registry,
                 principal_data_tools,
@@ -940,7 +962,16 @@ class AgentRuntime:
     def _model_node(self, state: RuntimeState) -> dict[str, Any]:
         self._check_control(state)
         context = self._context(state)
-        schemas = self.registry.schemas(context)
+        # ``direct_answer`` deliberately hands natural-language generation to
+        # Coordinator, but must not hand it the tool catalogue. Otherwise the
+        # larger model can override the intent decision by selecting a tool
+        # (for example, search_knowledge) on its own. ``abstain`` still exposes
+        # tools because it explicitly delegates uncertain/complex planning.
+        schemas = (
+            []
+            if state.get("intent_decision") == "direct_answer"
+            else self.registry.schemas(context)
+        )
         route = self.router.route(
             model_id=state["model_id"],
             required_modalities=state["required_modalities"],
@@ -1302,7 +1333,11 @@ class AgentRuntime:
             or state["agent_id"] != COORDINATOR_AGENT_ID
             or "image" in state["required_modalities"]
         ):
-            return {"intent_layer": "coordinator", "intent_short_circuit": False}
+            return {
+                "intent_layer": "coordinator",
+                "intent_decision": None,
+                "intent_short_circuit": False,
+            }
         context = self._context(state)
         schemas = self.registry.schemas(context)
         query = next(
@@ -1335,7 +1370,11 @@ class AgentRuntime:
             },
         )
         if route.uses_coordinator:
-            return {"intent_layer": route.layer, "intent_short_circuit": False}
+            return {
+                "intent_layer": route.layer,
+                "intent_decision": route.decision,
+                "intent_short_circuit": False,
+            }
         if route.decision == "clarify":
             fields = "、".join(route.missing_slots)
             answer = f"为了继续调用 {route.candidate_tool}，请补充：{fields}。"
@@ -1356,6 +1395,7 @@ class AgentRuntime:
                 "provider": route.provider or "intent-router",
                 "model": route.model or route.layer,
                 "intent_layer": route.layer,
+                "intent_decision": route.decision,
                 "intent_short_circuit": True,
             }
         calls = list(route.calls)
@@ -1380,7 +1420,11 @@ class AgentRuntime:
                 "intent.rejected",
                 {"reason": f"invalid routed tool call: {type(exc).__name__}: {exc}"[:500]},
             )
-            return {"intent_layer": "coordinator", "intent_short_circuit": False}
+            return {
+                "intent_layer": "coordinator",
+                "intent_decision": None,
+                "intent_short_circuit": False,
+            }
         calls, _normalized, _merged = self._canonicalize_delegation_arguments(calls)
         calls, _original, _batches = self._normalize_specialist_delegations(calls, context)
         turn = ModelTurn(
@@ -1409,6 +1453,7 @@ class AgentRuntime:
             "provider": turn.provider,
             "model": turn.model,
             "intent_layer": route.layer,
+            "intent_decision": route.decision,
             "intent_short_circuit": short_circuit,
         }
 
@@ -2067,9 +2112,20 @@ class AgentRuntime:
                 allowed_tools = self._merge_session_tool_snapshot(
                     allowed_tools, snapshotted_tools
                 )
+        delegated_data_tools = self._principal_data_tools(
+            tenant_id, user_id, role
+        )
+        if created and "delegated_data_tools" in created.payload:
+            delegated_data_tools &= {
+                str(item)
+                for item in created.payload.get("delegated_data_tools") or []
+            }
+        connection_scope_tools = allowed_tools
+        if agent_id == COORDINATOR_AGENT_ID:
+            connection_scope_tools = set(allowed_tools or set()) | delegated_data_tools
         connection_ids, resource_scope = self._connection_scope_for_session(
             tenant_id=tenant_id,
-            allowed_tools=allowed_tools,
+            allowed_tools=connection_scope_tools,
             parent_session_id=parent_session_id,
             created=created,
             requested_ids=connection_ids,
@@ -2121,6 +2177,7 @@ class AgentRuntime:
                     "allowed_tools": (
                         sorted(allowed_tools) if allowed_tools is not None else None
                     ),
+                    "delegated_data_tools": sorted(delegated_data_tools),
                     "connection_ids": connection_ids,
                     "resource_scope": resource_scope,
                     "token_budget": token_budget,
@@ -2292,8 +2349,10 @@ class AgentRuntime:
                 and explicit_forget_requested(request.question)
             ),
             "memory_snapshot": memory_snapshot,
+            "delegated_data_tools": sorted(delegated_data_tools),
             "intent_bypass": resume,
             "intent_layer": "coordinator",
+            "intent_decision": None,
             "intent_short_circuit": False,
         }
         if resume:
@@ -2614,8 +2673,10 @@ class AgentRuntime:
             "token_budget": 30_000,
             "tokens_used": 0,
             "status": "completed",
+            "delegated_data_tools": [],
             "intent_bypass": True,
             "intent_layer": "coordinator",
+            "intent_decision": None,
             "intent_short_circuit": False,
         }
         result = self.graph.invoke(

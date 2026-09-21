@@ -2,14 +2,24 @@
 
 ## 1. 项目概述
 
-SellerForge 是一套面向企业数据分析和运营协作场景的 Multi-Agent 平台。
-它将大模型、专业 Agent、业务 Tool、外部系统连接器、权限治理、知识库和长期记忆
-整合到同一个可视化运行平台中，用户可以以自然语言提交复杂任务，由系统完成拆解、并行执行、
-数据查询、统计计算、结果汇总和受控的外部操作。
+SellerForge 是一套面向跨境电商和企业运营分析的 Multi-Agent 数据平台。用户可以直接用自然语言
+查询销售、费用、利润、结算、应收与回款；Coordinator 负责理解目标、拆解任务和调度专业 Analyst，
+数据库与业务 Tool 负责确定性查询和统计，模型负责解释指标、识别异常并汇总结论。
 
 项目不是单一聊天页面，而是一个具备身份、权限、数据边界、审批、审计、记忆与可观测能力的
 Agent Runtime 控制面。源码模块、启动装配和主调用栈的详细拆解见
 [INTERNAL_ARCHITECTURE.md](INTERNAL_ARCHITECTURE.md)。
+
+项目地址：[https://github.com/minijy/multi_agent_ops_platform](https://github.com/minijy/multi_agent_ops_platform)
+
+### 核心能力摘要
+
+1. **自然语言智能问数**：将业务问题转换为受约束的结构化查询计划，按店铺、SKU、月份等维度汇总销售、费用和利润；聚合计算根据数据源和查询规模下沉到数据库或 Tool，模型只负责理解与解释。
+2. **多 Agent 并行协作**：Coordinator 可并行调度 Amazon 财务、利润和 ERP 等专业 Analyst，单批最多 3 个任务，并提供排队、超时、中断、检查点恢复和失败追踪。并行边界是独立 Analyst 任务，单个 Runtime 内的普通 Tool Calls 仍顺序执行。
+3. **权限与数据隔离**：通过 tenant + user、角色与权限组、Agent Tool 白名单、Connection 数据范围形成多层权限交集。模型不编写裸 SQL，代码按指标白名单生成参数化查询；物理表名在模型上下文、流式事件和最终回答中统一脱敏。
+4. **统一连接器体系**：接入 PostgreSQL、MySQL、领星、金蝶、钉钉、Qdrant 和 Milvus，支持同类型多实例、Tool 动态绑定、凭证分离存储与脱敏，并提供节流、重试、熔断和健康状态。
+5. **结果与成本可控**：完整结果写入 Result Store 并通过 `result_ref` 分页读取，模型只接收统计摘要、数据质量、计算口径和少量预览；通过历史 Tool 结果截断、上下文裁剪和单回合 Token 预算避免上下文膨胀。
+6. **多模型、治理与可观测**：统一适配通义千问、DeepSeek、智谱 GLM 和 OpenAI-compatible 模型，Thinking 模式将推理与回答分通道流式输出。高风险操作经人工审批后从原任务续跑，会话事件、Tool 轨迹、Token、审计日志和 OpenTelemetry 指标支持全链路追踪。
 
 ## 2. 项目目标
 

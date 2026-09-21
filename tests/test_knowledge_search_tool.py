@@ -1,6 +1,8 @@
 from ops_agent.agent_registry import create_agent_registry
 from ops_agent.config import Settings
-from ops_agent.knowledge_gateway import KnowledgeGateway
+import pytest
+
+from ops_agent.knowledge_gateway import KnowledgeGateway, KnowledgeGatewayError
 from ops_agent.runtime.agent_tool_policy import resolve_agent_tool_allowlist
 from ops_agent.runtime.knowledge_search_tool import register_search_knowledge_tool
 from ops_agent.runtime.tools import ToolDefinition, ToolExecutionContext, ToolRegistry
@@ -48,6 +50,11 @@ class _FakeGateway(KnowledgeGateway):
         }
 
 
+class _FailingGateway(_FakeGateway):
+    def search_space(self, tenant_id, space_id, *, query, top_k=5, category_ids=None):
+        raise KnowledgeGatewayError(503, "backend offline")
+
+
 def test_search_knowledge_returns_tenant_filtered_citations():
     gateway = _FakeGateway()
     registry = ToolRegistry()
@@ -88,6 +95,18 @@ def test_search_knowledge_unconfigured():
     )
     assert result["configured"] is False
     assert result["items"] == []
+
+
+def test_search_knowledge_raises_when_every_backend_search_fails():
+    registry = ToolRegistry()
+    register_search_knowledge_tool(registry, _FailingGateway())
+    definition = registry.get("search_knowledge")
+
+    with pytest.raises(KnowledgeGatewayError, match="知识检索失败"):
+        definition.handler(
+            definition.arguments_model.model_validate({"query": "制度"}),
+            _context(),
+        )
 
 
 def test_graphrag_gateway_uses_unified_retrieval_and_normalizes_evidence(monkeypatch):
@@ -197,7 +216,10 @@ def test_coordinator_allowlist_includes_search_knowledge(tmp_path):
     assert "寒暄" in definition.description
     assert "VAT" in definition.description
     assert "独立完整" in definition.description
-    assert "系统不会预先检索知识库" in agents.runtime_config().system_prompt
+    assert (
+        "通用百科：直接回答，不要调用 search_knowledge"
+        in agents.runtime_config().system_prompt
+    )
     assert "即使问「是什么意思」" in agents.runtime_config().system_prompt
     analyst = resolve_agent_tool_allowlist(
         agents.analyst_config(), agents, settings, registry

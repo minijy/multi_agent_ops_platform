@@ -206,6 +206,8 @@ class ToolBindingRegistry:
             for name, values in self.selected_resource_scopes(
                 tenant_id, tool_name, connections
             ).items():
+                if not values:
+                    continue
                 scopes.setdefault(name, set()).update(values)
         return sorted(selected_ids), {
             name: sorted(values) for name, values in scopes.items()

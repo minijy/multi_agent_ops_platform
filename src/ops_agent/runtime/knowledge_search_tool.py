@@ -123,7 +123,13 @@ def register_search_knowledge_tool(
         selected = hits[: arguments.top_k]
         summary = _summary(selected)
         if errors and not selected:
-            summary = "知识检索失败：" + "；".join(errors[:3])
+            # Raising lets ToolExecutor mark the ToolResult itself as failed.
+            # Returning {"ok": false} would still be wrapped as a successful
+            # execution and mislead both Coordinator and the event timeline.
+            raise KnowledgeGatewayError(
+                503,
+                "知识检索失败：" + "；".join(errors[:3]),
+            )
         return {
             "ok": True,
             "configured": True,

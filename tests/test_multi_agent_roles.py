@@ -240,6 +240,7 @@ def test_automatic_routing_allows_general_and_limits_parallel_tasks(tmp_path, po
         agent_registry=agent_registry,
         connection_registry=connections,
     )
+
     manager = SubagentManager(
         runtime=runtime,
         registry=tools,
@@ -727,6 +728,15 @@ def test_subagent_rejects_foreign_connection_and_widened_resource_scope(tmp_path
         agent_registry=agent_registry,
         connection_registry=connections,
     )
+
+    class _Bindings:
+        @staticmethod
+        def execution_scope(tenant_id, tool_names, _connections):
+            assert tenant_id == "tenant-a"
+            assert "amazon_finance_query" in tool_names
+            return [own.id], {"store_names": ["store-a"]}
+
+    runtime.tool_bindings = _Bindings()
     manager = SubagentManager(
         runtime=runtime,
         registry=tools,
@@ -763,7 +773,10 @@ def test_subagent_rejects_foreign_connection_and_widened_resource_scope(tmp_path
                 objective="查询",
                 parent_session_id="parent",
                 connection_ids=[own.id],
-                resource_scope={"store_names": ["store-a"]},
+                resource_scope={
+                    "store_names": ["store-a"],
+                    "marketplace_ids": [],
+                },
             ),
             tenant_id="tenant-a",
             user_id="user-a",
